@@ -19,9 +19,11 @@ const sendBtn        = document.getElementById('send-btn');
 const statusBar      = document.getElementById('status-bar');
 const configForm     = document.getElementById('config-form');
 const configProvider = document.getElementById('config-provider');
+const rowConfigUrl   = document.getElementById('row-config-url');
 const configUrl      = document.getElementById('config-url');
 const configModel    = document.getElementById('config-model');
 const configKey      = document.getElementById('config-key');
+const labelConfigKey = document.getElementById('label-config-key');
 const sessionSelect  = document.getElementById('session-select');
 const sessionActions = document.getElementById('session-actions');
 
@@ -29,11 +31,76 @@ let agent = null;
 let isProcessing = false;
 let activeSessionId = 'default';
 
-// ── Config Persistence ──────────────────────────────────────────────
+// ── Config & Prompt API Setup ───────────────────────────────────────
 
-function loadConfig() { try { return JSON.parse(localStorage.getItem('sql-agent-config') || '{}'); } catch { return {}; } }
-function saveConfig(c) { localStorage.setItem('sql-agent-config', JSON.stringify(c)); }
-function populateConfigForm() { const c = loadConfig(); if(c.provider) configProvider.value=c.provider; if(c.url) configUrl.value=c.url; if(c.model) configModel.value=c.model; if(c.apiKey) configKey.value=c.apiKey; }
+export function setupPromptApiBackend(config = {}) {
+  const saved = loadConfig();
+  const provider = config.provider || saved.provider || 'openai';
+  const url = config.url ?? saved.url ?? (provider === 'openai' ? 'http://localhost:11434/v1' : '');
+  const model = config.model || saved.model || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2');
+  const apiKey = config.apiKey ?? saved.apiKey ?? '';
+
+  // Clean previous configs
+  delete window.OPENAI_CONFIG;
+  delete window.GEMINI_CONFIG;
+
+  if (provider === 'gemini') {
+    window.GEMINI_CONFIG = {
+      apiKey: apiKey,
+      modelName: model || 'gemini-2.5-flash',
+    };
+    return window.GEMINI_CONFIG;
+  } else {
+    // 'openai' / custom compatible (Ollama, LM Studio, OpenRouter, OpenAI)
+    window.OPENAI_CONFIG = {
+      baseURL: url || 'http://localhost:11434/v1',
+      modelName: model || 'llama3.2',
+      apiKey: apiKey || 'dummy',
+    };
+    return window.OPENAI_CONFIG;
+  }
+}
+
+function loadConfig() {
+  try {
+    return JSON.parse(localStorage.getItem('sql-agent-config') || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function saveConfig(c) {
+  localStorage.setItem('sql-agent-config', JSON.stringify(c));
+}
+
+function updateConfigVisibility(provider) {
+  const isGemini = provider === 'gemini';
+  if (rowConfigUrl) {
+    rowConfigUrl.style.display = isGemini ? 'none' : 'flex';
+  }
+  if (labelConfigKey) {
+    labelConfigKey.innerHTML = isGemini
+      ? 'API Key <span class="required">(required for Gemini API)</span>'
+      : 'API Key <span class="optional">(optional for local Ollama/LM Studio)</span>';
+  }
+  if (isGemini) {
+    configModel.placeholder = 'gemini-2.5-flash';
+    configKey.placeholder = 'AIza...';
+  } else {
+    configUrl.placeholder = 'http://localhost:11434/v1';
+    configModel.placeholder = 'llama3.2';
+    configKey.placeholder = 'AIza... or sk-...';
+  }
+}
+
+function populateConfigForm() {
+  const c = loadConfig();
+  if (c.provider) configProvider.value = c.provider;
+  if (c.url !== undefined) configUrl.value = c.url;
+  if (c.model !== undefined) configModel.value = c.model;
+  if (c.apiKey !== undefined) configKey.value = c.apiKey;
+  updateConfigVisibility(configProvider.value);
+}
 
 // ── Session Management ──────────────────────────────────────────────
 
@@ -177,23 +244,42 @@ function setLoading(on) {
 
 async function bootAgent() {
   const cfg = loadConfig();
+  const provider = cfg.provider || 'openai';
+  const url = cfg.url || (provider === 'openai' ? 'http://localhost:11434/v1' : '');
+  const model = cfg.model || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2');
+  const apiKey = cfg.apiKey || '';
+
+  setupPromptApiBackend({ provider, url, model, apiKey });
+
   try {
     statusBar.textContent = 'Initializing wa-sqlite JSPI…';
+    statusBar.style.color = '#8b949e';
+
     agent = await bootSqliteAgent({
       dbName: 'agent_brain.sqlite3',
-      llmUrl: cfg.url || '',
-      llmModel: cfg.model || 'gemini-2.5-flash',
-      llmApiKey: cfg.apiKey || '',
-      llmProvider: cfg.provider || 'openai',
+      llmUrl: url,
+      llmModel: model,
+      llmApiKey: apiKey,
+      llmProvider: provider,
     });
 
     // Set active session
     activeSessionId = 'default';
     await setActiveSession(agent.sqlite3, agent.db, activeSessionId);
 
-    const label = cfg.url ? `● Ready — ${cfg.provider} at ${cfg.url}` : '○ Ready — configure LLM to start';
-    statusBar.textContent = label;
-    statusBar.style.color = cfg.url ? '#3fb950' : '#8b949e';
+    if (provider === 'gemini') {
+      if (apiKey) {
+        statusBar.textContent = `● Ready — Google Gemini (${model})`;
+        statusBar.style.color = '#3fb950';
+      } else {
+        statusBar.textContent = `○ Ready — Google Gemini (${model}) [API key needed]`;
+        statusBar.style.color = '#d29922';
+      }
+    } else {
+      statusBar.textContent = `● Ready — OpenAI Compatible at ${url} (${model})`;
+      statusBar.style.color = '#3fb950';
+    }
+
     inputEl.disabled = false;
     sendBtn.disabled = false;
 
@@ -241,14 +327,21 @@ async function sendMessage(text) {
 
 formEl.addEventListener('submit', e => { e.preventDefault(); sendMessage(inputEl.value); });
 
+configProvider.addEventListener('change', () => {
+  updateConfigVisibility(configProvider.value);
+});
+
 configForm.addEventListener('submit', e => {
   e.preventDefault();
-  saveConfig({
-    provider: configProvider.value,
-    url: configUrl.value.trim(),
-    model: configModel.value.trim(),
+  const provider = configProvider.value;
+  const config = {
+    provider,
+    url: provider === 'openai' ? (configUrl.value.trim() || 'http://localhost:11434/v1') : '',
+    model: configModel.value.trim() || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2'),
     apiKey: configKey.value.trim(),
-  });
+  };
+  saveConfig(config);
+  setupPromptApiBackend(config);
   document.getElementById('config-details').open = false;
   bootAgent();
 });

@@ -25,21 +25,22 @@
           <div class="config-row">
             <label for="config-provider">Provider</label>
             <select id="config-provider">
-              <option value="openai">OpenAI Compatible (Ollama, LM Studio)</option>
+              <option value="openai">OpenAI Compatible (Ollama, LM Studio, Local, OpenRouter)</option>
               <option value="gemini">Google Gemini API</option>
             </select>
           </div>
-          <div class="config-row">
-            <label for="config-url">Endpoint URL</label>
-            <input type="text" id="config-url" placeholder="http://localhost:11434/api/chat" />
+          <div class="config-row" id="row-config-url">
+            <label for="config-url">Base URL / Endpoint</label>
+            <input type="text" id="config-url" placeholder="http://localhost:11434/v1" />
+            <small class="hint">Ollama: http://localhost:11434/v1 &middot; LM Studio: http://localhost:1234/v1</small>
           </div>
           <div class="config-row">
-            <label for="config-model">Model</label>
-            <input type="text" id="config-model" placeholder="llama3" value="gemini-2.5-flash" />
+            <label for="config-model">Model Name</label>
+            <input type="text" id="config-model" placeholder="llama3.2 or gemini-2.5-flash" />
           </div>
           <div class="config-row">
-            <label for="config-key">API Key <span class="optional">(optional for local)</span></label>
-            <input type="password" id="config-key" placeholder="sk-... or AIza..." />
+            <label for="config-key" id="label-config-key">API Key <span class="optional">(optional for local Ollama/LM Studio)</span></label>
+            <input type="password" id="config-key" placeholder="AIza... or sk-..." />
           </div>
           <button type="submit" id="config-apply">Apply &amp; Reboot Agent</button>
         </form>
