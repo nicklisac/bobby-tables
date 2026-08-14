@@ -6,10 +6,11 @@
  *
  * Session-aware: triggers are scoped per-session via `NEW.session_id`.
  * Token tracking: ask_llm returns prompt_tokens + completion_tokens.
+ *
+ * LLM transport: raw fetch() to OpenAI-compatible or Gemini endpoints.
+ * Structured output enforced via system prompt + JSON parsing.
  */
 
-import 'prompt-api-polyfill';
-import { LanguageModel } from 'prompt-api-polyfill';
 import ModuleFactory from '../vendor/wa-sqlite-jspi/wa-sqlite-jspi.mjs';
 import { Factory } from '../vendor/wa-sqlite-jspi/sqlite-api.js';
 import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_ROW } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
@@ -17,96 +18,48 @@ import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
 import { SCHEMA_SQL } from './schema.js';
 
-export const AGENT_RESPONSE_SCHEMA = {
-  type: 'object',
-  properties: {
-    content: { type: 'string', description: 'Response text to the user' },
-    tool_calls: {
-      type: 'array',
-      description: 'Tools to execute, or null/empty if answering directly',
-      items: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', enum: ['execute_sql', 'search_web', 'fetch_url'] },
-          arguments: { type: 'object' }
-        },
-        required: ['name', 'arguments']
-      }
-    }
-  },
-  required: ['content']
-};
-
-export function setupPromptApiBackend(config = {}) {
-  const {
-    provider = 'openai',
-    url = '',
-    model = '',
-    apiKey = ''
-  } = config;
-
-  // Clean previous configs on window
-  delete window.OPENAI_CONFIG;
-  delete window.GEMINI_CONFIG;
-  delete window.FIREBASE_CONFIG;
-  delete window.TRANSFORMERS_CONFIG;
-  delete window.WEBLLM_CONFIG;
-
-  if (provider === 'gemini') {
-    window.GEMINI_CONFIG = {
-      apiKey: apiKey || '',
-      modelName: model || 'gemini-2.5-flash',
-    };
-  } else {
-    // 'openai' / custom compatible (Ollama, LM Studio, OpenRouter, OpenAI)
-    window.OPENAI_CONFIG = {
-      baseURL: url || 'http://localhost:11434/v1',
-      modelName: model || 'llama3.2',
-      apiKey: apiKey || 'dummy',
-    };
-  }
-}
-
+/**
+ * Build the system prompt with tool definitions and structured output instructions.
+ */
 export function buildSystemPrompt(tools = [], basePrompt = '') {
-  let prompt = basePrompt || (
-    'You are an autonomous SQL-driven data analyst agent. You have access to a SQLite database and external tools.\n' +
-    'Always write correct, safe, read-only SQL. Think step by step.\n' +
-    'When you need to query the database, search the web, or fetch a web page, invoke the corresponding tool via tool_calls.\n' +
-    'When you have the final answer, provide the response in the content field and set tool_calls to null or empty.'
-  );
+  let prompt = basePrompt ||
+    'You are an autonomous SQL-driven data analyst agent. You have access to a SQLite database and can execute SELECT queries to analyze data. ' +
+    'Always write correct, safe, read-only SQL. Think step by step. ' +
+    'If the user asks something you cannot answer with available data, say so honestly.';
 
   if (tools && tools.length > 0) {
-    prompt += '\n\n# AVAILABLE TOOLS:';
+    prompt += '\n\n# AVAILABLE TOOLS\n';
+    prompt += 'You can call tools by returning a JSON object with a "tool_calls" array.\n';
     for (const t of tools) {
-      const fn = t.function || t;
-      prompt += `\n\n- Tool Name: ${fn.name}\n  Description: ${fn.description || ''}\n  Parameters: ${JSON.stringify(fn.parameters || {})}`;
+      const schema = typeof t === 'string' ? JSON.parse(t) : t;
+      const fn = schema.function || schema;
+      prompt += `\n## ${fn.name}\n${fn.description || ''}\nParameters: ${JSON.stringify(fn.parameters || {})}\n`;
     }
-    prompt += '\n\nTo invoke a tool, return a tool_calls array with { "name": "<tool_name>", "arguments": { ... } }.\n' +
-              'If answering directly without tools, return an empty array or null for tool_calls.';
+    prompt += '\n\n# OUTPUT FORMAT\n';
+    prompt += 'Always respond with valid JSON in this exact format:\n';
+    prompt += '  {"content": "your response text here", "tool_calls": null}\n';
+    prompt += 'Or when calling a tool:\n';
+    prompt += '  {"content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "tool_name", "arguments": {"arg": "value"}}}]}\n';
+    prompt += '\nIMPORTANT: Your entire response must be valid JSON. Do not include markdown code fences or any text outside the JSON object.';
   }
 
   return prompt;
 }
 
-export function formatConversation(messages = []) {
-  const nonSystem = messages.filter(m => m.role !== 'system');
-  if (nonSystem.length === 0) return 'Hello.';
-
-  return nonSystem.map(m => {
-    if (m.role === 'user') {
-      return `User: ${m.content || ''}`;
-    } else if (m.role === 'assistant') {
-      let text = `Assistant: ${m.content || ''}`;
-      if (m.tool_calls) {
-        const callsStr = typeof m.tool_calls === 'string' ? m.tool_calls : JSON.stringify(m.tool_calls);
-        text += `\n[Tool Executed]: ${callsStr}`;
-      }
-      return text;
-    } else if (m.role === 'tool') {
-      return `[Tool Output (id: ${m.tool_call_id || 'result'})]:\n${m.content || ''}`;
+/**
+ * Format conversation history for the LLM API.
+ */
+export function formatMessages(messages = []) {
+  return messages.map(m => {
+    const msg = { role: m.role === 'tool' ? 'tool' : m.role, content: m.content || '' };
+    if (m.role === 'assistant' && m.tool_calls) {
+      msg.tool_calls = typeof m.tool_calls === 'string' ? JSON.parse(m.tool_calls) : m.tool_calls;
     }
-    return `${m.role}: ${m.content || ''}`;
-  }).join('\n\n') + '\n\nAssistant:';
+    if (m.role === 'tool' && m.tool_call_id) {
+      msg.tool_call_id = m.tool_call_id;
+    }
+    return msg;
+  });
 }
 
 export async function bootSqliteAgent(config = {}) {
@@ -125,8 +78,6 @@ export async function bootSqliteAgent(config = {}) {
   const sqlite3 = Factory(module);
 
   // 2. Mount VFS (IDB for persistence on main thread, MemoryVFS as fallback)
-  // OPFSAdaptiveVFS requires sync access handles which are Worker-only.
-  // IDBBatchAtomicVFS works on main thread with IndexedDB persistence.
   let vfsName = '';
   try {
     const vfs = await IDBBatchAtomicVFS.create('idb', module);
@@ -147,109 +98,90 @@ export async function bootSqliteAgent(config = {}) {
   // 4. Enable recursive triggers
   await sqlite3.exec(db, 'PRAGMA recursive_triggers = ON;');
 
-  // Setup Prompt API backend configuration
-  setupPromptApiBackend({
-    provider: llmProvider,
-    url: llmUrl,
-    model: llmModel,
-    apiKey: llmApiKey,
-  });
-
-  // 5. Register async UDF: ask_llm (JSPI suspends WASM during Prompt API inference)
-  //    Uses prompt-api-polyfill's LanguageModel with responseConstraint structured output.
+  // 5. Register async UDF: ask_llm (JSPI suspends WASM during fetch)
   await sqlite3.create_function(
     db, 'ask_llm', 2, SQLITE_UTF8, null,
     async (context, args) => {
-      let session = null;
       try {
         const contextJson = sqlite3.value_text(args[0]);
         const toolsJson = sqlite3.value_text(args[1]);
         const messages = JSON.parse(contextJson);
         const tools = JSON.parse(toolsJson);
 
-        // 1. Build system prompt and conversation history
-        const systemMessage = messages.find(m => m.role === 'system');
-        const systemPrompt = buildSystemPrompt(tools, systemMessage?.content);
-        const formattedHistory = formatConversation(messages);
+        // Build system prompt with tool definitions
+        const systemMsg = messages.find(m => m.role === 'system');
+        const systemPrompt = buildSystemPrompt(tools, systemMsg?.content);
 
-        // Ensure backend configuration is set
-        if (!window.OPENAI_CONFIG && !window.GEMINI_CONFIG) {
-          setupPromptApiBackend({
-            provider: llmProvider,
-            url: llmUrl,
+        // Format messages for API
+        const apiMessages = [
+          { role: 'system', content: systemPrompt },
+          ...formatMessages(messages.filter(m => m.role !== 'system'))
+        ];
+
+        const resp = await fetch(llmUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(llmApiKey ? { Authorization: `Bearer ${llmApiKey}` } : {}),
+          },
+          body: JSON.stringify({
             model: llmModel,
-            apiKey: llmApiKey,
-          });
-        }
-
-        const LM = window.LanguageModel || LanguageModel;
-        if (!LM) {
-          throw new Error('Prompt API LanguageModel is not available');
-        }
-
-        // 2. Create LanguageModel session with system prompt
-        session = await LM.create({
-          systemPrompt,
-          initialPrompts: [
-            { role: 'system', content: systemPrompt }
-          ]
+            messages: apiMessages,
+            tools: tools.length ? tools.map(t => {
+              const schema = typeof t === 'string' ? JSON.parse(t) : t;
+              return schema;
+            }) : undefined,
+            stream: false,
+          }),
         });
 
-        // 3. Call session.prompt with responseConstraint for structured output
-        const rawResult = await session.prompt(formattedHistory, {
-          responseConstraint: AGENT_RESPONSE_SCHEMA,
-        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text().catch(() => '')}`);
+        const data = await resp.json();
+        const msg = data.choices?.[0]?.message || data.message || {};
 
-        // 4. Parse structured JSON result
-        let parsed;
-        if (typeof rawResult === 'object' && rawResult !== null) {
-          parsed = rawResult;
-        } else {
+        // Extract token usage
+        const usage = data.usage || {};
+        const promptTokens = usage.prompt_tokens || 0;
+        const completionTokens = usage.completion_tokens || 0;
+
+        // Parse structured JSON from content if the model wrapped it
+        let content = msg.content || '';
+        let toolCalls = msg.tool_calls || null;
+
+        // If the model returned JSON in content instead of using native tool_calls, parse it
+        if (!toolCalls && content) {
+          let parsed = null;
           try {
-            parsed = JSON.parse(rawResult);
+            // Try parsing directly
+            parsed = JSON.parse(content.trim());
           } catch {
-            const cleaned = String(rawResult)
+            // Try stripping markdown code fences
+            const stripped = content.trim()
               .replace(/^```(?:json)?\s*/i, '')
-              .replace(/\s*```$/, '')
-              .trim();
-            parsed = JSON.parse(cleaned);
+              .replace(/\s*```$/i, '');
+            try { parsed = JSON.parse(stripped); } catch {}
+          }
+          if (parsed) {
+            content = parsed.content || content;
+            if (parsed.tool_calls && Array.isArray(parsed.tool_calls) && parsed.tool_calls.length > 0) {
+              // Normalize to OpenAI tool_calls format
+              toolCalls = parsed.tool_calls.map((tc, i) => ({
+                id: tc.id || `call_${Date.now()}_${i}`,
+                type: 'function',
+                function: {
+                  name: tc.function?.name || tc.name || '',
+                  arguments: typeof tc.function?.arguments === 'string'
+                    ? tc.function.arguments
+                    : JSON.stringify(tc.function?.arguments || tc.arguments || {}),
+                },
+              }));
+            }
           }
         }
 
-        // 5. Normalize tool_calls format for SQL triggers
-        let toolCalls = null;
-        if (parsed.tool_calls && Array.isArray(parsed.tool_calls) && parsed.tool_calls.length > 0) {
-          toolCalls = parsed.tool_calls.map((tc, idx) => {
-            const fnName = tc.name || tc.function?.name || '';
-            let fnArgs = tc.arguments || tc.function?.arguments || {};
-            if (typeof fnArgs === 'string') {
-              try { fnArgs = JSON.parse(fnArgs); } catch {}
-            }
-            return {
-              id: tc.id || `call_${Date.now()}_${idx}`,
-              type: 'function',
-              name: fnName,
-              function: {
-                name: fnName,
-                arguments: fnArgs,
-              },
-              arguments: fnArgs,
-            };
-          });
-        }
-
-        // 6. Token tracking
-        let promptTokens = session.contextUsage || 0;
-        if (!promptTokens) {
-          const totalPromptChars = (systemPrompt.length + formattedHistory.length);
-          promptTokens = Math.ceil(totalPromptChars / 4);
-        }
-        const completionTokens = Math.ceil(JSON.stringify(parsed).length / 4);
-
-        // 7. Return JSON string expected by SQL triggers
         sqlite3.result_text(context, JSON.stringify({
-          content: parsed.content || '',
-          tool_calls: toolCalls,
+          content: content || '',
+          tool_calls: toolCalls || null,
           prompt_tokens: promptTokens,
           completion_tokens: completionTokens,
         }));
@@ -261,10 +193,6 @@ export async function bootSqliteAgent(config = {}) {
           prompt_tokens: 0,
           completion_tokens: 0,
         }));
-      } finally {
-        if (session && typeof session.destroy === 'function') {
-          try { session.destroy(); } catch {}
-        }
       }
     }
   );
@@ -302,7 +230,7 @@ export async function bootSqliteAgent(config = {}) {
     }
   );
 
-  // 7. Register async UDF: search_web (web search via configured provider)
+  // 7. Register async UDF: search_web (web search via DuckDuckGo)
   await sqlite3.create_function(
     db, 'search_web', 1, SQLITE_UTF8, null,
     async (context, args) => {
@@ -312,55 +240,28 @@ export async function bootSqliteAgent(config = {}) {
           sqlite3.result_text(context, JSON.stringify({ error: 'Empty search query' }));
           return;
         }
-
-        // Use DuckDuckGo Lite API as default (no API key needed)
-        // Can be overridden with a custom search endpoint in system_config
         const searchUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1`;
-        const resp = await fetch(searchUrl, {
-          headers: { 'Accept': 'application/json' },
-        });
-
+        const resp = await fetch(searchUrl, { headers: { 'Accept': 'application/json' } });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-
         const results = [];
-        // Extract related topics as search results
         if (data.RelatedTopics) {
           for (const topic of data.RelatedTopics.slice(0, 8)) {
             if (topic.Text && topic.FirstURL) {
-              results.push({
-                title: topic.Text.split('. ')[0] || topic.Text.slice(0, 80),
-                url: topic.FirstURL,
-                snippet: topic.Text.slice(0, 200),
-              });
+              results.push({ title: topic.Text.split('. ')[0] || topic.Text.slice(0, 80), url: topic.FirstURL, snippet: topic.Text.slice(0, 200) });
             } else if (topic.Topics) {
-              // Nested topics
               for (const sub of topic.Topics.slice(0, 3)) {
                 if (sub.Text && sub.FirstURL) {
-                  results.push({
-                    title: sub.Text.split('. ')[0] || sub.Text.slice(0, 80),
-                    url: sub.FirstURL,
-                    snippet: sub.Text.slice(0, 200),
-                  });
+                  results.push({ title: sub.Text.split('. ')[0] || sub.Text.slice(0, 80), url: sub.FirstURL, snippet: sub.Text.slice(0, 200) });
                 }
               }
             }
           }
         }
-
-        // Add abstract if available
         if (data.AbstractText && data.AbstractURL) {
-          results.unshift({
-            title: data.Heading || query,
-            url: data.AbstractURL,
-            snippet: data.AbstractText.slice(0, 300),
-          });
+          results.unshift({ title: data.Heading || query, url: data.AbstractURL, snippet: data.AbstractText.slice(0, 300) });
         }
-
-        sqlite3.result_text(context, JSON.stringify({
-          query,
-          results: results.slice(0, 10),
-        }));
+        sqlite3.result_text(context, JSON.stringify({ query, results: results.slice(0, 10) }));
       } catch (e) {
         console.error('[search_web]', e);
         sqlite3.result_text(context, JSON.stringify({ error: e.message }));
@@ -368,70 +269,25 @@ export async function bootSqliteAgent(config = {}) {
     }
   );
 
-  // 8. Register async UDF: fetch_url (fetch web page content with SSRF protection)
+  // 8. Register async UDF: fetch_url (with SSRF protection)
   await sqlite3.create_function(
     db, 'fetch_url', 1, SQLITE_UTF8, null,
     async (context, args) => {
       try {
         const url = sqlite3.value_text(args[0]);
-        if (!url) {
-          sqlite3.result_text(context, JSON.stringify({ error: 'Empty URL' }));
-          return;
-        }
-
-        // SSRF protection: block private/internal IPs
-        const blockedPatterns = [
-          /^localhost$/i, /^127\./, /^10\./, /^192\.168\./,
-          /^172\.(1[6-9]|2\d|3[01])\./, /^169\.254\./, /^::1$/,
-          /^fc00:/i, /^fe80:/i,
-        ];
-
+        if (!url) { sqlite3.result_text(context, JSON.stringify({ error: 'Empty URL' })); return; }
+        const blocked = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /^169\.254\./, /^::1$/, /^fc00:/i, /^fe80:/i];
         let parsedUrl;
-        try {
-          parsedUrl = new URL(url);
-        } catch {
-          sqlite3.result_text(context, JSON.stringify({ error: 'Invalid URL format' }));
-          return;
+        try { parsedUrl = new URL(url); } catch { sqlite3.result_text(context, JSON.stringify({ error: 'Invalid URL' })); return; }
+        if (!['http:', 'https:'].includes(parsedUrl.protocol)) { sqlite3.result_text(context, JSON.stringify({ error: 'Only HTTP/HTTPS allowed' })); return; }
+        for (const p of blocked) {
+          if (p.test(parsedUrl.hostname)) { sqlite3.result_text(context, JSON.stringify({ error: `Blocked: ${parsedUrl.hostname}` })); return; }
         }
-
-        if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-          sqlite3.result_text(context, JSON.stringify({ error: 'Only HTTP/HTTPS protocols allowed' }));
-          return;
-        }
-
-        for (const pattern of blockedPatterns) {
-          if (pattern.test(parsedUrl.hostname)) {
-            sqlite3.result_text(context, JSON.stringify({
-              error: `Access to '${parsedUrl.hostname}' is blocked (private/internal address)`,
-            }));
-            return;
-          }
-        }
-
-        const resp = await fetch(url, {
-          headers: { 'User-Agent': 'WebSQLAgent/1.0' },
-          signal: AbortSignal.timeout(10000), // 10s timeout
-        });
-
+        const resp = await fetch(url, { headers: { 'User-Agent': 'WebSQLAgent/1.0' }, signal: AbortSignal.timeout(10000) });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const html = await resp.text();
-
-        // Strip HTML tags for readable text
-        const text = html
-          .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-          .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-          .replace(/<[^>]+>/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim()
-          .slice(0, 8000); // Cap at 8000 chars
-
-        sqlite3.result_text(context, JSON.stringify({
-          url,
-          status: resp.status,
-          title: html.match(/<title>(.*?)<\/title>/i)?.[1] || '(no title)',
-          content: text,
-          truncated: html.length > 8000,
-        }));
+        const text = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8000);
+        sqlite3.result_text(context, JSON.stringify({ url, status: resp.status, title: html.match(/<title>(.*?)<\/title>/i)?.[1] || '(no title)', content: text, truncated: html.length > 8000 }));
       } catch (e) {
         console.error('[fetch_url]', e);
         sqlite3.result_text(context, JSON.stringify({ error: e.message }));
@@ -439,38 +295,25 @@ export async function bootSqliteAgent(config = {}) {
     }
   );
 
-  // 8. Initialize schema (tables + triggers + sample data)
+  // 9. Initialize schema
   await sqlite3.exec(db, SCHEMA_SQL);
 
-  // 9. Schema migration: detect old agent_memory table and migrate into new schema
+  // 10. Schema migration: detect old agent_memory table and migrate
   try {
     let agentMemoryCount = 0;
     for await (const stmt of sqlite3.statements(db, `SELECT COUNT(*) FROM agent_memory`)) {
-      if (await sqlite3.step(stmt) === SQLITE_ROW) {
-        agentMemoryCount = sqlite3.column_int(stmt, 0);
-      }
+      if (await sqlite3.step(stmt) === SQLITE_ROW) agentMemoryCount = sqlite3.column_int(stmt, 0);
     }
-
     if (agentMemoryCount > 0) {
       console.warn(`[harness] Legacy agent_memory table detected (${agentMemoryCount} rows) — migrating`);
-      // Drop old triggers (they reference agent_memory)
       await sqlite3.exec(db, 'DROP TRIGGER IF EXISTS agent_think;');
       await sqlite3.exec(db, 'DROP TRIGGER IF EXISTS execute_tool;');
-      // Migrate rows into messages table (already created by SCHEMA_SQL)
-      await sqlite3.exec(db, `
-        INSERT OR IGNORE INTO messages (id, session_id, role, content, tool_calls, tool_call_id, created_at)
-        SELECT id, 'default', CASE WHEN role='tool_result' THEN 'tool' ELSE role END, content, tool_calls, tool_call_id, created_at
-        FROM agent_memory;
-      `);
+      await sqlite3.exec(db, `INSERT OR IGNORE INTO messages (id, session_id, role, content, tool_calls, tool_call_id, created_at) SELECT id, 'default', CASE WHEN role='tool_result' THEN 'tool' ELSE role END, content, tool_calls, tool_call_id, created_at FROM agent_memory;`);
       await sqlite3.exec(db, 'DROP TABLE IF EXISTS agent_memory;');
       console.log('[harness] Migration complete');
     }
   } catch (e) {
-    if (e.message?.includes('agent_memory')) {
-      console.log('[harness] No legacy agent_memory table, skipping migration');
-    } else {
-      console.warn('[harness] Migration check error (non-fatal):', e.message);
-    }
+    if (!e.message?.includes('agent_memory')) console.warn('[harness] Migration error (non-fatal):', e.message);
   }
 
   console.log('[harness] Agent booted (wa-sqlite JSPI). LLM:', llmUrl || '(none)');

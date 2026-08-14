@@ -31,42 +31,10 @@ let agent = null;
 let isProcessing = false;
 let activeSessionId = 'default';
 
-// ── Config & Prompt API Setup ───────────────────────────────────────
-
-export function setupPromptApiBackend(config = {}) {
-  const saved = loadConfig();
-  const provider = config.provider || saved.provider || 'openai';
-  const url = config.url ?? saved.url ?? (provider === 'openai' ? 'http://localhost:11434/v1' : '');
-  const model = config.model || saved.model || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2');
-  const apiKey = config.apiKey ?? saved.apiKey ?? '';
-
-  // Clean previous configs
-  delete window.OPENAI_CONFIG;
-  delete window.GEMINI_CONFIG;
-
-  if (provider === 'gemini') {
-    window.GEMINI_CONFIG = {
-      apiKey: apiKey,
-      modelName: model || 'gemini-2.5-flash',
-    };
-    return window.GEMINI_CONFIG;
-  } else {
-    // 'openai' / custom compatible (Ollama, LM Studio, OpenRouter, OpenAI)
-    window.OPENAI_CONFIG = {
-      baseURL: url || 'http://localhost:11434/v1',
-      modelName: model || 'llama3.2',
-      apiKey: apiKey || 'dummy',
-    };
-    return window.OPENAI_CONFIG;
-  }
-}
+// ── Config Persistence ──────────────────────────────────────────────
 
 function loadConfig() {
-  try {
-    return JSON.parse(localStorage.getItem('sql-agent-config') || '{}');
-  } catch {
-    return {};
-  }
+  try { return JSON.parse(localStorage.getItem('sql-agent-config') || '{}'); } catch { return {}; }
 }
 
 function saveConfig(c) {
@@ -75,9 +43,7 @@ function saveConfig(c) {
 
 function updateConfigVisibility(provider) {
   const isGemini = provider === 'gemini';
-  if (rowConfigUrl) {
-    rowConfigUrl.style.display = isGemini ? 'none' : 'flex';
-  }
+  if (rowConfigUrl) rowConfigUrl.style.display = isGemini ? 'none' : 'flex';
   if (labelConfigKey) {
     labelConfigKey.innerHTML = isGemini
       ? 'API Key <span class="required">(required for Gemini API)</span>'
@@ -249,8 +215,6 @@ async function bootAgent() {
   const model = cfg.model || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2');
   const apiKey = cfg.apiKey || '';
 
-  setupPromptApiBackend({ provider, url, model, apiKey });
-
   try {
     statusBar.textContent = 'Initializing wa-sqlite JSPI…';
     statusBar.style.color = '#8b949e';
@@ -341,7 +305,6 @@ configForm.addEventListener('submit', e => {
     apiKey: configKey.value.trim(),
   };
   saveConfig(config);
-  setupPromptApiBackend(config);
   document.getElementById('config-details').open = false;
   bootAgent();
 });
