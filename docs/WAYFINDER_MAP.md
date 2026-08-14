@@ -17,7 +17,20 @@ A production-ready, local-first **Pure-SQL Web Agent & Data Operating System** r
 * **Core Philosophy:** *Push everything into SQLite.* The host JavaScript is strictly an I/O bridge; the ReAct state machine, history, tools, dashboard state, approvals, and memory management live in SQL triggers and tables.
 * **Execution Stack:** `wa-sqlite` + WebAssembly JSPI (JavaScript Promise Integration) for zero-overhead async UDF suspension.
 * **Relevant Skills & References:** `/grilling`, `/domain-modeling`, `/research`, `huggingface/tau` reference architecture.
-* **AGY as coding partner (standing preference, 2026-08-14):** Deploy AGY (`agy-wrapper.sh`) as a second set of eyes for sticky or non-apparent problems — implementation cross-checks, review of tricky glue code (JSPI/wasm boundaries, VFS behavior), and independent verification of empirically-probed facts. Check quota with `check-usage` before spawning; default to `Gemini 3.7 Flash (Low)`.
+* **AGY as coding partner (standing preference, 2026-08-14):** Deploy AGY (`agy-wrapper.sh`) as a second set of eyes for sticky or non-apparent problems — implementation cross-checks, review of tricky glue code (JSPI/wasm boundaries, VFS behavior), and independent verification of empirically-probed facts. Check quota with `check-usage` before spawning; default to `Gemini 3.6 Flash (Low)`.
+
+---
+
+## Operating Notes (session handoff)
+
+A fresh session resumes from **this map alone** — destination, philosophy, and standing preferences are above. These are the operational facts that otherwise live only in a working session's head:
+
+* **One session = one ticket.** Claim it (mark 🟡 in-progress with a "Next steps" stub) before starting; resolve it; verify; commit; update the map. Don't let a session span two tickets.
+* **AGY wrapper:** `~/.config/opencode/scripts/agy-wrapper.sh`. ALWAYS `check-usage` first — BLOCKED (<5%) → fall back to subagents; LOW (<15%) → use `(Low)`-effort models. `run "prompt" [model] [timeout_s]` (sync), `spawn` then `wait <result_file>` (async). Models: `Gemini 3.6 Flash (Low|Medium|High)`, `Claude Sonnet 4.6`. Use AGY for second-eyes reviews of sticky glue (JSPI/wasm boundaries, VFS, trigger SQL) — it can produce false positives, so **empirically verify** any claim against the real build before acting.
+* **Dev server:** Vite on `:5174` (preview browser). On boot, `window.__agent = { sqlite3, db, eventStream, module }` is the live handle.
+* **Preview-browser `evaluate` quirk:** `t3-code_preview_evaluate` chokes on special chars (⟲, →) and very large inline expressions. Workaround: write probe code to a Vite-served `.mjs` file and `import()` it from the page (see `docs/prototypes/ticket-3-*-probe.mjs`).
+* **SQLite is single-threaded:** a turn in flight (JSPI suspended on a fetch) blocks all other DB ops on that connection — don't fire concurrent `evaluate` DB calls mid-turn, or they'll time out.
+* **You own commits.** Workers (AGY / Jules / subagents) propose; you review and commit. Never apply a worker diff blindly — you are the gate.
 
 ---
 
@@ -155,8 +168,15 @@ graph TD
 
 ### Ticket 9: Direct SQL Scratchpad (`!SELECT` / `!!DDL`)
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Open (Frontier)
+* **Status:** Open (Frontier) — 🟡 CLAIMED (in progress)
 * **Question:** How should the chat input parser intercept `!` and `!!` prefixes, bypass LLM triggers, run direct SQL, and render formatted tabular output inside the message stream?
+* **Next steps (resuming session):** This is the natural first frontier ticket — it directly consumes T3's turn-identity, `allow_dml` gate, and changeset/DDL-log capture. Grill these open decisions, then implement:
+  * **Prefix grammar:** `!` = read-only SELECT/WITH (always allowed); `!!` = DML/DDL (gated). Decide whether `!` is strictly read-only or also allows DML.
+  * **Bypassing the cascade:** the normal user INSERT fires `agent_think`. For scratchpad, run the SQL directly and insert a cascade-suppressed user row + a result row (use `setSuppressCascade` in `try...finally`), OR detect the prefix and skip the INSERT path entirely.
+  * **Turn identity:** scratchpad writes use **negative turn IDs** (per T3) so they're rewound-able via ⟲ without polluting the real turn sequence.
+  * **`!!DDL` gate:** T3 locked *agent* DDL; `!!DDL` is the *user-facing* DDL path. It must log to `turn_ddl_log` + capture a pre-image (so ⟲ can undo it) and respect a gate (reuse `allow_dml`, or a separate `allow_ddl` flag — decide).
+  * **Rendering:** reuse `renderTable` for tabular output inside the message stream.
+  * **Entry point:** an input-parser branch in `src/main.js` (`sendMessage` / form submit) before the normal cascade path.
 
 ---
 
