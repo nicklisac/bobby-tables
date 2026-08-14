@@ -1,5 +1,7 @@
 # Implementation Plan: Prompt API Integration & Provider Configuration UI
 
+> **⚠️ SHELVED** — Chrome's native `window.LanguageModel` (Built-In AI) intercepts the polyfill and ignores `OPENAI_CONFIG`/`GEMINI_CONFIG`, routing to Chrome's on-device model instead. ES module import hoisting prevents deleting the native API before polyfill loads. Raw `fetch()` is the reliable transport for arbitrary OpenAI-compatible endpoints. Revisit when Prompt API standard matures or polyfill gains `forcePolyfill` option.
+
 **Goal:** Wire Bobby's LLM transport layer to the **Prompt API** (via `prompt-api-polyfill` / `LanguageModel`) using `responseConstraint` (JSON Schema structured output), and build a clean **Provider Configuration UI** supporting custom OpenAI-compatible endpoints (Ollama, LM Studio, OpenRouter, OpenAI) and Google Gemini API.
 
 ---
