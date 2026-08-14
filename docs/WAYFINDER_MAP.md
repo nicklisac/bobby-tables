@@ -49,9 +49,9 @@ graph TD
     T1 --> T18[Ticket 18: Self-Rendering Reactive Views]
     T1 --> T19[Ticket 19: Persona & Prompt Presets]
 
-    T4[Ticket 4: Live Event Streaming & Token Pipe]
+    T4[Ticket 4: Live Event Streaming & Token Pipe - DONE]
     T5[Ticket 5: Native Vector Search sqlite-vec]
-    T6[Ticket 6: CSV & Tabular Ingestion Engine]
+    T6[Ticket 6: CSV & Tabular Ingestion Engine - DONE]
     T7[Ticket 7: Web Search & URL Fetch Tools - DONE]
     T10[Ticket 10: Cartridge Import / Export - DONE]
     T16[Ticket 16: In-Browser Full-Text Search FTS5]
@@ -60,8 +60,8 @@ graph TD
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T7,T10 done;
-    class T4,T5,T6,T16 frontier;
+    class T1,T4,T6,T7,T10 done;
+    class T5,T16 frontier;
     class T2,T3,T8,T9,T11,T12,T13,T14,T15,T17,T18,T19 blocked;
 ```
 
@@ -93,8 +93,9 @@ graph TD
 
 ### Ticket 4: Live Event Streaming & Token Pipe
 * **Label:** `wayfinder:research` (AFK)
-* **Status:** Open (Frontier)
+* **Status:** ✅ COMPLETE
 * **Question:** How do we wire SQLite's `sqlite3.update_hook()` and an SSE `ReadableStream` reader in `ask_llm` to stream both ReAct step transitions and token-by-token text to the UI without race conditions?
+* **Resolution:** Implemented `AgentEventStream` in `src/harness.js` with multi-reader `ReadableStream` broadcasting. Registered `sqlite3.update_hook()` to capture message table `INSERT`s (`'react_step'`). Added SSE token-by-token streaming in `ask_llm` (`'token'`, `'thinking'`, `'tool_call'`) with robust non-streaming fallback. Registered live tool execution events in `run_dynamic_sql`, `search_web`, and `fetch_url` (`'tool_result'`). In `src/main.js`, wired consumer to incrementally stream tokens into `.streaming` assistant bubbles with animated cursor, render live `.tool-indicator` badges during tool runs, and render rich interactive tables/cards on result arrival.
 
 ---
 
@@ -107,8 +108,9 @@ graph TD
 
 ### Ticket 6: CSV & Tabular Ingestion Engine
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Open (Frontier)
+* **Status:** ✅ COMPLETE
 * **Question:** How should the drag-and-drop CSV parser infer column types (`INTEGER`, `REAL`, `TEXT`) and construct safe `CREATE TABLE` and batch `INSERT` statements to make external tables immediately queryable by the agent?
+* **Resolution:** Created `src/csv-ingestion.js` leveraging Papa Parse. Implemented `inferCellType` and `promoteType` (INTEGER → REAL → TEXT promotion hierarchy), `escapeIdentifier`, `sanitizeTableName`, and unique column name resolution. Implemented `parseCsvWithSchema` for sample-based type inference and `ingestCsvToSqlite` with chunked streaming batch inserts (5,000 rows/transaction) via prepared statements. Added drag-and-drop overlay (`#drag-overlay`) on chat container with visual drag feedback and a progress indicator bar (`#ingestion-progress`). Added "📊 Upload CSV" button to header actions. Auto-notifies user and active session with schema overview and query suggestions upon completion.
 
 ---
 

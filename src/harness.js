@@ -13,10 +13,90 @@
 
 import ModuleFactory from '../vendor/wa-sqlite-jspi/wa-sqlite-jspi.mjs';
 import { Factory } from '../vendor/wa-sqlite-jspi/sqlite-api.js';
-import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_ROW } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
+import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_ROW, SQLITE_INSERT } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
 import { SCHEMA_SQL } from './schema.js';
+
+/**
+ * Live Event Stream for real-time UI streaming (tokens, tool execution, ReAct steps).
+ */
+export class AgentEventStream {
+  constructor() {
+    this._controllers = new Set();
+  }
+
+  /**
+   * Get a new ReadableStream connected to this event stream.
+   * @returns {ReadableStream}
+   */
+  getStream() {
+    let activeController = null;
+    return new ReadableStream({
+      start: (controller) => {
+        activeController = controller;
+        this._controllers.add(controller);
+      },
+      cancel: () => {
+        if (activeController) {
+          this._controllers.delete(activeController);
+        }
+      },
+    });
+  }
+
+  /**
+   * Emit a structured event to all active stream readers.
+   * @param {string} type - Event type ('thinking', 'token', 'tool_call', 'tool_result', 'react_step', 'done', 'error')
+   * @param {object} [data] - Event payload
+   */
+  emit(type, data = {}) {
+    const event = { type, timestamp: Date.now(), ...data };
+    for (const controller of this._controllers) {
+      try {
+        controller.enqueue(event);
+      } catch {
+        this._controllers.delete(controller);
+      }
+    }
+  }
+
+  /**
+   * Close all active controllers.
+   */
+  close() {
+    for (const controller of this._controllers) {
+      try { controller.close(); } catch {}
+    }
+    this._controllers.clear();
+  }
+}
+
+// Global agent event stream instance
+export const agentEventStream = new AgentEventStream();
+
+/**
+ * Export getEventStream for main.js to consume.
+ * @returns {ReadableStream}
+ */
+export function getEventStream() {
+  return agentEventStream.getStream();
+}
+
+/**
+ * Resolve provider endpoint URL.
+ */
+function resolveEndpointUrl(url, provider) {
+  if (provider === 'gemini') {
+    return url || 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+  }
+  if (!url) return '';
+  const cleanUrl = url.trim().replace(/\/+$/, '');
+  if (cleanUrl.endsWith('/v1')) {
+    return `${cleanUrl}/chat/completions`;
+  }
+  return cleanUrl;
+}
 
 /**
  * Build the system prompt with tool definitions and structured output instructions.
@@ -71,7 +151,10 @@ export async function bootSqliteAgent(config = {}) {
     llmProvider = 'openai',
   } = config;
 
-  if (!llmUrl) console.warn('[harness] No LLM URL configured.');
+  const endpointUrl = resolveEndpointUrl(llmUrl, llmProvider);
+  if (!endpointUrl && llmProvider !== 'gemini') {
+    console.warn('[harness] No LLM URL configured.');
+  }
 
   // 1. Boot wa-sqlite JSPI engine
   const module = await ModuleFactory();
@@ -98,7 +181,19 @@ export async function bootSqliteAgent(config = {}) {
   // 4. Enable recursive triggers
   await sqlite3.exec(db, 'PRAGMA recursive_triggers = ON;');
 
-  // 5. Register async UDF: ask_llm (JSPI suspends WASM during fetch)
+  // 4b. Register update_hook on db to emit 'react_step' events on message INSERTs
+  sqlite3.update_hook(db, (iUpdateType, dbNameStr, tblName, rowid) => {
+    if (tblName === 'messages' && iUpdateType === SQLITE_INSERT) {
+      agentEventStream.emit('react_step', {
+        table: tblName,
+        action: 'INSERT',
+        rowid: typeof rowid === 'bigint' ? Number(rowid) : rowid,
+        dbName: dbNameStr,
+      });
+    }
+  });
+
+  // 5. Register async UDF: ask_llm (JSPI suspends WASM during fetch & streaming)
   await sqlite3.create_function(
     db, 'ask_llm', 2, SQLITE_UTF8, null,
     async (context, args) => {
@@ -118,35 +213,173 @@ export async function bootSqliteAgent(config = {}) {
           ...formatMessages(messages.filter(m => m.role !== 'system'))
         ];
 
-        const resp = await fetch(llmUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(llmApiKey ? { Authorization: `Bearer ${llmApiKey}` } : {}),
-          },
-          body: JSON.stringify({
-            model: llmModel,
-            messages: apiMessages,
-            tools: tools.length ? tools.map(t => {
-              const schema = typeof t === 'string' ? JSON.parse(t) : t;
-              return schema;
-            }) : undefined,
-            stream: false,
-          }),
+        // Emit 'thinking' event
+        agentEventStream.emit('thinking', {
+          role: 'assistant',
+          messageCount: apiMessages.length,
+          model: llmModel,
         });
 
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text().catch(() => '')}`);
-        const data = await resp.json();
-        const msg = data.choices?.[0]?.message || data.message || {};
+        const targetUrl = endpointUrl || resolveEndpointUrl(llmUrl, llmProvider);
+        const targetApiKey = llmApiKey;
 
-        // Extract token usage
-        const usage = data.usage || {};
-        const promptTokens = usage.prompt_tokens || 0;
-        const completionTokens = usage.completion_tokens || 0;
+        let content = '';
+        let toolCalls = null;
+        let promptTokens = 0;
+        let completionTokens = 0;
+        let streamSucceeded = false;
 
-        // Parse structured JSON from content if the model wrapped it
-        let content = msg.content || '';
-        let toolCalls = msg.tool_calls || null;
+        // Try streaming via SSE first
+        try {
+          const streamResp = await fetch(targetUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(targetApiKey ? { Authorization: `Bearer ${targetApiKey}` } : {}),
+            },
+            body: JSON.stringify({
+              model: llmModel,
+              messages: apiMessages,
+              tools: tools.length ? tools.map(t => {
+                const schema = typeof t === 'string' ? JSON.parse(t) : t;
+                return schema;
+              }) : undefined,
+              stream: true,
+              stream_options: { include_usage: true },
+            }),
+          });
+
+          if (streamResp.ok && streamResp.body) {
+            const contentType = streamResp.headers.get('content-type') || '';
+            if (contentType.includes('text/event-stream') || !contentType.includes('application/json')) {
+              // Process SSE stream chunks
+              const reader = streamResp.body.getReader();
+              const decoder = new TextDecoder();
+              let buffer = '';
+              const toolCallsMap = new Map();
+
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                  const trimmed = line.trim();
+                  if (!trimmed || trimmed.startsWith(':')) continue; // skip keep-alive comments
+                  if (trimmed === 'data: [DONE]') continue;
+                  if (trimmed.startsWith('data: ')) {
+                    try {
+                      const data = JSON.parse(trimmed.slice(6));
+                      const choice = data.choices?.[0];
+                      if (choice?.delta?.content) {
+                        const token = choice.delta.content;
+                        content += token;
+                        agentEventStream.emit('token', {
+                          token,
+                          accumulated: content,
+                          role: 'assistant',
+                        });
+                      }
+                      if (choice?.delta?.tool_calls) {
+                        for (const tc of choice.delta.tool_calls) {
+                          const idx = tc.index ?? 0;
+                          if (!toolCallsMap.has(idx)) {
+                            toolCallsMap.set(idx, {
+                              id: tc.id || `call_${Date.now()}_${idx}`,
+                              type: 'function',
+                              function: {
+                                name: tc.function?.name || '',
+                                arguments: tc.function?.arguments || '',
+                              },
+                            });
+                          } else {
+                            const existing = toolCallsMap.get(idx);
+                            if (tc.id) existing.id = tc.id;
+                            if (tc.function?.name) existing.function.name += tc.function.name;
+                            if (tc.function?.arguments) existing.function.arguments += tc.function.arguments;
+                          }
+                        }
+                      }
+                      if (data.usage) {
+                        promptTokens = data.usage.prompt_tokens || promptTokens;
+                        completionTokens = data.usage.completion_tokens || completionTokens;
+                      }
+                    } catch {
+                      // Skip invalid SSE JSON chunk
+                    }
+                  }
+                }
+              }
+
+              if (toolCallsMap.size > 0) {
+                toolCalls = Array.from(toolCallsMap.values());
+              }
+              streamSucceeded = true;
+            } else {
+              // Endpoint returned normal JSON despite stream: true
+              const data = await streamResp.json();
+              const msg = data.choices?.[0]?.message || data.message || {};
+              content = msg.content || '';
+              toolCalls = msg.tool_calls || null;
+              if (data.usage) {
+                promptTokens = data.usage.prompt_tokens || 0;
+                completionTokens = data.usage.completion_tokens || 0;
+              }
+              if (content) {
+                agentEventStream.emit('token', {
+                  token: content,
+                  accumulated: content,
+                  role: 'assistant',
+                });
+              }
+              streamSucceeded = true;
+            }
+          }
+        } catch (streamErr) {
+          console.warn('[ask_llm] Streaming attempt failed, falling back to non-streaming:', streamErr);
+        }
+
+        // Non-streaming fallback if streaming did not succeed
+        if (!streamSucceeded) {
+          const resp = await fetch(targetUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(targetApiKey ? { Authorization: `Bearer ${targetApiKey}` } : {}),
+            },
+            body: JSON.stringify({
+              model: llmModel,
+              messages: apiMessages,
+              tools: tools.length ? tools.map(t => {
+                const schema = typeof t === 'string' ? JSON.parse(t) : t;
+                return schema;
+              }) : undefined,
+              stream: false,
+            }),
+          });
+
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text().catch(() => '')}`);
+          const data = await resp.json();
+          const msg = data.choices?.[0]?.message || data.message || {};
+
+          // Extract token usage
+          const usage = data.usage || {};
+          promptTokens = usage.prompt_tokens || 0;
+          completionTokens = usage.completion_tokens || 0;
+
+          content = msg.content || '';
+          toolCalls = msg.tool_calls || null;
+
+          if (content) {
+            agentEventStream.emit('token', {
+              token: content,
+              accumulated: content,
+              role: 'assistant',
+            });
+          }
+        }
 
         // If the model returned JSON in content instead of using native tool_calls, parse it
         if (!toolCalls && content) {
@@ -161,8 +394,8 @@ export async function bootSqliteAgent(config = {}) {
               .replace(/\s*```$/i, '');
             try { parsed = JSON.parse(stripped); } catch {}
           }
-          if (parsed) {
-            content = parsed.content || content;
+          if (parsed && typeof parsed === 'object') {
+            content = parsed.content !== undefined ? parsed.content : content;
             if (parsed.tool_calls && Array.isArray(parsed.tool_calls) && parsed.tool_calls.length > 0) {
               // Normalize to OpenAI tool_calls format
               toolCalls = parsed.tool_calls.map((tc, i) => ({
@@ -179,6 +412,26 @@ export async function bootSqliteAgent(config = {}) {
           }
         }
 
+        // Emit 'tool_call' events if tool calls are present
+        if (toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0) {
+          for (const tc of toolCalls) {
+            let parsedArgs = tc.function?.arguments;
+            if (typeof parsedArgs === 'string') {
+              try { parsedArgs = JSON.parse(parsedArgs); } catch {}
+            }
+            agentEventStream.emit('tool_call', {
+              id: tc.id,
+              name: tc.function?.name || '',
+              arguments: parsedArgs,
+            });
+          }
+        }
+
+        // Fallback token estimation if usage was 0
+        if (!promptTokens && !completionTokens && content) {
+          completionTokens = Math.max(1, Math.ceil(content.length / 4));
+        }
+
         sqlite3.result_text(context, JSON.stringify({
           content: content || '',
           tool_calls: toolCalls || null,
@@ -187,6 +440,7 @@ export async function bootSqliteAgent(config = {}) {
         }));
       } catch (e) {
         console.error('[ask_llm]', e);
+        agentEventStream.emit('error', { error: e.message });
         sqlite3.result_text(context, JSON.stringify({
           content: `⚠ SYSTEM ERROR: ${e.message}`,
           tool_calls: null,
@@ -201,15 +455,23 @@ export async function bootSqliteAgent(config = {}) {
   await sqlite3.create_function(
     db, 'run_dynamic_sql', 1, SQLITE_UTF8, null,
     async (context, args) => {
+      const sql = sqlite3.value_text(args[0]);
+      agentEventStream.emit('tool_call', {
+        name: 'execute_sql',
+        arguments: { query: sql },
+      });
       try {
-        const sql = sqlite3.value_text(args[0]);
         if (!sql) {
-          sqlite3.result_text(context, JSON.stringify({ error: 'Empty query' }));
+          const res = { error: 'Empty query' };
+          agentEventStream.emit('tool_result', { tool: 'execute_sql', query: sql, error: res.error, result: res });
+          sqlite3.result_text(context, JSON.stringify(res));
           return;
         }
         const t = sql.trim().toUpperCase();
         if (!t.startsWith('SELECT') && !t.startsWith('WITH')) {
-          sqlite3.result_text(context, JSON.stringify({ error: 'Only SELECT queries allowed' }));
+          const res = { error: 'Only SELECT queries allowed' };
+          agentEventStream.emit('tool_result', { tool: 'execute_sql', query: sql, error: res.error, result: res });
+          sqlite3.result_text(context, JSON.stringify(res));
           return;
         }
         const rows = [];
@@ -220,12 +482,20 @@ export async function bootSqliteAgent(config = {}) {
             rows.push(sqlite3.row(stmt));
           }
         }
-        sqlite3.result_text(context, JSON.stringify([{
+        const result = [{
           columns: cols,
           values: rows,
-        }]));
+        }];
+        agentEventStream.emit('tool_result', {
+          tool: 'execute_sql',
+          query: sql,
+          result,
+        });
+        sqlite3.result_text(context, JSON.stringify(result));
       } catch (e) {
-        sqlite3.result_text(context, JSON.stringify({ error: e.message }));
+        const res = { error: e.message };
+        agentEventStream.emit('tool_result', { tool: 'execute_sql', query: sql, error: e.message, result: res });
+        sqlite3.result_text(context, JSON.stringify(res));
       }
     }
   );
@@ -234,10 +504,16 @@ export async function bootSqliteAgent(config = {}) {
   await sqlite3.create_function(
     db, 'search_web', 1, SQLITE_UTF8, null,
     async (context, args) => {
+      const query = sqlite3.value_text(args[0]);
+      agentEventStream.emit('tool_call', {
+        name: 'search_web',
+        arguments: { query },
+      });
       try {
-        const query = sqlite3.value_text(args[0]);
         if (!query) {
-          sqlite3.result_text(context, JSON.stringify({ error: 'Empty search query' }));
+          const res = { error: 'Empty search query' };
+          agentEventStream.emit('tool_result', { tool: 'search_web', query, error: res.error, result: res });
+          sqlite3.result_text(context, JSON.stringify(res));
           return;
         }
         const searchUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1`;
@@ -261,10 +537,18 @@ export async function bootSqliteAgent(config = {}) {
         if (data.AbstractText && data.AbstractURL) {
           results.unshift({ title: data.Heading || query, url: data.AbstractURL, snippet: data.AbstractText.slice(0, 300) });
         }
-        sqlite3.result_text(context, JSON.stringify({ query, results: results.slice(0, 10) }));
+        const payload = { query, results: results.slice(0, 10) };
+        agentEventStream.emit('tool_result', {
+          tool: 'search_web',
+          query,
+          result: payload,
+        });
+        sqlite3.result_text(context, JSON.stringify(payload));
       } catch (e) {
         console.error('[search_web]', e);
-        sqlite3.result_text(context, JSON.stringify({ error: e.message }));
+        const res = { error: e.message };
+        agentEventStream.emit('tool_result', { tool: 'search_web', query, error: e.message, result: res });
+        sqlite3.result_text(context, JSON.stringify(res));
       }
     }
   );
@@ -273,24 +557,56 @@ export async function bootSqliteAgent(config = {}) {
   await sqlite3.create_function(
     db, 'fetch_url', 1, SQLITE_UTF8, null,
     async (context, args) => {
+      const url = sqlite3.value_text(args[0]);
+      agentEventStream.emit('tool_call', {
+        name: 'fetch_url',
+        arguments: { url },
+      });
       try {
-        const url = sqlite3.value_text(args[0]);
-        if (!url) { sqlite3.result_text(context, JSON.stringify({ error: 'Empty URL' })); return; }
+        if (!url) {
+          const res = { error: 'Empty URL' };
+          agentEventStream.emit('tool_result', { tool: 'fetch_url', url, error: res.error, result: res });
+          sqlite3.result_text(context, JSON.stringify(res));
+          return;
+        }
         const blocked = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /^169\.254\./, /^::1$/, /^fc00:/i, /^fe80:/i];
         let parsedUrl;
-        try { parsedUrl = new URL(url); } catch { sqlite3.result_text(context, JSON.stringify({ error: 'Invalid URL' })); return; }
-        if (!['http:', 'https:'].includes(parsedUrl.protocol)) { sqlite3.result_text(context, JSON.stringify({ error: 'Only HTTP/HTTPS allowed' })); return; }
+        try { parsedUrl = new URL(url); } catch {
+          const res = { error: 'Invalid URL' };
+          agentEventStream.emit('tool_result', { tool: 'fetch_url', url, error: res.error, result: res });
+          sqlite3.result_text(context, JSON.stringify(res));
+          return;
+        }
+        if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+          const res = { error: 'Only HTTP/HTTPS allowed' };
+          agentEventStream.emit('tool_result', { tool: 'fetch_url', url, error: res.error, result: res });
+          sqlite3.result_text(context, JSON.stringify(res));
+          return;
+        }
         for (const p of blocked) {
-          if (p.test(parsedUrl.hostname)) { sqlite3.result_text(context, JSON.stringify({ error: `Blocked: ${parsedUrl.hostname}` })); return; }
+          if (p.test(parsedUrl.hostname)) {
+            const res = { error: `Blocked: ${parsedUrl.hostname}` };
+            agentEventStream.emit('tool_result', { tool: 'fetch_url', url, error: res.error, result: res });
+            sqlite3.result_text(context, JSON.stringify(res));
+            return;
+          }
         }
         const resp = await fetch(url, { headers: { 'User-Agent': 'WebSQLAgent/1.0' }, signal: AbortSignal.timeout(10000) });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const html = await resp.text();
         const text = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8000);
-        sqlite3.result_text(context, JSON.stringify({ url, status: resp.status, title: html.match(/<title>(.*?)<\/title>/i)?.[1] || '(no title)', content: text, truncated: html.length > 8000 }));
+        const payload = { url, status: resp.status, title: html.match(/<title>(.*?)<\/title>/i)?.[1] || '(no title)', content: text, truncated: html.length > 8000 };
+        agentEventStream.emit('tool_result', {
+          tool: 'fetch_url',
+          url,
+          result: payload,
+        });
+        sqlite3.result_text(context, JSON.stringify(payload));
       } catch (e) {
         console.error('[fetch_url]', e);
-        sqlite3.result_text(context, JSON.stringify({ error: e.message }));
+        const res = { error: e.message };
+        agentEventStream.emit('tool_result', { tool: 'fetch_url', url, error: e.message, result: res });
+        sqlite3.result_text(context, JSON.stringify(res));
       }
     }
   );
@@ -316,6 +632,6 @@ export async function bootSqliteAgent(config = {}) {
     if (!e.message?.includes('agent_memory')) console.warn('[harness] Migration error (non-fatal):', e.message);
   }
 
-  console.log('[harness] Agent booted (wa-sqlite JSPI). LLM:', llmUrl || '(none)');
-  return { sqlite3, db };
+  console.log('[harness] Agent booted (wa-sqlite JSPI). LLM:', endpointUrl || '(none)');
+  return { sqlite3, db, eventStream: agentEventStream };
 }

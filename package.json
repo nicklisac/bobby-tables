@@ -11,5 +11,8 @@
   "devDependencies": {
     "vite": "^6.0.0"
   },
-  "note": "Uses vendor/sqlite-wasm-jspi/ — custom JSPI-enabled SQLite WASM built from source. See BUILD-JSPI.md"
+  "note": "Uses vendor/sqlite-wasm-jspi/ — custom JSPI-enabled SQLite WASM built from source. See BUILD-JSPI.md",
+  "dependencies": {
+    "papaparse": "^5.6.0"
+  }
 }

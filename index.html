@@ -14,6 +14,8 @@
       <div id="header-actions">
         <button type="button" id="btn-export" title="Export database as .sqlite3 cartridge">📦 Export</button>
         <button type="button" id="btn-import" title="Import a .sqlite3 cartridge">📥 Import</button>
+        <button type="button" id="btn-upload-csv" title="Upload and ingest a CSV file">📊 Upload CSV</button>
+        <input type="file" id="csv-file-input" accept=".csv,text/csv,text/comma-separated-values" style="display:none;" />
       </div>
     </header>
 
@@ -48,6 +50,24 @@
     </section>
 
     <main id="chat-container">
+      <div id="drag-overlay" class="drag-overlay hidden">
+        <div class="drag-overlay-box">
+          <div class="drag-icon">📊</div>
+          <div class="drag-title">Drop CSV to Ingest</div>
+          <div class="drag-subtitle">Auto-infers types &amp; creates queryable SQLite table</div>
+        </div>
+      </div>
+
+      <div id="ingestion-progress" class="ingestion-progress hidden">
+        <div class="progress-header">
+          <span class="progress-title" id="progress-title">Importing data&hellip;</span>
+          <span class="progress-count" id="progress-count">0 rows</span>
+        </div>
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="progress-bar-fill"></div>
+        </div>
+      </div>
+
       <div id="messages"></div>
       <div id="loading" class="hidden">
         <span class="dot"></span>
