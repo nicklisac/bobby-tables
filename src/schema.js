@@ -235,9 +235,12 @@ export async function createSession(sqlite3, db, name = 'Untitled') {
  */
 export async function listSessions(sqlite3, db) {
   const sessions = [];
-  await sqlite3.exec(db, `SELECT id, name, COALESCE(description, ''), created_at, updated_at FROM sessions ORDER BY updated_at DESC`, (row) => {
-    sessions.push({ id: row.values[0], name: row.values[1], description: row.values[2], created_at: row.values[3], updated_at: row.values[4] });
-  });
+  for await (const stmt of sqlite3.statements(db, `SELECT id, name, COALESCE(description, ''), created_at, updated_at FROM sessions ORDER BY updated_at DESC`)) {
+    while (await sqlite3.step(stmt) === 100 /* SQLITE_ROW */) {
+      const v = sqlite3.row(stmt);
+      sessions.push({ id: v[0], name: v[1], description: v[2], created_at: v[3], updated_at: v[4] });
+    }
+  }
   return sessions;
 }
 
@@ -280,10 +283,15 @@ export async function forkSession(sqlite3, db, sourceSessionId, forkPointId, new
  * Get token usage summary for a session.
  */
 export async function getSessionTokenUsage(sqlite3, db, sessionId) {
-  const result = [];
-  await sqlite3.exec(db, `
+  for await (const stmt of sqlite3.statements(db, `
     SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0)
-    FROM messages WHERE session_id = '${sessionId.replace(/'/g, "''")}'
-  `, (row) => result.push(row));
-  return result[0]?.values || [0, 0];
+    FROM messages WHERE session_id = ?
+  `)) {
+    sqlite3.bind_collection(stmt, [sessionId]);
+    if (await sqlite3.step(stmt) === 100 /* SQLITE_ROW */) {
+      const v = sqlite3.row(stmt);
+      return [v[0] || 0, v[1] || 0];
+    }
+  }
+  return [0, 0];
 }

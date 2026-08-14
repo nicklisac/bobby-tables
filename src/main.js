@@ -8,6 +8,7 @@
 import { bootSqliteAgent } from './harness.js';
 import { setActiveSession, createSession, listSessions, deleteSession, getSessionTokenUsage } from './schema.js';
 import { exportCartridge, importCartridge, exportSqlDump } from './cartridge.js';
+import { SQLITE_ROW } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
 import './styles.css';
 
 const messagesEl     = document.getElementById('messages');
@@ -93,12 +94,15 @@ sessionActions.addEventListener('click', async (e) => {
 async function renderMessages() {
   if (!agent) return;
   const rows = [];
-  await agent.sqlite3.exec(
+  for await (const stmt of agent.sqlite3.statements(
     agent.db,
-    `SELECT role, content, tool_call_id FROM messages WHERE session_id = ? ORDER BY id ASC`,
-    [activeSessionId],
-    (row) => rows.push(row.values)
-  );
+    `SELECT role, content, tool_call_id FROM messages WHERE session_id = ? ORDER BY id ASC`
+  )) {
+    agent.sqlite3.bind_collection(stmt, [activeSessionId]);
+    while (await agent.sqlite3.step(stmt) === SQLITE_ROW) {
+      rows.push(agent.sqlite3.row(stmt));
+    }
+  }
 
   messagesEl.innerHTML = '';
   rows.forEach(([role, content, toolCallId]) => {
