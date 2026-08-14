@@ -11,6 +11,10 @@
     <header>
       <h1>Web SQL Agent</h1>
       <p class="subtitle">Pure-SQL Brain-in-a-Box &middot; JSPI-Powered</p>
+      <div id="header-actions">
+        <button type="button" id="btn-export" title="Export database as .sqlite3 cartridge">📦 Export</button>
+        <button type="button" id="btn-import" title="Import a .sqlite3 cartridge">📥 Import</button>
+      </div>
     </header>
 
     <!-- LLM Configuration Panel -->
@@ -53,6 +57,20 @@
 
     <footer>
       <div id="status-bar">Initializing&hellip;</div>
+
+      <!-- Session Selector -->
+      <div id="session-bar">
+        <label for="session-select">Session:</label>
+        <select id="session-select">
+          <option value="default">Default Session</option>
+        </select>
+        <div id="session-actions">
+          <button type="button" id="session-new" data-action="new" title="New Session">+ New</button>
+          <button type="button" id="session-delete" data-action="delete" title="Delete Session">🗑</button>
+        </div>
+        <span id="token-usage" class="token-usage"></span>
+      </div>
+
       <form id="input-form">
         <input
           type="text"

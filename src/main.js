@@ -1,46 +1,175 @@
 /**
  * MAIN — Entry point. One INSERT triggers the pure-SQL ReAct cascade.
+ *
+ * Session-aware: messages are partitioned by session_id.
+ * UI supports session switching, creation, and deletion.
  */
 
 import { bootSqliteAgent } from './harness.js';
+import { setActiveSession, createSession, listSessions, deleteSession, getSessionTokenUsage } from './schema.js';
+import { exportCartridge, importCartridge, exportSqlDump } from './cartridge.js';
 import './styles.css';
 
-const messagesEl = document.getElementById('messages');
-const loadingEl  = document.getElementById('loading');
-const formEl     = document.getElementById('input-form');
-const inputEl    = document.getElementById('user-input');
-const sendBtn    = document.getElementById('send-btn');
-const statusBar  = document.getElementById('status-bar');
-const configForm = document.getElementById('config-form');
+const messagesEl     = document.getElementById('messages');
+const loadingEl      = document.getElementById('loading');
+const formEl         = document.getElementById('input-form');
+const inputEl        = document.getElementById('user-input');
+const sendBtn        = document.getElementById('send-btn');
+const statusBar      = document.getElementById('status-bar');
+const configForm     = document.getElementById('config-form');
 const configProvider = document.getElementById('config-provider');
-const configUrl    = document.getElementById('config-url');
-const configModel  = document.getElementById('config-model');
-const configKey    = document.getElementById('config-key');
+const configUrl      = document.getElementById('config-url');
+const configModel    = document.getElementById('config-model');
+const configKey      = document.getElementById('config-key');
+const sessionSelect  = document.getElementById('session-select');
+const sessionActions = document.getElementById('session-actions');
 
 let agent = null;
 let isProcessing = false;
+let activeSessionId = 'default';
+
+// ── Config Persistence ──────────────────────────────────────────────
 
 function loadConfig() { try { return JSON.parse(localStorage.getItem('sql-agent-config') || '{}'); } catch { return {}; } }
 function saveConfig(c) { localStorage.setItem('sql-agent-config', JSON.stringify(c)); }
 function populateConfigForm() { const c = loadConfig(); if(c.provider) configProvider.value=c.provider; if(c.url) configUrl.value=c.url; if(c.model) configModel.value=c.model; if(c.apiKey) configKey.value=c.apiKey; }
 
+// ── Session Management ──────────────────────────────────────────────
+
+async function populateSessionDropdown() {
+  if (!agent) return;
+  const sessions = await listSessions(agent.sqlite3, agent.db);
+  sessionSelect.innerHTML = '';
+  sessions.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s.id;
+    opt.textContent = s.name;
+    if (s.id === activeSessionId) opt.selected = true;
+    sessionSelect.appendChild(opt);
+  });
+  updateSessionActions();
+}
+
+function updateSessionActions() {
+  // Disable delete for default session
+  const deleteBtn = document.getElementById('session-delete');
+  if (deleteBtn) deleteBtn.disabled = (activeSessionId === 'default');
+}
+
+sessionSelect.addEventListener('change', async () => {
+  activeSessionId = sessionSelect.value;
+  await setActiveSession(agent.sqlite3, agent.db, activeSessionId);
+  await renderMessages();
+  updateSessionActions();
+});
+
+sessionActions.addEventListener('click', async (e) => {
+  const action = e.target.dataset.action;
+  if (!action || !agent) return;
+
+  if (action === 'new') {
+    const name = prompt('Session name:', 'New Session');
+    if (!name?.trim()) return;
+    const id = await createSession(agent.sqlite3, agent.db, name.trim());
+    activeSessionId = id;
+    await setActiveSession(agent.sqlite3, agent.db, id);
+    await populateSessionDropdown();
+    await renderMessages();
+  }
+
+  if (action === 'delete') {
+    if (activeSessionId === 'default') return;
+    if (!confirm(`Delete session "${activeSessionId}" and all its messages?`)) return;
+    await deleteSession(agent.sqlite3, agent.db, activeSessionId);
+    activeSessionId = 'default';
+    await setActiveSession(agent.sqlite3, agent.db, 'default');
+    await populateSessionDropdown();
+    await renderMessages();
+  }
+});
+
+// ── Message Rendering ───────────────────────────────────────────────
+
 async function renderMessages() {
   if (!agent) return;
   const rows = [];
-  await agent.sqlite3.exec(agent.db, 'SELECT role, content FROM agent_memory ORDER BY id ASC', (row) => rows.push(row));
+  await agent.sqlite3.exec(
+    agent.db,
+    `SELECT role, content, tool_call_id FROM messages WHERE session_id = ? ORDER BY id ASC`,
+    [activeSessionId],
+    (row) => rows.push(row.values)
+  );
+
   messagesEl.innerHTML = '';
-  rows.forEach(([role, content]) => {
+  rows.forEach(([role, content, toolCallId]) => {
     if (role === 'system') return;
     const div = document.createElement('div');
     div.className = `message ${role}`;
-    div.textContent = content || '[empty]';
-    if (role === 'tool_result') { const l = document.createElement('div'); l.className='message-label'; l.textContent='🔧 Tool Output'; div.prepend(l); }
+
+    // Parse tool results as JSON tables when possible
+    if (role === 'tool') {
+      const label = document.createElement('div');
+      label.className = 'message-label';
+      label.textContent = '🔧 Tool Output';
+      div.prepend(label);
+      try {
+        const parsed = JSON.parse(content);
+        if (parsed && parsed.columns && parsed.values) {
+          div.innerHTML = renderTable(parsed.columns, parsed.values);
+        } else {
+          div.textContent = content || '[empty]';
+        }
+      } catch {
+        div.textContent = content || '[empty]';
+      }
+    } else {
+      div.textContent = content || '[empty]';
+    }
+
     messagesEl.appendChild(div);
   });
+
   document.getElementById('chat-container').scrollTop = messagesEl.parentElement.scrollHeight;
+  updateTokenUsage();
 }
 
-function setLoading(on) { loadingEl.classList.toggle('hidden', !on); inputEl.disabled = on; sendBtn.disabled = on; isProcessing = on; }
+function renderTable(columns, values) {
+  if (!values.length) return '<em>(no rows)</em>';
+  let html = '<table class="result-table"><thead><tr>';
+  columns.forEach(c => html += `<th>${escapeHtml(c)}</th>`);
+  html += '</tr></thead><tbody>';
+  values.forEach(row => {
+    html += '<tr>';
+    row.forEach(val => html += `<td>${escapeHtml(String(val ?? 'NULL'))}</td>`);
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  return html;
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function updateTokenUsage() {
+  if (!agent) return;
+  const [promptTokens, completionTokens] = await getSessionTokenUsage(agent.sqlite3, agent.db, activeSessionId);
+  const tokenEl = document.getElementById('token-usage');
+  if (tokenEl) {
+    tokenEl.textContent = `Tokens: ${promptTokens} in / ${completionTokens} out`;
+  }
+}
+
+// ── Processing State ────────────────────────────────────────────────
+
+function setLoading(on) {
+  loadingEl.classList.toggle('hidden', !on);
+  inputEl.disabled = on;
+  sendBtn.disabled = on;
+  isProcessing = on;
+}
+
+// ── Boot ────────────────────────────────────────────────────────────
 
 async function bootAgent() {
   const cfg = loadConfig();
@@ -53,11 +182,20 @@ async function bootAgent() {
       llmApiKey: cfg.apiKey || '',
       llmProvider: cfg.provider || 'openai',
     });
+
+    // Set active session
+    activeSessionId = 'default';
+    await setActiveSession(agent.sqlite3, agent.db, activeSessionId);
+
     const label = cfg.url ? `● Ready — ${cfg.provider} at ${cfg.url}` : '○ Ready — configure LLM to start';
     statusBar.textContent = label;
     statusBar.style.color = cfg.url ? '#3fb950' : '#8b949e';
-    inputEl.disabled = false; sendBtn.disabled = false;
-    await renderMessages(); inputEl.focus();
+    inputEl.disabled = false;
+    sendBtn.disabled = false;
+
+    await populateSessionDropdown();
+    await renderMessages();
+    inputEl.focus();
   } catch (e) {
     console.error('[main] Boot failed:', e);
     statusBar.textContent = `⚠ Boot failed: ${e.message}`;
@@ -65,31 +203,106 @@ async function bootAgent() {
   }
 }
 
+// ── Send Message ────────────────────────────────────────────────────
+
 async function sendMessage(text) {
   if (isProcessing || !agent || !text.trim()) return;
-  inputEl.value = ''; setLoading(true);
+  inputEl.value = '';
+  setLoading(true);
   await Promise.resolve();
+
   try {
     // Single INSERT → trigger cascade (JSPI suspends during LLM fetches) → done
-    for await (const stmt of agent.sqlite3.statements(agent.db, "INSERT INTO agent_memory (role, content) VALUES ('user', ?)")) {
-      agent.sqlite3.bind_collection(stmt, [text.trim()]);
+    // Message is inserted into the active session
+    const sql = `INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)`;
+    for await (const stmt of agent.sqlite3.statements(agent.db, sql)) {
+      agent.sqlite3.bind_collection(stmt, [activeSessionId, text.trim()]);
       await agent.sqlite3.step(stmt);
     }
+
+    // Update session's updated_at timestamp
+    await agent.sqlite3.exec(agent.db, `UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [activeSessionId]);
   } catch (e) {
     console.error('[main] Cascade error:', e);
     statusBar.textContent = '⚠ Error during agent execution';
     statusBar.style.color = '#f85149';
   }
-  setLoading(false); await renderMessages(); inputEl.focus();
+
+  setLoading(false);
+  await renderMessages();
+  inputEl.focus();
 }
 
+// ── Event Listeners ─────────────────────────────────────────────────
+
 formEl.addEventListener('submit', e => { e.preventDefault(); sendMessage(inputEl.value); });
+
 configForm.addEventListener('submit', e => {
   e.preventDefault();
-  saveConfig({ provider: configProvider.value, url: configUrl.value.trim(), model: configModel.value.trim(), apiKey: configKey.value.trim() });
+  saveConfig({
+    provider: configProvider.value,
+    url: configUrl.value.trim(),
+    model: configModel.value.trim(),
+    apiKey: configKey.value.trim(),
+  });
   document.getElementById('config-details').open = false;
   bootAgent();
 });
 
 populateConfigForm();
 bootAgent();
+
+// ── Cartridge Import/Export ─────────────────────────────────────────
+
+document.getElementById('btn-export').addEventListener('click', async () => {
+  if (!agent) return;
+  try {
+    statusBar.textContent = 'Exporting cartridge…';
+    statusBar.style.color = '#d29922';
+    const result = await exportCartridge(agent.sqlite3, agent.db, `bobby-brain-${new Date().toISOString().slice(0, 10)}.sqlite3`);
+    statusBar.textContent = `✓ Exported ${result.bytes} bytes`;
+    statusBar.style.color = '#3fb950';
+    setTimeout(() => {
+      statusBar.textContent = '● Ready';
+      statusBar.style.color = '#3fb950';
+    }, 3000);
+  } catch (e) {
+    console.error('[export]', e);
+    // Fallback to SQL dump
+    try {
+      statusBar.textContent = 'Binary export unavailable, trying SQL dump…';
+      await exportSqlDump(agent.sqlite3, agent.db, `bobby-brain-${new Date().toISOString().slice(0, 10)}.sql`);
+      statusBar.textContent = '✓ SQL dump exported';
+      statusBar.style.color = '#3fb950';
+    } catch (e2) {
+      console.error('[export sql]', e2);
+      statusBar.textContent = `⚠ Export failed: ${e2.message}`;
+      statusBar.style.color = '#f85149';
+    }
+  }
+});
+
+document.getElementById('btn-import').addEventListener('click', async () => {
+  if (!agent) return;
+  if (!confirm('Importing a cartridge will REPLACE your current database. Continue?')) return;
+  try {
+    statusBar.textContent = 'Importing cartridge…';
+    statusBar.style.color = '#d29922';
+    const newDb = await importCartridge(agent.sqlite3, 'agent_brain.sqlite3', 'idb');
+    agent.db = newDb;
+    activeSessionId = 'default';
+    await setActiveSession(agent.sqlite3, agent.db, 'default');
+    await populateSessionDropdown();
+    await renderMessages();
+    statusBar.textContent = '✓ Cartridge imported';
+    statusBar.style.color = '#3fb950';
+    setTimeout(() => {
+      statusBar.textContent = '● Ready';
+      statusBar.style.color = '#3fb950';
+    }, 3000);
+  } catch (e) {
+    console.error('[import]', e);
+    statusBar.textContent = `⚠ Import failed: ${e.message}`;
+    statusBar.style.color = '#f85149';
+  }
+});
