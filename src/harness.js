@@ -633,5 +633,8 @@ export async function bootSqliteAgent(config = {}) {
   }
 
   console.log('[harness] Agent booted (wa-sqlite JSPI). LLM:', endpointUrl || '(none)');
-  return { sqlite3, db, eventStream: agentEventStream };
+  // `module` is the raw WASM module — exposed so cartridge.js can cwrap
+  // exports the JS API wrapper lacks (sqlite3_serialize, sqlite3_deserialize,
+  // sqlite3_backup_*).
+  return { sqlite3, db, eventStream: agentEventStream, module };
 }

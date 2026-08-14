@@ -485,6 +485,9 @@ async function bootAgent() {
       llmProvider: provider,
     });
 
+    // Debug/test handle (used by the cartridge round-trip tests & console).
+    window.__agent = agent;
+
     // Start event stream listener
     startEventStreamListener();
 
@@ -586,7 +589,7 @@ document.getElementById('btn-export').addEventListener('click', async () => {
   try {
     statusBar.textContent = 'Exporting cartridge…';
     statusBar.style.color = '#d29922';
-    const result = await exportCartridge(agent.sqlite3, agent.db, `bobby-brain-${new Date().toISOString().slice(0, 10)}.sqlite3`);
+    const result = await exportCartridge(agent.sqlite3, agent.module, agent.db, `bobby-brain-${new Date().toISOString().slice(0, 10)}.sqlite3`);
     statusBar.textContent = `✓ Exported ${result.bytes} bytes`;
     statusBar.style.color = '#3fb950';
     setTimeout(() => {
@@ -614,20 +617,9 @@ document.getElementById('btn-import').addEventListener('click', async () => {
   try {
     statusBar.textContent = 'Importing cartridge…';
     statusBar.style.color = '#d29922';
-    const newDb = await importCartridge(agent.sqlite3, 'agent_brain.sqlite3', 'idb');
-    agent.db = newDb;
-
-    // Re-register update hook on imported DB
-    agent.sqlite3.update_hook(newDb, (iUpdateType, dbNameStr, tblName, rowid) => {
-      if (tblName === 'messages' && iUpdateType === 18 /* SQLITE_INSERT */) {
-        agent.eventStream?.emit('react_step', {
-          table: tblName,
-          action: 'INSERT',
-          rowid: typeof rowid === 'bigint' ? Number(rowid) : rowid,
-          dbName: dbNameStr,
-        });
-      }
-    });
+    // Same DB handle is preserved by importCartridge — UDFs, the update hook,
+    // and connection-level pragmas all survive, so nothing to re-register.
+    await importCartridge(agent.sqlite3, agent.module, agent.db);
 
     activeSessionId = 'default';
     await setActiveSession(agent.sqlite3, agent.db, 'default');

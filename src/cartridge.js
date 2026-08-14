@@ -1,127 +1,264 @@
 /**
  * CARTRIDGE — Import/Export .sqlite3 agent brains.
  *
- * Uses VACUUM INTO + sqlite3_serialize for export.
- * Uses File System Access API with fallback for file I/O.
+ * Export: live DB ──backup API──▶ :memory: DB ──sqlite3_serialize──▶ bytes
+ * Import: file bytes ──sqlite3_deserialize──▶ :memory: DB ──backup API──▶ live DB
+ *
+ * Why this shape:
+ *  - The backup API is the sanctioned way to snapshot a live database — it is
+ *    safe with active prepared statements and transactions, unlike VACUUM INTO
+ *    (which also required a `memory` VFS that is not registered in this app).
+ *  - `:memory:` uses SQLite's built-in memdb VFS, which is always available —
+ *    no URI filenames, no extra VFS registration.
+ *  - sqlite3_serialize / sqlite3_deserialize / sqlite3_backup_* are exported by
+ *    the WASM binary but NOT by the JS API wrapper (sqlite-api.js), so we call
+ *    the raw exports (module._sqlite3_*) directly.
+ *
+ *    This only works because those exports are JSPI-suspendable — i.e. present
+ *    in the `exportPattern` patch to vendor/wa-sqlite-jspi/wa-sqlite-jspi.mjs.
+ *    See vendor/wa-sqlite-jspi/README.md; reapply that patch after any
+ *    rebuild/re-vendor of the runtime, or these calls throw SuspendError.
+ *
+ * JSPI return-value note: in this build a suspendable function returns a
+ * Promise only when it actually suspends; otherwise it returns the value
+ * eagerly. `await` normalizes both cases — which is why we use raw exports
+ * instead of Module.cwrap(..., { async: true }) (whose ccall crashes on
+ * eager values: `ret.then is not a function`).
+ *
+ * String-arg note: C strings are allocated on the wasm HEAP (sqlite3_malloc)
+ * and freed only AFTER the awaited call resolves — freeing on the stack or
+ * before resolution would corrupt args of a still-suspended call.
+ *
+ * i64 ABI note: this build passes i64 arguments as two i32s, low half first
+ * (verified against the sqlite3_bind_int64 wrapper).
  */
+
+const SQLITE_OK = 0;
+const SQLITE_DONE = 101;
+const SQLITE_ROW = 100;
+const SQLITE_SERIALIZE_NORMAL = 0;
+const SQLITE_DESERIALIZE_DEFAULT = 0;
+const OPEN_READWRITE = 0x00000002;
+const OPEN_CREATE = 0x00000004;
+
+// ── Raw-ABI helpers ─────────────────────────────────────────────────
+
+/** Allocate a NUL-terminated UTF-8 C string on the wasm heap. */
+function toCString(module, str) {
+  const utf8 = new TextEncoder().encode(str);
+  const ptr = module._sqlite3_malloc(utf8.length + 1);
+  if (!ptr) throw new Error('sqlite3_malloc failed');
+  module.HEAPU8.set(utf8, ptr);
+  module.HEAPU8[ptr + utf8.length] = 0;
+  return ptr;
+}
+
+function freeCString(module, ptr) {
+  if (ptr) module._sqlite3_free(ptr);
+}
+
+/** Read an i64 from a wasm pointer (lo32 | hi32 << 32). */
+function readI64(module, ptr) {
+  const lo = module.HEAPU32[ptr >> 2];
+  const hi = module.HEAPU32[(ptr + 4) >> 2];
+  return Number(BigInt(hi) * 4294967296n + BigInt(lo));
+}
+
+function errname(module, rc) {
+  try {
+    const ptr = module._sqlite3_errstr(rc);
+    return ptr ? module.UTF8ToString(ptr) : `rc=${rc}`;
+  } catch {
+    return `rc=${rc}`;
+  }
+}
+
+/** Open a fresh in-memory database (built-in memdb VFS — always available). */
+async function openMemoryDb(sqlite3) {
+  return sqlite3.open_v2(':memory:', OPEN_READWRITE | OPEN_CREATE, null);
+}
+
+/**
+ * Copy srcDb → destDb page-for-page via the backup API.
+ * A single -1 step copies every page, making dest an exact replacement of src
+ * (extra tables/indexes present only in dest are dropped).
+ */
+async function backupFull(module, destDb, srcDb) {
+  const zDest = toCString(module, 'main');
+  const zSrc = toCString(module, 'main');
+  try {
+    const pBackup = await module._sqlite3_backup_init(destDb, zDest, srcDb, zSrc);
+    if (!pBackup) throw new Error('sqlite3_backup_init failed');
+    try {
+      const rc = await module._sqlite3_backup_step(pBackup, -1);
+      if (rc !== SQLITE_DONE) {
+        throw new Error(`sqlite3_backup_step failed: ${errname(module, rc)}`);
+      }
+    } finally {
+      await module._sqlite3_backup_finish(pBackup);
+    }
+  } finally {
+    freeCString(module, zDest);
+    freeCString(module, zSrc);
+  }
+}
 
 /**
  * Export the current database as a .sqlite3 file download.
  * @param {object} sqlite3 - wa-sqlite SQLiteAPI instance
- * @param {number} db - Database handle pointer
+ * @param {object} module  - raw WASM module (bootSqliteAgent return value)
+ * @param {number} db      - Database handle pointer
  * @param {string} filename - Suggested download filename
  */
-export async function exportCartridge(sqlite3, db, filename = 'bobby-brain.sqlite3') {
-  // Step 1: VACUUM INTO a temporary in-memory database
-  const tempFile = `file:export_${Date.now()}?vfs=memory`;
-  await sqlite3.exec(db, `VACUUM INTO '${tempFile}';`);
-
-  // Step 2: Open the temp DB and serialize to bytes
-  let pTempDb = 0;
+export async function exportCartridge(sqlite3, module, db, filename = 'bobby-brain.sqlite3') {
+  // 1. Snapshot the live DB into an in-memory DB (safe with active statements)
+  const pMemDb = await openMemoryDb(sqlite3);
   try {
-    const pTempDbOut = sqlite3.alloc(4);
-    await sqlite3.open_v2(tempFile, pTempDbOut, 0x00000006 /* READWRITE | URI */, null);
-    pTempDb = sqlite3.get_value(pTempDbOut, 0, 'i32');
-    sqlite3.free(pTempDbOut);
+    await backupFull(module, pMemDb, db);
 
-    // Try sqlite3_serialize (may not be available in all builds)
+    // 2. Serialize the in-memory DB into a malloc'd buffer
+    const zSchema = toCString(module, 'main');
+    const pSize = module._malloc(8);
     let bytes;
     try {
-      // Some wa-sqlite builds expose serialize directly
-      bytes = await sqlite3.serialize(pTempDb, 'main');
-    } catch {
-      // Fallback: read the memory VFS file directly
-      // Use backup API to copy to a known-memory file, then read
-      throw new Error('sqlite3_serialize not available in this build. Use SQL dump instead.');
+      const pBuf = await module._sqlite3_serialize(pMemDb, zSchema, pSize, SQLITE_SERIALIZE_NORMAL);
+      if (!pBuf) throw new Error('sqlite3_serialize returned NULL');
+      const size = readI64(module, pSize);
+      bytes = new Uint8Array(size);
+      bytes.set(module.HEAPU8.subarray(pBuf, pBuf + size));
+      module._sqlite3_free(pBuf);
+    } finally {
+      freeCString(module, zSchema);
+      module._free(pSize);
     }
 
-    // Step 3: Trigger download
+    // 3. Trigger download
     await saveFile(bytes, filename);
     return { success: true, bytes: bytes.length };
   } finally {
-    if (pTempDb) await sqlite3.close(pTempDb);
+    await sqlite3.close(pMemDb);
   }
 }
 
 /**
- * Import a .sqlite3 cartridge file, replacing the current database.
+ * Import a .sqlite3 cartridge file, replacing the current database contents.
+ * The live DB handle is preserved — UDFs, update hooks, and connection-level
+ * pragmas survive, so no re-registration is needed by the caller.
  * @param {object} sqlite3 - wa-sqlite SQLiteAPI instance
- * @param {string} dbName - Name of the persistent database
- * @param {string} vfsName - Name of the VFS to use
- * @returns {Promise<number>} New database handle
+ * @param {object} module  - raw WASM module (bootSqliteAgent return value)
+ * @param {number} db      - Live database handle pointer
+ * @returns {Promise<number>} The same database handle
  */
-export async function importCartridge(sqlite3, dbName, vfsName) {
-  // Step 1: Prompt user to select a .sqlite3 file
+export async function importCartridge(sqlite3, module, db) {
+  // 1. Prompt user to select a .sqlite3 file
   const fileBytes = await pickFile();
   if (!fileBytes) throw new Error('File selection cancelled.');
 
-  // Step 2: Clear IndexedDB storage for this database
-  // IDBBatchAtomicVFS stores data under the dbName key
-  await clearIndexedDB(dbName);
-
-  // Step 3: Open temp memory DB and load imported bytes
-  const tempFile = `file:import_${Date.now()}?vfs=memory`;
-  let pTempDb = 0;
-  let pNewDb = 0;
-
-  try {
-    const pTempDbOut = sqlite3.alloc(4);
-    await sqlite3.open_v2(tempFile, pTempDbOut, 0x00000006 | 0x00000004 /* READWRITE | CREATE | URI */, null);
-    pTempDb = sqlite3.get_value(pTempDbOut, 0, 'i32');
-    sqlite3.free(pTempDbOut);
-
-    // Deserialize bytes into temp DB
-    try {
-      await sqlite3.deserialize(pTempDb, 'main', fileBytes);
-    } catch {
-      throw new Error('sqlite3_deserialize not available. Cannot import binary cartridge.');
-    }
-
-    // Step 4: Open fresh persistent DB
-    const pNewDbOut = sqlite3.alloc(4);
-    await sqlite3.open_v2(dbName, pNewDbOut, 0x00000006 | 0x00000004 /* READWRITE | CREATE */, vfsName);
-    pNewDb = sqlite3.get_value(pNewDbOut, 0, 'i32');
-    sqlite3.free(pNewDbOut);
-
-    // Step 5: Backup from temp DB to persistent DB
-    const pBackup = await sqlite3.backup_init(pNewDb, 'main', pTempDb, 'main');
-    if (!pBackup) {
-      throw new Error(`backup_init failed: ${sqlite3.errmsg(pNewDb)}`);
-    }
-
-    await sqlite3.backup_step(pBackup, -1); // Copy all pages at once
-    await sqlite3.backup_finish(pBackup);
-
-    return pNewDb;
-  } finally {
-    if (pTempDb) await sqlite3.close(pTempDb);
+  // 2. Load the bytes into an in-memory DB
+  const pMemDb = await openMemoryDb(sqlite3);
+  const size = fileBytes.length;
+  const pBuf = module._sqlite3_malloc(size);
+  if (!pBuf) {
+    await sqlite3.close(pMemDb);
+    throw new Error('sqlite3_malloc failed');
   }
+  module.HEAPU8.set(fileBytes, pBuf);
+  const zSchema = toCString(module, 'main');
+  try {
+    // raw signature: (db, zSchema, pData, szDataLo, szDataHi, szBufLo, szBufHi, mFlags)
+    //
+    // CRITICAL: sqlite3_deserialize references pBuf LAZILY — the page data is
+    // only read out of pBuf on first access to the deserialized DB. pBuf must
+    // therefore stay allocated through the backup below AND until the in-memory
+    // DB is closed. Freeing it early corrupts the DB ("file is not a database").
+    const rc = await module._sqlite3_deserialize(
+      pMemDb, zSchema, pBuf,
+      size & 0xffffffff, Math.floor(size / 4294967296), // szData (lo, hi)
+      size & 0xffffffff, Math.floor(size / 4294967296), // szBuf  (lo, hi)
+      SQLITE_DESERIALIZE_DEFAULT
+    );
+    if (rc !== SQLITE_OK) {
+      throw new Error(`sqlite3_deserialize failed: ${errname(module, rc)}`);
+    }
+
+    // 3. Full replacement: back the imported DB over the live DB.
+    //    This is the first access to the deserialized pages — pBuf is still alive.
+    await backupFull(module, db, pMemDb);
+  } finally {
+    freeCString(module, zSchema);
+    await sqlite3.close(pMemDb);
+    module._sqlite3_free(pBuf); // safe only after the DB no longer references it
+  }
+
+  return db;
 }
 
 /**
  * Alternative export: generate a SQL dump instead of binary.
- * Works with any wa-sqlite build (no serialize needed).
+ * Emits schema objects from sqlite_master (tables, views, indexes, triggers)
+ * followed by one INSERT per row. Works with any wa-sqlite build.
  */
 export async function exportSqlDump(sqlite3, db, filename = 'bobby-brain.sql') {
   const lines = [];
-  await sqlite3.exec(db, `.dump`, null, {
-    resultText: (text) => lines.push(text),
-  });
+  lines.push('-- Bobby cartridge SQL dump');
+  lines.push(`-- Generated ${new Date().toISOString()}`);
+  lines.push('PRAGMA foreign_keys=OFF;');
+  lines.push('BEGIN TRANSACTION;');
+
+  // 1. Schema objects, in dependency-safe order: tables → views → indexes → triggers
+  //    (columns: 0=type, 1=name, 2=sql)
+  for (const [type, name, sql] of await queryAll(sqlite3, db,
+    "SELECT type, name, sql FROM sqlite_master " +
+    "WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' " +
+    "ORDER BY CASE type WHEN 'table' THEN 1 WHEN 'view' THEN 2 WHEN 'index' THEN 3 ELSE 4 END, name")) {
+    if (sql) lines.push(`${sql};`);
+  }
+
+  // 2. Table data (SELECT * yields values in table column order, matching VALUES(...))
+  const tables = await queryAll(sqlite3, db,
+    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name");
+  for (const [name] of tables) {
+    const q = quoteIdent(name);
+    const rows = await queryAll(sqlite3, db, `SELECT * FROM ${q}`);
+    if (rows.length === 0) continue;
+    for (const row of rows) {
+      lines.push(`INSERT INTO ${q} VALUES(${row.map(sqlLiteral).join(',')});`);
+    }
+  }
+
+  lines.push('COMMIT;');
 
   const sql = lines.join('\n');
-  const blob = new Blob([sql], { type: 'text/sql' });
-
-  // Download via anchor tag
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-
+  await saveFile(new TextEncoder().encode(sql), filename);
   return { success: true, bytes: sql.length };
+}
+
+/** Run a query and return all rows as arrays (column order preserved). */
+async function queryAll(sqlite3, db, sql) {
+  const rows = [];
+  for await (const stmt of sqlite3.statements(db, sql)) {
+    while (await sqlite3.step(stmt) === SQLITE_ROW) {
+      rows.push(sqlite3.row(stmt));
+    }
+  }
+  return rows;
+}
+
+function quoteIdent(name) {
+  return '"' + String(name).replace(/"/g, '""') + '"';
+}
+
+/** Render a JS value as a SQL literal (NULL / number / blob / quoted text). */
+function sqlLiteral(v) {
+  if (v === null || v === undefined) return 'NULL';
+  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : 'NULL';
+  if (typeof v === 'bigint') return v.toString();
+  if (v instanceof Uint8Array) {
+    let hex = '';
+    for (let i = 0; i < v.length; i++) hex += v[i].toString(16).padStart(2, '0');
+    return `X'${hex}'`;
+  }
+  return `'${String(v).replace(/'/g, "''")}'`;
 }
 
 // ── File I/O Helpers ────────────────────────────────────────────────
@@ -138,11 +275,7 @@ async function saveFile(data, suggestedName) {
         }],
       });
       const writable = await handle.createWritable();
-      if (data instanceof Uint8Array) {
-        await writable.write(data);
-      } else {
-        await writable.write(data);
-      }
+      await writable.write(data);
       await writable.close();
       return;
     } catch (err) {
@@ -196,23 +329,5 @@ async function pickFile() {
       }
     };
     input.click();
-  });
-}
-
-async function clearIndexedDB(dbName) {
-  // IDBBatchAtomicVFS uses the dbName as the IndexedDB database name
-  // We need to delete it to avoid stale page blocks
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.deleteDatabase(dbName);
-    req.onsuccess = () => resolve();
-    req.onerror = () => {
-      // If it doesn't exist, that's fine
-      if (req.error?.name === 'NotFoundError') {
-        resolve();
-      } else {
-        reject(req.error);
-      }
-    };
-    req.onblocked = () => resolve(); // Proceed once existing connections drop
   });
 }
