@@ -103,6 +103,10 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_call_id      TEXT,
     prompt_tokens     INTEGER DEFAULT 0,
     completion_tokens INTEGER DEFAULT 0,
+    -- T9: LLM-context visibility. 1 = included in the agent_think context build
+    -- (default: every normal conversation row). 0 = excluded — used by the !!
+    -- scratchpad (private direct-SQL commands the agent must never see).
+    in_context        INTEGER DEFAULT 1,
     created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -195,8 +199,10 @@ END;
 --    Fires when user or tool message is inserted into the active session.
 --    Calls ask_llm with session-scoped context → inserts assistant response.
 --    T3: suppressed while session_context.suppress_cascade = '1' (the
---    re-insert dance after a hard-error rollback). Drop+create (not IF NOT
---    EXISTS) so existing brains pick up the new WHEN condition.
+--    re-insert dance after a hard-error rollback).
+--    T9: the context build excludes in_context = 0 rows (the !! private
+--    scratchpad — the agent must never see those commands or results).
+--    Drop+create (not IF NOT EXISTS) so existing brains pick up changes.
 -- =====================================================================
 DROP TRIGGER IF EXISTS agent_think;
 CREATE TRIGGER agent_think
@@ -214,13 +220,17 @@ BEGIN
         COALESCE(json_extract(llm_response, '$.completion_tokens'), 0)
     FROM (
         SELECT ask_llm(
-            -- Build session-scoped message context
+            -- Build session-scoped message context (T9: in_context = 0 rows
+            -- are private scratchpad traffic — excluded from the agent's view)
             (SELECT json_group_array(json_object(
                 'role', CASE WHEN role = 'tool' THEN 'tool' ELSE role END,
                 'content', COALESCE(content, ''),
                 'tool_calls', CASE WHEN role = 'assistant' AND tool_calls IS NOT NULL THEN json(tool_calls) ELSE NULL END,
                 'tool_call_id', CASE WHEN role = 'tool' AND tool_call_id IS NOT NULL THEN tool_call_id ELSE NULL END
-            )) FROM messages WHERE session_id = NEW.session_id ORDER BY id ASC),
+            )) FROM messages
+            WHERE session_id = NEW.session_id
+              AND COALESCE(in_context, 1) = 1
+            ORDER BY id ASC),
             -- Tool definitions
             (SELECT json_group_array(json(schema)) FROM tools)
         ) AS llm_response
@@ -330,8 +340,8 @@ export async function forkSession(sqlite3, db, sourceSessionId, forkPointId, new
     await sqlite3.step(stmt);
   }
   for await (const stmt of sqlite3.statements(db, `
-    INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, created_at)
-    SELECT ?, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, created_at
+    INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, in_context, created_at)
+    SELECT ?, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, COALESCE(in_context, 1), created_at
     FROM messages WHERE session_id = ? AND id <= ?
   `)) {
     sqlite3.bind_collection(stmt, [newId, sourceSessionId, forkPointId]);
@@ -474,26 +484,61 @@ export async function sweepCaptureTriggers(sqlite3, db) {
 /**
  * Evict changesets + DDL log entries older than the most recent `keepTurns`
  * distinct turns for a session (the 20-turn rolling window).
+ *
+ * T9: TWO independent windows — real turns (turn_id >= 0, newest = largest;
+ * turn 0 = "no turn identity", e.g. CSV-ingest DML before any turn) and
+ * scratchpad turns (turn_id < 0, newest = MOST negative). Mixing them in one
+ * `turn_id DESC` window would rank every negative turn below every real turn,
+ * so scratchpad changesets would be evicted first and the scratchpad's ⟲
+ * would silently stop working after 20 real turns.
  */
 export async function evictChangesets(sqlite3, db, sessionId, keepTurns = 20) {
-  // Keep the most recent `keepTurns` distinct turns. Order by `turn_id DESC`
-  // (the user message id — monotonic), NOT by each table's AUTOINCREMENT `id`
-  // (independent sequences across the two tables would mis-rank recency).
-  const keepSub = `
+  const keepPos = `
     SELECT turn_id FROM (
-      SELECT turn_id FROM turn_changesets WHERE session_id = ?
+      SELECT turn_id FROM turn_changesets WHERE session_id = ? AND turn_id >= 0
       UNION
-      SELECT turn_id FROM turn_ddl_log WHERE session_id = ?
+      SELECT turn_id FROM turn_ddl_log WHERE session_id = ? AND turn_id >= 0
     )
     ORDER BY turn_id DESC
     LIMIT ?
   `;
+  const keepNeg = `
+    SELECT turn_id FROM (
+      SELECT turn_id FROM turn_changesets WHERE session_id = ? AND turn_id < 0
+      UNION
+      SELECT turn_id FROM turn_ddl_log WHERE session_id = ? AND turn_id < 0
+    )
+    ORDER BY turn_id ASC
+    LIMIT ?
+  `;
   await execParams(sqlite3, db,
-    `DELETE FROM turn_changesets WHERE session_id = ? AND turn_id NOT IN (${keepSub})`,
+    `DELETE FROM turn_changesets WHERE session_id = ? AND turn_id >= 0 AND turn_id NOT IN (${keepPos})`,
     [sessionId, sessionId, sessionId, keepTurns]);
   await execParams(sqlite3, db,
-    `DELETE FROM turn_ddl_log WHERE session_id = ? AND turn_id NOT IN (${keepSub})`,
+    `DELETE FROM turn_changesets WHERE session_id = ? AND turn_id < 0 AND turn_id NOT IN (${keepNeg})`,
     [sessionId, sessionId, sessionId, keepTurns]);
+  await execParams(sqlite3, db,
+    `DELETE FROM turn_ddl_log WHERE session_id = ? AND turn_id >= 0 AND turn_id NOT IN (${keepPos})`,
+    [sessionId, sessionId, sessionId, keepTurns]);
+  await execParams(sqlite3, db,
+    `DELETE FROM turn_ddl_log WHERE session_id = ? AND turn_id < 0 AND turn_id NOT IN (${keepNeg})`,
+    [sessionId, sessionId, sessionId, keepTurns]);
+}
+
+/**
+ * T9: distinct scratchpad turn ids (negative) that still have rewound-able
+ * changesets or DDL log rows for a session. Used to decide which scratchpad
+ * bubbles get a ⟲ button.
+ */
+export async function getRewindableScratchpadTurns(sqlite3, db, sessionId) {
+  const rows = await queryAll(sqlite3, db, `
+    SELECT turn_id FROM (
+      SELECT turn_id FROM turn_changesets WHERE session_id = ? AND turn_id < 0
+      UNION
+      SELECT turn_id FROM turn_ddl_log WHERE session_id = ? AND turn_id < 0
+    )
+  `, [sessionId, sessionId]);
+  return rows.map(([t]) => t);
 }
 
 /** Toggle the cascade-suppression flag (used by the re-insert dance + boot repair). */
@@ -575,6 +620,23 @@ export async function repairOrphanedToolCalls(sqlite3, db, sessionId) {
  * Drop the stale column (preserving any existing rows). Falls back to
  * drop+recreate on SQLite builds without ALTER TABLE DROP COLUMN (< 3.35).
  */
+/**
+ * T9 migration: existing brains have no `messages.in_context` column (added
+ * with the scratchpad). `CREATE TABLE IF NOT EXISTS` never alters an existing
+ * table, so add it here — every pre-existing row defaults to 1 (in context),
+ * which is exactly the pre-T9 behavior.
+ */
+export async function migrateMessagesTable(sqlite3, db) {
+  const rows = await queryAll(sqlite3, db, `PRAGMA table_info(messages)`);
+  // Table doesn't exist yet (fresh brain) — SCHEMA_SQL creates it with the
+  // column. MUST run before SCHEMA_SQL: the T9 agent_think trigger references
+  // in_context, and CREATE TRIGGER fails on a missing column.
+  if (!rows.length) return;
+  if (rows.some(([, name]) => name === 'in_context')) return;
+  console.warn('[schema] messages.in_context missing — adding (T9)');
+  await execParams(sqlite3, db, `ALTER TABLE messages ADD COLUMN in_context INTEGER DEFAULT 1`);
+}
+
 export async function migrateTurnTables(sqlite3, db) {
   const hasCol = async (table, col) => {
     const rows = await queryAll(sqlite3, db, `PRAGMA table_info(${table})`);

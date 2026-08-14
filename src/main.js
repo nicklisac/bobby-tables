@@ -10,12 +10,16 @@ import { bootSqliteAgent, getEventStream, beginTurn, requestStop, endTurn } from
 import {
   setActiveSession, createSession, listSessions, deleteSession, getSessionTokenUsage,
   sweepCaptureTriggers, repairOrphanedToolCalls, evictChangesets, setSuppressCascade,
-  setSuppressCapture, ensureCaptureTriggers,
+  setSuppressCapture, ensureCaptureTriggers, setCurrentTurnId,
+  getRewindableScratchpadTurns, queryAll, quoteIdent, logDDL,
 } from './schema.js';
-import { rewindToBeforeTurn, getChangesetSummary } from './rewind.js';
+import {
+  rewindToBeforeTurn, getChangesetSummary,
+  rewindToBeforeScratchpadTurn, getScratchpadChangesetSummary,
+} from './rewind.js';
 import { exportCartridge, importCartridge, exportSqlDump } from './cartridge.js';
 import { ingestCsvToSqlite } from './csv-ingestion.js';
-import { SQLITE_ROW } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
+import { SQLITE_ROW, SQLITE_DONE } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
 import './styles.css';
 
 const messagesEl        = document.getElementById('messages');
@@ -241,6 +245,47 @@ function renderToolContent(content) {
   return `<div class="tool-detail">${escapeHtml(String(parsed))}</div>`;
 }
 
+// ── T9: Scratchpad Rendering ────────────────────────────────────────
+//
+// Scratchpad result rows are assistant rows whose content is a JSON envelope:
+//   { scratchpad: true, sql, bangs, results: [{columns, values, truncated}],
+//     infos: [string], error?: string, ms }
+// `bangs === 1`  → `!`  shared: the transcript is in the agent's LLM context.
+// `bangs >= 2`   → `!!` private: the transcript is kept OUT of the agent's
+//                  LLM context (messages.in_context = 0).
+
+const SCRATCH_ROW_CAP = 200; // rows kept per result set (bounds LLM context)
+
+function renderScratchpadResult(env) {
+  const privateCmd = (env.bangs || 1) >= 2;
+  let html = `<div class="scratchpad-header">` +
+    `<span class="scratchpad-badge" title="${privateCmd ? 'Private — not in agent context' : 'Shared — agent sees this in context'}">${privateCmd ? '💥' : '⚡'}</span>` +
+    `<code class="scratchpad-sql" title="${escapeHtml(env.sql || '')}">${escapeHtml(env.sql || '')}</code>` +
+    `</div>`;
+
+  if (env.error) {
+    html += `<div class="tool-error">⚠ ${escapeHtml(env.error)}</div>`;
+  } else {
+    for (const info of env.infos || []) {
+      html += `<div class="scratchpad-info">${escapeHtml(info)}</div>`;
+    }
+    for (const r of env.results || []) {
+      html += renderTable(r.columns, r.values);
+      if (r.truncated) {
+        html += `<div class="scratchpad-info scratchpad-truncated">… truncated at ${SCRATCH_ROW_CAP} rows</div>`;
+      }
+    }
+    if (!(env.results || []).length && !(env.infos || []).length) {
+      html += '<em>(no output)</em>';
+    }
+  }
+
+  if (env.ms !== undefined) {
+    html += `<div class="scratchpad-footer">${env.ms} ms</div>`;
+  }
+  return html;
+}
+
 // ── Message Rendering ───────────────────────────────────────────────
 
 async function renderMessages() {
@@ -256,11 +301,24 @@ async function renderMessages() {
     }
   }
 
+  // T9: which scratchpad turns (negative ids) still have rewound-able
+  // changesets / DDL log rows — decides which scratchpad bubbles get a ⟲.
+  const rewindableScratchpad = new Set();
+  try {
+    for (const t of await getRewindableScratchpadTurns(agent.sqlite3, agent.db, activeSessionId)) {
+      rewindableScratchpad.add(t);
+    }
+  } catch (e) {
+    console.warn('[main] rewindable-scratchpad query failed (non-fatal):', e);
+  }
+
   messagesEl.innerHTML = '';
   rows.forEach(([id, role, content, toolCallId]) => {
     if (role === 'system') return;
     const div = document.createElement('div');
     div.className = `message ${role}`;
+    // T9: scratchpad user rows (leading bangs) render in monospace.
+    if (role === 'user' && /^!/.test(String(content))) div.classList.add('scratchpad');
 
     if (role === 'tool') {
       const label = document.createElement('div');
@@ -272,18 +330,48 @@ async function renderMessages() {
       contentDiv.innerHTML = renderToolContent(content);
       div.appendChild(contentDiv);
     } else {
-      div.textContent = content || '[empty]';
+      // T9: scratchpad result rows are assistant rows carrying a JSON
+      // envelope — render the table, not the raw JSON.
+      let env = null;
+      if (role === 'assistant' && typeof content === 'string') {
+        try {
+          const p = JSON.parse(content);
+          if (p && p.scratchpad === true) env = p;
+        } catch { /* plain text */ }
+      }
+      if (env) {
+        div.classList.add('scratchpad-result');
+        const contentDiv = document.createElement('div');
+        contentDiv.innerHTML = renderScratchpadResult(env);
+        div.appendChild(contentDiv);
+      } else {
+        div.textContent = content || '[empty]';
+      }
     }
 
     // T3: per-bubble rewind button on user messages — "rewind the database to
     // before this message".
+    // T9: scratchpad user rows (leading bangs) get a ⟲ only while their
+    // negative turn still has recorded changes; single-bang read-only
+    // commands that changed nothing get no button.
     if (role === 'user') {
-      const rewindBtn = document.createElement('button');
-      rewindBtn.className = 'rewind-btn';
-      rewindBtn.title = 'Rewind the database to the state before this message';
-      rewindBtn.textContent = '⟲';
-      rewindBtn.addEventListener('click', () => rewindToBefore(id));
-      div.appendChild(rewindBtn);
+      const bangs = (String(content).match(/^!+/) || [''])[0].length;
+      let target = null;
+      if (bangs === 0) {
+        target = () => rewindToBefore(id);
+      } else if (rewindableScratchpad.has(-id)) {
+        target = () => rewindToBeforeScratchpad(id);
+      }
+      if (target) {
+        const rewindBtn = document.createElement('button');
+        rewindBtn.className = 'rewind-btn';
+        rewindBtn.title = bangs === 0
+          ? 'Rewind the database to the state before this message'
+          : 'Rewind the database to the state before this scratchpad command';
+        rewindBtn.textContent = '⟲';
+        rewindBtn.addEventListener('click', target);
+        div.appendChild(rewindBtn);
+      }
     }
 
     messagesEl.appendChild(div);
@@ -575,6 +663,16 @@ async function bootAgent() {
 async function sendMessage(text) {
   if (isProcessing || !agent || !text.trim()) return;
   const userText = text.trim();
+
+  // T9: scratchpad branch — leading bang(s) mean "run this SQL directly",
+  // bypassing the LLM trigger cascade entirely.
+  const scratch = parseScratchpad(userText);
+  if (scratch) {
+    inputEl.value = '';
+    await runScratchpad(scratch, userText);
+    return;
+  }
+
   inputEl.value = '';
   setLoading(true);
   setSendButtonStop(true); // T3: morph Send → Stop while the turn is in flight
@@ -689,6 +787,376 @@ async function rewindToBefore(messageId) {
     setTimeout(updateReadyStatus, 3000);
   } catch (e) {
     console.error('[rewind]', e);
+    statusBar.textContent = `⚠ Rewind failed: ${e.message}`;
+    statusBar.style.color = '#f85149';
+  }
+}
+
+// ── T9: Direct SQL Scratchpad (! / !!) ──────────────────────────────
+//
+// Input grammar (checked in sendMessage before the normal LLM path):
+//   !SQL   → run ANY SQL directly (bypasses the LLM trigger); the command +
+//            result are stored with in_context = 1 — the agent SEES them in
+//            its context and can build on them.
+//   !!SQL  → run ANY SQL directly; stored with in_context = 0 — PRIVATE,
+//            the agent never sees the command or its result.
+//
+// No write gates: the bang prefix is the explicitness marker (it's a command
+// the human typed). Every WRITE statement (DML + DDL) asks for confirmation
+// before executing; reads (SELECT/WITH/EXPLAIN/…) run immediately.
+// system_config.allow_dml is untouched — it gates the AGENT's execute_sql
+// tool only (T3).
+//
+// Turn identity: the scratchpad user row's message id M becomes turn_id = -M
+// (negative, per T3) so its changesets/DDL log never pollute the real turn
+// sequence and are rewound-able via the bubble's ⟲ (see
+// rewindToBeforeScratchpadTurn).
+
+class ScratchpadCancelled extends Error {
+  constructor(statement) {
+    super('cancelled');
+    this.statement = statement;
+  }
+}
+
+/** Parse a leading-bang scratchpad command. Returns null for normal chat. */
+function parseScratchpad(text) {
+  const m = text.trim().match(/^(!+)([\s\S]*)$/);
+  if (!m) return null;
+  const sql = m[2].trim();
+  if (!sql) return null; // bare "!" → treat as a normal (weird) chat message
+  return { bangs: m[1].length, sql, inContext: m[1].length === 1 };
+}
+
+/**
+ * Classify one statement.
+ *   read      → SELECT / WITH / EXPLAIN (runs immediately, no confirm)
+ *   dml       → INSERT / UPDATE / DELETE (confirm, captured by row triggers)
+ *   ddl       → CREATE / DROP / ALTER (confirm, logged to turn_ddl_log)
+ *   forbidden → transaction control (BEGIN/COMMIT/ROLLBACK/SAVEPOINT/…) —
+ *               would break the scratchpad savepoint protocol; rejected
+ *               before execution.
+ *   other     → anything else (PRAGMA, VACUUM, …) — executed as-is; SQLite's
+ *               own errors surface in the result bubble (e.g. VACUUM cannot
+ *               run inside the scratchpad savepoint).
+ */
+function classifyStatement(sql) {
+  const t = sql.trim().replace(/;+\s*$/, '').trim();
+  const first = (t.split(/\s+/)[0] || '').toUpperCase();
+  if (['BEGIN', 'COMMIT', 'ROLLBACK', 'SAVEPOINT', 'RELEASE', 'END'].includes(first)) {
+    return { kind: 'forbidden' };
+  }
+  if (first === 'SELECT' || first === 'EXPLAIN') return { kind: 'read' };
+  if (first === 'WITH') {
+    // A data-modifying CTE (`WITH … INSERT/UPDATE/DELETE/REPLACE`) is a WRITE
+    // — the keyword heuristic errs safe (a string literal containing "DELETE"
+    // just costs an extra confirm).
+    return /\b(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(t) ? { kind: 'dml' } : { kind: 'read' };
+  }
+  if (first === 'INSERT' || first === 'UPDATE' || first === 'DELETE' || first === 'REPLACE') {
+    return { kind: 'dml' };
+  }
+  if (first === 'CREATE' || first === 'DROP' || first === 'ALTER') {
+    let ddlType = 'other', target = '';
+    let m = t.match(/^CREATE\s+(?:TEMP(?:ORARY)?\s+)?(?:UNIQUE\s+)?(TABLE|INDEX|VIEW)\b/i);
+    if (m) { ddlType = 'create'; target = m[1].toLowerCase(); }
+    else if ((m = t.match(/^DROP\s+(TABLE|INDEX|VIEW)\b/i))) { ddlType = 'drop'; target = m[1].toLowerCase(); }
+    else if (/^ALTER\s+TABLE\b/i.test(t)) { ddlType = 'alter'; target = 'table'; }
+    // Reversible: CREATE TABLE (inverse = drop) and DROP TABLE (inverse =
+    // pre-image restore). ALTER / other DDL are logged but not auto-reversible.
+    const reversible = (ddlType === 'create' && target === 'table') ||
+                       (ddlType === 'drop' && target === 'table');
+    return { kind: 'ddl', ddlType, target, reversible };
+  }
+  return { kind: 'other' };
+}
+
+function unquoteIdent(name) {
+  if ((name.startsWith('"') && name.endsWith('"')) ||
+      (name.startsWith('`') && name.endsWith('`')) ||
+      (name.startsWith('[') && name.endsWith(']'))) {
+    return name.slice(1, -1);
+  }
+  return name;
+}
+
+/** Best-effort object name from a CREATE/DROP/ALTER statement (null if unparseable).
+ *  Handles bare, double-quoted, backtick, and [bracket] identifiers. */
+function extractDdlTableName(sql) {
+  const t = sql.trim().replace(/;+\s*$/, '').trim();
+  // Quoted identifiers may contain spaces; bare ones may not.
+  // NOTE: the name group MUST be capturing — m[1] is the identifier.
+  const name = '("[^"]+"|`[^`]+`|\\[[^\\]]+\\]|[A-Za-z_][\\w$]*)';
+  // SQLite: CREATE [TEMP|TEMPORARY] [UNIQUE] TABLE … (UNIQUE precedes TABLE).
+  let m = t.match(new RegExp(`^CREATE\\s+(?:TEMP(?:ORARY)?\\s+)?(?:UNIQUE\\s+)?(?:TABLE|INDEX|VIEW)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${name}`, 'i'));
+  if (m) return unquoteIdent(m[1]);
+  m = t.match(new RegExp(`^DROP\\s+(?:TABLE|INDEX|VIEW)\\s+(?:IF\\s+EXISTS\\s+)?${name}`, 'i'));
+  if (m) return unquoteIdent(m[1]);
+  m = t.match(new RegExp(`^ALTER\\s+TABLE\\s+${name}`, 'i'));
+  if (m) return unquoteIdent(m[1]);
+  return null;
+}
+
+/**
+ * Capture a pre-image for DROP TABLE so ⟲ can restore it:
+ * { create_sql, columns, rows } — rows are JSON objects keyed by column.
+ * Must run BEFORE the drop (it SELECTs the table).
+ */
+async function captureDropPreImage(sqlite3, db, tableName) {
+  const master = await queryAll(sqlite3, db,
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, [tableName]);
+  if (!master.length) return null;
+  const createSql = master[0][0];
+
+  const cols = [];
+  for await (const stmt of sqlite3.statements(db, `PRAGMA table_info(${quoteIdent(tableName)})`)) {
+    while (await sqlite3.step(stmt) === SQLITE_ROW) {
+      cols.push(sqlite3.row(stmt)[1]);
+    }
+  }
+  if (!cols.length) return null;
+
+  const rows = [];
+  const colList = cols.map(quoteIdent).join(', ');
+  for await (const stmt of sqlite3.statements(db, `SELECT ${colList} FROM ${quoteIdent(tableName)}`)) {
+    while (await sqlite3.step(stmt) === SQLITE_ROW) {
+      const v = sqlite3.row(stmt);
+      const obj = {};
+      cols.forEach((c, i) => { obj[c] = v[i]; });
+      rows.push(obj);
+    }
+  }
+  return { create_sql: createSql, columns: cols, rows };
+}
+
+/** Confirm a write command before it executes (reads skip this). */
+function confirmScratchpadWrite(cls, sql, tableName) {
+  let what;
+  if (cls.kind === 'ddl') {
+    const verb = cls.ddlType === 'drop' ? 'DROP' : cls.ddlType === 'alter' ? 'ALTER TABLE' : 'CREATE';
+    what = `${verb} ${tableName || '(…)'}`.trim();
+  } else {
+    what = sql.split('\n')[0].slice(0, 120);
+  }
+  const rev = cls.kind === 'ddl'
+    ? (cls.reversible ? ' (rewound-able via ⟲)' : ' — NOT auto-rewound-able')
+    : (cls.kind === 'dml' ? ' (rewound-able via ⟲)' : '');
+  return confirm(`Run this write command?\n\n${what}\n${rev}`);
+}
+
+/** Insert a message row and return its new id (last_insert_rowid()). */
+async function insertMessage(sqlite3, db, sessionId, role, content, inContext) {
+  for await (const stmt of sqlite3.statements(db,
+    `INSERT INTO messages (session_id, role, content, in_context) VALUES (?, ?, ?, ?)`)) {
+    sqlite3.bind_collection(stmt, [sessionId, role, content, inContext ? 1 : 0]);
+    await sqlite3.step(stmt);
+  }
+  const rows = await queryAll(sqlite3, db, `SELECT last_insert_rowid()`);
+  return rows[0][0];
+}
+
+/**
+ * Execute a scratchpad SQL string (possibly multi-statement) inside the
+ * caller's savepoint. Per statement: classify → confirm (writes) → DDL
+ * pre-image + logDDL (before execution) → execute → re-sweep capture
+ * triggers after DDL.
+ */
+async function execScratchSql(sqlite3, db, sql, turnId, sessionId) {
+  const results = [];
+  const infos = [];
+
+  for await (const stmt of sqlite3.statements(db, sql)) {
+    const text = (sqlite3.sql(stmt) || '').trim();
+    if (!text) continue;
+    const cls = classifyStatement(text);
+    const tableName = cls.kind === 'ddl' ? extractDdlTableName(text) : null;
+
+    // Transaction control would break the scratchpad savepoint protocol.
+    if (cls.kind === 'forbidden') {
+      throw new Error(`Transaction-control statements (${text.split(/\s+/)[0]}) cannot run inside the scratchpad savepoint.`);
+    }
+
+    // Every write command confirms before executing (reads run immediately).
+    if (cls.kind !== 'read') {
+      if (!confirmScratchpadWrite(cls, text, tableName)) throw new ScratchpadCancelled(text);
+    }
+
+    // DDL: log with pre-image BEFORE executing (the drop must see the rows).
+    if (cls.kind === 'ddl') {
+      let preImage = null;
+      if (cls.ddlType === 'drop' && cls.target === 'table' && tableName) {
+        preImage = await captureDropPreImage(sqlite3, db, tableName);
+      }
+      await logDDL(sqlite3, db, { turnId, sessionId, tableName, ddlSql: text, preImage });
+    }
+
+    if (cls.kind === 'read' || cls.kind === 'other') {
+      // Row-returning statement (SELECT/WITH/EXPLAIN/PRAGMA/…).
+      const cols = sqlite3.column_names(stmt);
+      const values = [];
+      while (await sqlite3.step(stmt) === SQLITE_ROW) {
+        values.push(sqlite3.row(stmt));
+        if (values.length >= SCRATCH_ROW_CAP) break;
+      }
+      if (cols.length) {
+        results.push({ columns: cols, values, truncated: values.length >= SCRATCH_ROW_CAP });
+      }
+    } else {
+      // DML / DDL — run to completion, report affected rows.
+      while (await sqlite3.step(stmt) !== SQLITE_DONE) { /* step */ }
+      const n = sqlite3.changes(db);
+      if (cls.kind === 'ddl') {
+        const verb = cls.ddlType === 'drop' ? 'dropped' : cls.ddlType === 'alter' ? 'altered' : 'created';
+        infos.push(`✓ ${verb} ${tableName || 'object'}${cls.reversible ? '' : ' (NOT rewound-able)'}`);
+      } else {
+        infos.push(`✓ ${n} row${n === 1 ? '' : 's'} affected`);
+      }
+    }
+
+    // DDL invalidates the capture-trigger landscape: DROP TABLE drops its
+    // triggers, CREATE TABLE leaves the new table uninstrumented. Re-sweep.
+    if (cls.kind === 'ddl') {
+      await sweepCaptureTriggers(sqlite3, db);
+    }
+  }
+
+  return { results, infos };
+}
+
+/**
+ * Run a parsed scratchpad command end-to-end. Mirrors the T3 turn wrapper:
+ * savepoint around user row + execution + result row; on error, roll back
+ * and re-insert the user row + an error result row (cascade suppressed in
+ * try/finally — a stuck flag permanently kills the cascade).
+ */
+async function runScratchpad(cmd, rawText) {
+  const { sqlite3, db } = agent;
+  const t0 = performance.now();
+  setLoading(true);
+
+  // Optimistically render the user bubble (monospace, badge).
+  const userDiv = document.createElement('div');
+  userDiv.className = 'message user scratchpad';
+  userDiv.textContent = rawText;
+  messagesEl.appendChild(userDiv);
+  scrollChatToBottom();
+
+  try {
+    await setSuppressCascade(sqlite3, db, true);
+    try {
+      // The user row + result row + all data changes commit atomically.
+      await execSqlRaw(sqlite3, db, 'SAVEPOINT scratch_sp');
+      try {
+        // 1. User row (cascade suppressed — agent_think must NOT fire).
+        //    in_context: `!` = 1 (agent sees it), `!!` = 0 (private).
+        const M = await insertMessage(sqlite3, db, activeSessionId, 'user', rawText, cmd.inContext);
+
+        // 2. Negative turn identity: -M. The agent_turn_init trigger set
+        //    current_turn_id = +M on the insert; overwrite BEFORE any DML so
+        //    the capture triggers stamp this command's changes with -M.
+        await setCurrentTurnId(sqlite3, db, -M);
+
+        // 3. Execute (confirms may pause here; a cancel throws).
+        const { results, infos } = await execScratchSql(sqlite3, db, cmd.sql, -M, activeSessionId);
+
+        // 4. Result row (assistant, JSON envelope).
+        const envelope = {
+          scratchpad: true,
+          sql: cmd.sql,
+          bangs: cmd.bangs,
+          results,
+          infos,
+          ms: Math.round(performance.now() - t0),
+        };
+        await insertMessage(sqlite3, db, activeSessionId, 'assistant', JSON.stringify(envelope), cmd.inContext);
+
+        await execSqlRaw(sqlite3, db, 'RELEASE scratch_sp');
+      } catch (e) {
+        // SQL error or user cancelled a confirm — roll back partial work
+        // (including the user row). The re-insert happens in the outer catch.
+        try {
+          await execSqlRaw(sqlite3, db, 'ROLLBACK TO scratch_sp; RELEASE scratch_sp;');
+        } catch {
+          try { await execSqlRaw(sqlite3, db, 'RELEASE scratch_sp'); } catch { /* already gone */ }
+        }
+        throw e;
+      }
+    } finally {
+      await setSuppressCascade(sqlite3, db, false);
+    }
+
+    // Bookkeeping (work is committed — failures here are non-fatal).
+    try { await evictChangesets(sqlite3, db, activeSessionId, 20); } catch (e) { console.warn('[scratchpad] evict failed (non-fatal):', e); }
+    try {
+      for await (const stmt of sqlite3.statements(db, `UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`)) {
+        sqlite3.bind_collection(stmt, [activeSessionId]);
+        await sqlite3.step(stmt);
+      }
+    } catch (e) { console.warn('[scratchpad] session touch failed (non-fatal):', e); }
+  } catch (e) {
+    // Re-insert the user row + an error result row (cascade suppressed).
+    if (!(e instanceof ScratchpadCancelled)) console.error('[scratchpad] execution failed:', e);
+    const errMsg = e instanceof ScratchpadCancelled
+      ? `Cancelled — “${String(e.statement).split('\n')[0].slice(0, 80)}” was not executed.`
+      : (e && e.message) || String(e);
+    try {
+      await setSuppressCascade(sqlite3, db, true);
+      try {
+        await insertMessage(sqlite3, db, activeSessionId, 'user', rawText, cmd.inContext);
+        const envelope = {
+          scratchpad: true, sql: cmd.sql, bangs: cmd.bangs,
+          error: errMsg, ms: Math.round(performance.now() - t0),
+        };
+        await insertMessage(sqlite3, db, activeSessionId, 'assistant', JSON.stringify(envelope), cmd.inContext);
+      } finally {
+        await setSuppressCascade(sqlite3, db, false);
+      }
+    } catch (e2) {
+      console.error('[scratchpad] error-row re-insert failed:', e2);
+    }
+    statusBar.textContent = `⚠ ${errMsg}`;
+    statusBar.style.color = '#f85149';
+  } finally {
+    setLoading(false);
+    await renderMessages();
+    inputEl.disabled = false;
+    sendBtn.disabled = false;
+    inputEl.focus();
+    updateReadyStatus();
+  }
+}
+
+/** Tiny exec helper (no binds) for the scratchpad savepoint statements. */
+async function execSqlRaw(sqlite3, db, sql) {
+  for await (const stmt of sqlite3.statements(db, sql)) {
+    await sqlite3.step(stmt);
+  }
+}
+
+// ── T9: Scratchpad Rewind (per-bubble ⟲ on !! / writing ! commands) ───
+
+async function rewindToBeforeScratchpad(messageId) {
+  if (!agent || isProcessing) return;
+  const { sqlite3, db } = agent;
+  try {
+    const turnId = -messageId; // scratchpad turns are negative
+    const summary = await getScratchpadChangesetSummary(sqlite3, db, activeSessionId, turnId);
+    const ok = confirm(
+      `Rewind the database to the state before this scratchpad command?\n\n` +
+      `This undoes:\n${summary}\n\n` +
+      `The conversation history is preserved (data-only rewind).`
+    );
+    if (!ok) return;
+
+    statusBar.textContent = '⟲ Rewinding scratchpad…';
+    statusBar.style.color = '#d29922';
+    const n = await rewindToBeforeScratchpadTurn(sqlite3, db, activeSessionId, turnId);
+    statusBar.textContent = `✓ Rewound ${n} scratchpad command${n === 1 ? '' : 's'}`;
+    statusBar.style.color = '#3fb950';
+    await renderMessages();
+    setTimeout(updateReadyStatus, 3000);
+  } catch (e) {
+    console.error('[scratchpad-rewind]', e);
     statusBar.textContent = `⚠ Rewind failed: ${e.message}`;
     statusBar.style.color = '#f85149';
   }

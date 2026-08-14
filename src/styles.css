@@ -584,6 +584,68 @@ footer {
   transform: scale(1.1);
 }
 
+/* ── T9: Direct SQL Scratchpad (! / !!) ────────────────────────────── */
+
+/* User bubble for a scratchpad command — monospace, it's SQL not prose. */
+.message.user.scratchpad {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 0.78rem;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+/* Scratchpad result bubble (assistant row carrying a JSON envelope). */
+.message.assistant.scratchpad-result {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  white-space: normal;
+}
+
+.scratchpad-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.scratchpad-badge {
+  font-size: 0.8rem;
+  flex-shrink: 0;
+}
+
+.scratchpad-sql {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 0.72rem;
+  color: #e3b341;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.25rem;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.scratchpad-info {
+  color: #3fb950;
+  font-size: 0.72rem;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+}
+
+.scratchpad-truncated {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.scratchpad-footer {
+  color: var(--text-muted);
+  font-size: 0.6rem;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+}
+
+.message.assistant.scratchpad-result .result-table {
+  max-height: 320px;
+  overflow: auto;
+}
+
 /* ── Session Bar ───────────────────────────────────────────────────── */
 
 #session-bar {

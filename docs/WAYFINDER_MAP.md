@@ -45,6 +45,7 @@ A fresh session resumes from **this map alone** — destination, philosophy, and
 * [Decision: 3-Pane Workstation with SQLite-Backed Grid](#ticket-11-3-pane-workstation-layout--grid-engine) — The right pane is a dynamic 3x3 grid backed by `dashboard_cards` in SQLite, supporting merged cell spans, live SQL execution, and drag-drop pinning from chat.
 * [Decision: Tool-Output Materialization (The Golden Goose)](#ticket-13-tool-output-materialization-engine) — Use `json_each()` / `json_tree()` to transform raw tool JSON responses in `messages` directly into permanent tables with zero token transcription cost.
 * [Research: Local Embedding Pipeline (Transformers.js + `vec0`)](#ticket-5-native-vector-search-integration-sqlite-vec) — `Xenova/all-MiniLM-L6-v2` q8 (384-dim, cosine, WebGPU→WASM fallback); brute-force flat scan fine to ~50k chunks; async JSPI UDF returns vectors via `result_blob` + `Uint8Array` view.
+* [Decision: Scratchpad Bang Grammar — Explicitness, Not Privilege (T9 locked)](#ticket-9-direct-sql-scratchpad-select--ddlddl) — `!SQL` = run any SQL directly, agent SEES it (`in_context=1`); `!!SQL` = run any SQL directly, PRIVATE (`in_context=0`). No write gates: the bang prefix is the explicitness marker; `confirm()` on every write (DML+DDL), never on reads. `allow_dml` stays agent-tool-only. Negative turn ids (`-M`), two independent 20-turn eviction windows, DDL-first lenient replay, `DROP TABLE` pre-images, data-only ⟲ with in-context marker.
 
 ---
 
@@ -54,7 +55,7 @@ A fresh session resumes from **this map alone** — destination, philosophy, and
 graph TD
     T1[Ticket 1: Session Management & Schema Refactor - DONE] --> T2[Ticket 2: Context Declutter View]
     T1 --> T3[Ticket 3: Rolling Rewind, Savepoints & Stop Button - DONE]
-    T1 --> T9[Ticket 9: Direct SQL Console !SELECT]
+    T1 --> T9[Ticket 9: Direct SQL Scratchpad !SQL / !!SQL - DONE]
     T3 --> T9
     T1 --> T8[Ticket 8: DB Schema Inspector & View Exporter]
     T1 --> T11[Ticket 11: 3-Pane Layout & Grid Engine]
@@ -78,8 +79,8 @@ graph TD
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T3,T4,T5,T6,T7,T10 done;
-    class T2,T8,T9,T11,T13,T14,T15,T16,T17,T18,T19,T20 frontier;
+    class T1,T3,T4,T5,T6,T7,T9,T10 done;
+    class T2,T8,T11,T13,T14,T15,T16,T17,T18,T19,T20 frontier;
     class T12 blocked;
 ```
 
@@ -166,17 +167,19 @@ graph TD
 
 ---
 
-### Ticket 9: Direct SQL Scratchpad (`!SELECT` / `!!DDL`)
+### Ticket 9: Direct SQL Scratchpad (`!SQL` / `!!SQL`)
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Open (Frontier) — 🟡 CLAIMED (in progress)
+* **Status:** ✅ COMPLETE
 * **Question:** How should the chat input parser intercept `!` and `!!` prefixes, bypass LLM triggers, run direct SQL, and render formatted tabular output inside the message stream?
-* **Next steps (resuming session):** This is the natural first frontier ticket — it directly consumes T3's turn-identity, `allow_dml` gate, and changeset/DDL-log capture. Grill these open decisions, then implement:
-  * **Prefix grammar:** `!` = read-only SELECT/WITH (always allowed); `!!` = DML/DDL (gated). Decide whether `!` is strictly read-only or also allows DML.
-  * **Bypassing the cascade:** the normal user INSERT fires `agent_think`. For scratchpad, run the SQL directly and insert a cascade-suppressed user row + a result row (use `setSuppressCascade` in `try...finally`), OR detect the prefix and skip the INSERT path entirely.
-  * **Turn identity:** scratchpad writes use **negative turn IDs** (per T3) so they're rewound-able via ⟲ without polluting the real turn sequence.
-  * **`!!DDL` gate:** T3 locked *agent* DDL; `!!DDL` is the *user-facing* DDL path. It must log to `turn_ddl_log` + capture a pre-image (so ⟲ can undo it) and respect a gate (reuse `allow_dml`, or a separate `allow_ddl` flag — decide).
-  * **Rendering:** reuse `renderTable` for tabular output inside the message stream.
-  * **Entry point:** an input-parser branch in `src/main.js` (`sendMessage` / form submit) before the normal cascade path.
+* **Resolution (2026-08-14):** **Locked model (user-confirmed):** `!SQL` (exactly one leading bang) runs ANY SQL directly, bypassing the LLM; the transcript is stored `in_context = 1` — the agent SEES it in its LLM context. `!!SQL` (≥2 bangs) runs ANY SQL directly; stored `in_context = 0` — PRIVATE, the agent never sees it. **No write gates** on the scratchpad: the bang prefix is the explicitness marker ("it's a command"). `system_config.allow_dml` is UNCHANGED — it gates only the AGENT's `execute_sql` tool (T3). `confirm()` fires on EVERY write command (DML `INSERT/UPDATE/DELETE/REPLACE` + DDL `CREATE/DROP/ALTER`); reads (`SELECT/WITH/EXPLAIN`) run immediately. Transaction-control statements (`BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE/END`) are rejected — they would break the scratchpad savepoint protocol.
+  * **Turn identity:** the scratchpad user row's message id `M` becomes `turn_id = -M` (negative, per T3) via `setCurrentTurnId(-M)` after the user-row INSERT (the `agent_turn_init` trigger sets `+M` first; JS overwrites before any DML). Changesets + DDL log stamp `-M`, so the scratchpad never pollutes the real turn sequence.
+  * **Execution:** `runScratchpad` opens `SAVEPOINT scratch_sp` (cascade suppressed in `try...finally`); user row + all data changes + the result row commit atomically; on error/cancel, rollback + re-insert user row + error envelope. Persisted result = JSON envelope (`{scratchpad, sql, bangs, results|infos|error, ms}`) in an `assistant` row (NOT `tool` — orphan tool rows 400 the next LLM call), 200-row cap (`SCRATCH_ROW_CAP`) with a `truncated` flag.
+  * **DDL:** every DDL logs to `turn_ddl_log` BEFORE executing; `DROP TABLE` captures a full pre-image (`{create_sql, columns, rows}`) so ⟲ restores it; `sweepCaptureTriggers()` re-runs after every DDL (DROP drops its triggers, CREATE leaves the new table uninstrumented).
+  * **⟲ per bubble:** `rewindToBeforeScratchpadTurn` undoes every scratchpad turn with `turn_id <= -M` (newest/most-negative first), data-only — conversation history is preserved, an in-context marker row tells the agent the data changed. Replay order: DDL inverses FIRST (newest first), DML inverses second, DML inverse is lenient (skip if the table is missing).
+  * **Eviction:** TWO independent 20-turn windows in `evictChangesets` — real turns `turn_id >= 0` (newest = largest) and scratchpad `turn_id < 0` (newest = MOST negative). Mixing them in one `turn_id DESC` window would evict scratchpad turns first and silently break ⟲ after 20 real turns.
+  * **Context filter:** `messages.in_context` column (migration `migrateMessagesTable`, run BEFORE `SCHEMA_SQL` at boot — the `agent_think` trigger references the column); `agent_think`'s context subquery filters `COALESCE(in_context, 1) = 1`; `forkSession` copies the column.
+  * **Verification:** 14-step end-to-end probe `docs/prototypes/ticket-9-scratchpad-probe.mjs` (`runT9Probe`) all green against the live page — shared/private context split, negative-turn changesets, DDL create/drop + pre-image, ⟲ on DROP (incl. killer test: `!!DROP TABLE sample_data` + ⟲ = exact restore), error/forbidden/cancel paths, 200-row cap, both eviction windows, final data restore; page-reload re-render of tables from persisted envelopes; AGY second-eyes review (3 findings fixed: `REPLACE`/`WITH…REPLACE` misclassified as read/other; rigid `startsWith('CREATE TABLE')` DDL-inverse check missed `CREATE TEMP TABLE`).
+  * **Known limitations:** (1) drop + recreate + write the SAME table within one command — the DML inverse could hit a restored pre-recreate rowid; (2) DML on `CREATE TEMP TABLE` tables is not individually captured (temp tables get no capture triggers) — the DDL inverse drops the whole table on rewind, which is the correct net effect; (3) scratchpad rewind is data-only by design.
 
 ---
 

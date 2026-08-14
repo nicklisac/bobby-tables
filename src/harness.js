@@ -16,7 +16,7 @@ import { Factory } from '../vendor/wa-sqlite-jspi/sqlite-api.js';
 import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_ROW, SQLITE_INSERT } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
-import { SCHEMA_SQL, migrateTurnTables } from './schema.js';
+import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable } from './schema.js';
 
 /**
  * Live Event Stream for real-time UI streaming (tokens, tool execution, ReAct steps).
@@ -716,7 +716,17 @@ export async function bootSqliteAgent(config = {}) {
     }
   );
 
-  // 9. Initialize schema
+  // 9. T9 migration: add messages.in_context BEFORE SCHEMA_SQL — the T9
+  // agent_think trigger references the column, and CREATE TRIGGER fails on a
+  // missing column. (No-op on fresh brains: the table doesn't exist yet and
+  // SCHEMA_SQL creates it with the column.)
+  try {
+    await migrateMessagesTable(sqlite3, db);
+  } catch (e) {
+    console.warn('[harness] migrateMessagesTable failed (non-fatal):', e.message);
+  }
+
+  // 9b. Initialize schema
   await sqlite3.exec(db, SCHEMA_SQL);
 
   // 10. Schema migration: detect old agent_memory table and migrate
