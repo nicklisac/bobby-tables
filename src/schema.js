@@ -117,25 +117,7 @@ INSERT OR IGNORE INTO sample_data (id, name, category, value) VALUES
   (8, 'Gizmo R',   'Accessories',   8.99);
 
 -- =====================================================================
--- 6. Migration: agent_memory → messages (idempotent)
--- =====================================================================
--- If legacy agent_memory exists, migrate its data into messages then drop it
-INSERT OR IGNORE INTO messages (id, session_id, role, content, tool_calls, tool_call_id, created_at)
-SELECT
-    id,
-    'default' AS session_id,
-    CASE WHEN role = 'tool_result' THEN 'tool' ELSE role END,
-    content,
-    tool_calls,
-    tool_call_id,
-    created_at
-FROM agent_memory
-WHERE id > 0;  -- skip id=0 which is already seeded above
-
--- Old triggers are dropped after new ones are created (IF NOT EXISTS prevents conflict)
-
--- =====================================================================
--- 7. TRIGGER 1: Thinking Phase (session-scoped)
+-- 6. TRIGGER 1: Thinking Phase (session-scoped)
 --    Fires when user or tool message is inserted into the active session.
 --    Calls ask_llm with session-scoped context → inserts assistant response.
 -- =====================================================================
