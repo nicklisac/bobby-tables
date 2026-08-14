@@ -276,41 +276,41 @@ export async function bootSqliteAgent(config = {}) {
   );
 
   // 8. Schema migration: detect old agent_memory table and migrate
-  let hasAgentMemory = false;
-  for await (const stmt of sqlite3.statements(db, `SELECT name FROM sqlite_master WHERE type='table' AND name='agent_memory'`)) {
-    if (await sqlite3.step(stmt) === SQLITE_ROW) {
-      const val = sqlite3.column_text(stmt, 0);
-      if (val === 'agent_memory') hasAgentMemory = true;
+  try {
+    // Try to count rows in agent_memory — if it works, migrate; if not, skip
+    let agentMemoryCount = 0;
+    for await (const stmt of sqlite3.statements(db, `SELECT COUNT(*) FROM agent_memory`)) {
+      if (await sqlite3.step(stmt) === SQLITE_ROW) {
+        agentMemoryCount = sqlite3.column_int(stmt, 0);
+      }
+    }
+
+    if (agentMemoryCount > 0) {
+      console.warn(`[harness] Legacy agent_memory table detected (${agentMemoryCount} rows) — migrating`);
+      // Drop old triggers first (they reference agent_memory)
+      await sqlite3.exec(db, 'DROP TRIGGER IF EXISTS agent_think;');
+      await sqlite3.exec(db, 'DROP TRIGGER IF EXISTS execute_tool;');
+      // Migrate data
+      await sqlite3.exec(db, `
+        INSERT OR IGNORE INTO messages (id, session_id, role, content, tool_calls, tool_call_id, created_at)
+        SELECT id, 'default', CASE WHEN role='tool_result' THEN 'tool' ELSE role END, content, tool_calls, tool_call_id, created_at
+        FROM agent_memory;
+      `);
+      await sqlite3.exec(db, 'DROP TABLE IF EXISTS agent_memory;');
+      console.log('[harness] Migration complete');
+    }
+  } catch (e) {
+    // agent_memory doesn't exist or is unreadable — that's fine, skip migration
+    if (e.message?.includes('agent_memory')) {
+      console.log('[harness] No legacy agent_memory table, skipping migration');
+    } else {
+      console.warn('[harness] Migration check error (non-fatal):', e.message);
     }
   }
 
-  if (hasAgentMemory) {
-    console.warn('[harness] Legacy agent_memory table detected — migrating to messages schema');
-    // Drop old triggers first (they reference agent_memory)
-    await sqlite3.exec(db, 'DROP TRIGGER IF EXISTS agent_think;');
-    await sqlite3.exec(db, 'DROP TRIGGER IF EXISTS execute_tool;');
-    // Migrate data
-    await sqlite3.exec(db, `
-      CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL DEFAULT 'default',
-        role TEXT NOT NULL,
-        content TEXT,
-        tool_calls TEXT,
-        tool_call_id TEXT,
-        prompt_tokens INTEGER DEFAULT 0,
-        completion_tokens INTEGER DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    await sqlite3.exec(db, `
-      INSERT OR IGNORE INTO messages (id, session_id, role, content, tool_calls, tool_call_id, created_at)
-      SELECT id, 'default', CASE WHEN role='tool_result' THEN 'tool' ELSE role END, content, tool_calls, tool_call_id, created_at
-      FROM agent_memory;
-    `);
-    await sqlite3.exec(db, 'DROP TABLE IF EXISTS agent_memory;');
-    console.log('[harness] Migration complete');
-  }
+  // Clean up any stale triggers from old schema
+  await sqlite3.exec(db, 'DROP TRIGGER IF EXISTS agent_think;');
+  await sqlite3.exec(db, 'DROP TRIGGER IF EXISTS execute_tool;');
 
   // 9. Initialize schema (tables + triggers + sample data)
   await sqlite3.exec(db, SCHEMA_SQL);
