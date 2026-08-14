@@ -204,9 +204,18 @@ END;
  */
 export async function setActiveSession(sqlite3, db, sessionId) {
   // Ensure session exists
-  await sqlite3.exec(db, `INSERT OR IGNORE INTO sessions (id, name) VALUES (?, '${sessionId}')`, [sessionId]);
-  // Update context
-  await sqlite3.exec(db, `UPDATE session_context SET value = ? WHERE key = 'active_session_id'`, [sessionId]);
+  for await (const stmt of sqlite3.statements(db, `INSERT OR IGNORE INTO sessions (id, name) VALUES (?, ?)`)) {
+    sqlite3.bind_collection(stmt, [sessionId, sessionId]);
+    await sqlite3.step(stmt);
+  }
+  // Ensure session_context row exists, then update
+  for await (const stmt of sqlite3.statements(db, `INSERT OR IGNORE INTO session_context (key, value) VALUES ('active_session_id', 'default')`)) {
+    await sqlite3.step(stmt);
+  }
+  for await (const stmt of sqlite3.statements(db, `UPDATE session_context SET value = ? WHERE key = 'active_session_id'`)) {
+    sqlite3.bind_collection(stmt, [sessionId]);
+    await sqlite3.step(stmt);
+  }
 }
 
 /**
@@ -214,7 +223,10 @@ export async function setActiveSession(sqlite3, db, sessionId) {
  */
 export async function createSession(sqlite3, db, name = 'Untitled') {
   const id = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  await sqlite3.exec(db, `INSERT INTO sessions (id, name) VALUES (?, ?)`, [id, name]);
+  for await (const stmt of sqlite3.statements(db, `INSERT INTO sessions (id, name) VALUES (?, ?)`)) {
+    sqlite3.bind_collection(stmt, [id, name || 'Untitled']);
+    await sqlite3.step(stmt);
+  }
   return id;
 }
 
@@ -223,8 +235,8 @@ export async function createSession(sqlite3, db, name = 'Untitled') {
  */
 export async function listSessions(sqlite3, db) {
   const sessions = [];
-  await sqlite3.exec(db, `SELECT id, name, description, created_at, updated_at FROM sessions ORDER BY updated_at DESC`, (row) => {
-    sessions.push({ id: row.values[0], name: row.values[1], description: row.values[2] || '', created_at: row.values[3], updated_at: row.values[4] });
+  await sqlite3.exec(db, `SELECT id, name, COALESCE(description, ''), created_at, updated_at FROM sessions ORDER BY updated_at DESC`, (row) => {
+    sessions.push({ id: row.values[0], name: row.values[1], description: row.values[2], created_at: row.values[3], updated_at: row.values[4] });
   });
   return sessions;
 }
@@ -234,8 +246,14 @@ export async function listSessions(sqlite3, db) {
  */
 export async function deleteSession(sqlite3, db, sessionId) {
   if (sessionId === 'default') throw new Error('Cannot delete default session');
-  await sqlite3.exec(db, `DELETE FROM messages WHERE session_id = ?`, [sessionId]);
-  await sqlite3.exec(db, `DELETE FROM sessions WHERE id = ?`, [sessionId]);
+  for await (const stmt of sqlite3.statements(db, `DELETE FROM messages WHERE session_id = ?`)) {
+    sqlite3.bind_collection(stmt, [sessionId]);
+    await sqlite3.step(stmt);
+  }
+  for await (const stmt of sqlite3.statements(db, `DELETE FROM sessions WHERE id = ?`)) {
+    sqlite3.bind_collection(stmt, [sessionId]);
+    await sqlite3.step(stmt);
+  }
 }
 
 /**
@@ -243,12 +261,18 @@ export async function deleteSession(sqlite3, db, sessionId) {
  */
 export async function forkSession(sqlite3, db, sourceSessionId, forkPointId, newName = 'Forked Session') {
   const newId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  await sqlite3.exec(db, `INSERT INTO sessions (id, name) VALUES (?, ?)`, [newId, newName]);
-  await sqlite3.exec(db, `
+  for await (const stmt of sqlite3.statements(db, `INSERT INTO sessions (id, name) VALUES (?, ?)`)) {
+    sqlite3.bind_collection(stmt, [newId, newName]);
+    await sqlite3.step(stmt);
+  }
+  for await (const stmt of sqlite3.statements(db, `
     INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, created_at)
     SELECT ?, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, created_at
     FROM messages WHERE session_id = ? AND id <= ?
-  `, [newId, sourceSessionId, forkPointId]);
+  `)) {
+    sqlite3.bind_collection(stmt, [newId, sourceSessionId, forkPointId]);
+    await sqlite3.step(stmt);
+  }
   return newId;
 }
 
@@ -258,9 +282,8 @@ export async function forkSession(sqlite3, db, sourceSessionId, forkPointId, new
 export async function getSessionTokenUsage(sqlite3, db, sessionId) {
   const result = [];
   await sqlite3.exec(db, `
-    SELECT COALESCE(SUM(prompt_tokens), 0) as total_prompt,
-           COALESCE(SUM(completion_tokens), 0) as total_completion
-    FROM messages WHERE session_id = ?
-  `, [sessionId], (row) => result.push(row));
+    SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0)
+    FROM messages WHERE session_id = '${sessionId.replace(/'/g, "''")}'
+  `, (row) => result.push(row));
   return result[0]?.values || [0, 0];
 }
