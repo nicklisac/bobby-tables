@@ -17,6 +17,7 @@ A production-ready, local-first **Pure-SQL Web Agent & Data Operating System** r
 * **Core Philosophy:** *Push everything into SQLite.* The host JavaScript is strictly an I/O bridge; the ReAct state machine, history, tools, dashboard state, approvals, and memory management live in SQL triggers and tables.
 * **Execution Stack:** `wa-sqlite` + WebAssembly JSPI (JavaScript Promise Integration) for zero-overhead async UDF suspension.
 * **Relevant Skills & References:** `/grilling`, `/domain-modeling`, `/research`, `huggingface/tau` reference architecture.
+* **AGY as coding partner (standing preference, 2026-08-14):** Deploy AGY (`agy-wrapper.sh`) as a second set of eyes for sticky or non-apparent problems — implementation cross-checks, review of tricky glue code (JSPI/wasm boundaries, VFS behavior), and independent verification of empirically-probed facts. Check quota with `check-usage` before spawning; default to `Gemini 3.7 Flash (Low)`.
 
 ---
 
@@ -26,9 +27,11 @@ A production-ready, local-first **Pure-SQL Web Agent & Data Operating System** r
 * [Decision: Terminology Shift to `messages`](file:///home/nick/Documents/projects/web-sql-agent/src/schema.js) — Rename `agent_memory` to `messages` with explicit token tracking columns (`prompt_tokens`, `completion_tokens`).
 * [Decision: Windowed Declutter Context over Truncation](#ticket-2-context-declutter-view-specification) — Use a relational SQL View (`v_active_context`) to strip bloated tool outputs on older turns while preserving 100% untampered history in `messages`.
 * [Decision: 20-Turn Rolling Changeset + DDL Undo](#ticket-3-rolling-state-rewind--savepoint-integration) — Combine transient `SAVEPOINT`s for active-turn error/interrupt isolation with a 20-turn rolling changeset buffer and DDL log for cross-turn database state rewinds. Pre-delete table data before dropping tables so changesets can restore it.
+* [Decision: Turn Lifecycle, Savepoints & Stop Button (T3 locked)](#ticket-3-rolling-state-rewind--savepoint-integration) — JS opens `SAVEPOINT turn_sp` around each turn (illegal in triggers); graceful stop via UDF sentinel + `AbortController`; hard errors re-thrown from `ask_llm` → `ROLLBACK TO` + suppressed re-insert (in `try...finally`); row-image changesets written straight into `turn_changesets` inside the savepoint (20-turn ring, no staging table); per-bubble rewind is data-only with a `current_turn_id` stamp; `allow_dml` flag (default OFF) gates writes; ~15-line boot-time orphan-pair repair. **Implemented & verified end-to-end in the browser against the real Gemini harness** (normal turn, graceful stop, data-only rewind, boot repair); two verification bugs found & fixed (disabled Stop button; stale `seq` column migration).
 * [Decision: Portability via .sqlite3 Cartridges](#ticket-10-cartridge-import--export-sqlite3) — Treat `.sqlite3` files as shareable "Agent Cartridges" that can be imported, exported, and synced via the File System Access API.
 * [Decision: 3-Pane Workstation with SQLite-Backed Grid](#ticket-11-3-pane-workstation-layout--grid-engine) — The right pane is a dynamic 3x3 grid backed by `dashboard_cards` in SQLite, supporting merged cell spans, live SQL execution, and drag-drop pinning from chat.
 * [Decision: Tool-Output Materialization (The Golden Goose)](#ticket-13-tool-output-materialization-engine) — Use `json_each()` / `json_tree()` to transform raw tool JSON responses in `messages` directly into permanent tables with zero token transcription cost.
+* [Research: Local Embedding Pipeline (Transformers.js + `vec0`)](#ticket-5-native-vector-search-integration-sqlite-vec) — `Xenova/all-MiniLM-L6-v2` q8 (384-dim, cosine, WebGPU→WASM fallback); brute-force flat scan fine to ~50k chunks; async JSPI UDF returns vectors via `result_blob` + `Uint8Array` view.
 
 ---
 
@@ -37,9 +40,10 @@ A production-ready, local-first **Pure-SQL Web Agent & Data Operating System** r
 ```mermaid
 graph TD
     T1[Ticket 1: Session Management & Schema Refactor - DONE] --> T2[Ticket 2: Context Declutter View]
-    T1 --> T3[Ticket 3: Rolling Rewind, Savepoints & Stop Button]
-    T1 --> T8[Ticket 8: DB Schema Inspector & View Exporter]
+    T1 --> T3[Ticket 3: Rolling Rewind, Savepoints & Stop Button - DONE]
     T1 --> T9[Ticket 9: Direct SQL Console !SELECT]
+    T3 --> T9
+    T1 --> T8[Ticket 8: DB Schema Inspector & View Exporter]
     T1 --> T11[Ticket 11: 3-Pane Layout & Grid Engine]
     T11 --> T12[Ticket 12: Drag-Drop Chat to Grid Pinning]
     T1 --> T13[Ticket 13: Tool-Output Materialization]
@@ -50,7 +54,8 @@ graph TD
     T1 --> T19[Ticket 19: Persona & Prompt Presets]
 
     T4[Ticket 4: Live Event Streaming & Token Pipe - DONE]
-    T5[Ticket 5: Native Vector Search sqlite-vec]
+    T5[Ticket 5: Native Vector Search sqlite-vec - DONE]
+    T5 --> T20[Ticket 20: Vector Search App Layer]
     T6[Ticket 6: CSV & Tabular Ingestion Engine - DONE]
     T7[Ticket 7: Web Search & URL Fetch Tools - DONE]
     T10[Ticket 10: Cartridge Import / Export - DONE]
@@ -60,9 +65,9 @@ graph TD
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T4,T6,T7,T10 done;
-    class T5,T16 frontier;
-    class T2,T3,T8,T9,T11,T12,T13,T14,T15,T17,T18,T19 blocked;
+    class T1,T3,T4,T5,T6,T7,T10 done;
+    class T2,T8,T9,T11,T13,T14,T15,T16,T17,T18,T19,T20 frontier;
+    class T12 blocked;
 ```
 
 ---
@@ -79,15 +84,32 @@ graph TD
 
 ### Ticket 2: Context Declutter View Specification
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Blocked by Ticket 1
+* **Status:** Open (Frontier) — 🟡 CLAIMED (in progress)
+* **Draft Asset:** [v_active_context draft SQL](file:///home/nick/Documents/projects/web-sql-agent/docs/prototypes/ticket-2-v_active_context_draft.sql)
 * **Question:** What exact SQL windowing rules (`ROW_NUMBER()`) and character threshold triggers should `v_active_context` use to compress past tool results and metadata without losing critical reasoning context?
 
 ---
 
 ### Ticket 3: Rolling State Rewind, Savepoints & Stop Button
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Blocked by Ticket 1
+* **Status:** ✅ COMPLETE
+* **Verification Asset:** [ticket-3-turn-lifecycle-probe.mjs](file:///home/nick/Documents/projects/web-sql-agent/docs/prototypes/ticket-3-turn-lifecycle-probe.mjs) — empirical proof (real IDBBatchAtomicVFS) that savepoint → mid-cascade UDF throw → `ROLLBACK TO` + `RELEASE` atomically erases the turn (messages + DML), graceful-stop sentinel commits kept work, and close/reopen leaves `integrity_check: ok`.
 * **Question:** How should the JSPI harness wrap turns in `SAVEPOINT`s, support an `AbortController` stop button, and persist the 20-turn rolling changesets and DDL undo logs to IndexedDB?
+* **Resolution (2026-08-14):** Locked after empirical verification on the real `IDBBatchAtomicVFS` (probe asset) + an AGY design review (all 7 Round-2 recommendations confirmed, 3 guardrails folded in). Nine decisions:
+  * **Turn lifecycle (Q1/R2-Q1):** JS opens `SAVEPOINT turn_sp` *before* the user INSERT — `SAVEPOINT` is a syntax error inside a trigger body (F3), so it must be opened from JS; the cascade runs inside it. Normal end (final assistant row, no `tool_calls`) → `RELEASE`. **Graceful stop** → in-flight UDF returns a stop sentinel (`tool_calls: null`) → cascade ends → `RELEASE` (completed work kept). **Hard error** → `ask_llm` re-throws transport errors (it currently *swallows* them into a `⚠ SYSTEM ERROR` row — must change) → JS catches → `ROLLBACK TO turn_sp; RELEASE` → set `suppress_cascade='1'` **inside `try...finally`** (a stuck flag permanently kills the cascade) → re-insert the user row (trigger sees the flag, skips) → insert an assistant error row → clear the flag. Unexpected tool-UDF throw → same rollback path (the orphaned assistant row is inside the savepoint, so it rolls back).
+  * **Savepoint granularity (Q2):** per user turn — one savepoint wrapping the whole cascade.
+  * **Stop button (Q1/R2-Q6):** Send button morphs to Stop while a turn is in flight; `AbortController` aborts the in-flight `fetch`; the UDF catches `AbortError` → sentinel.
+  * **DML unlock (Q5/R2-Q2):** `system_config.allow_dml` (default **OFF**) unlocks only `INSERT/UPDATE/DELETE` in `run_dynamic_sql`; agent DDL stays locked until T13's materialization tool brings its own gated path (DDL invalidates the schema cookie — row-level capture can't track it cleanly).
+  * **Changeset storage (Q3/R2-Q3):** `turn_changesets` + `turn_ddl_log` SQLite tables. Capture triggers write row pre/post images **directly into `turn_changesets` inside the savepoint** (no separate staging table — `ROLLBACK TO` purges it for free, `RELEASE` commits data + changeset atomically). 20-turn ring buffer; eviction is a `DELETE`. Cartridge export includes the rewind history.
+  * **Turn identity (Q4/R2-Q4):** `session_context.current_turn_id`, set by a dedicated lightweight `agent_turn_init` trigger on user rows (`NEW.id`); capture triggers stamp rows with it; JS sets negative IDs for scratchpad writes.
+  * **Rewind scope (Q4):** data only — `messages` is an immutable audit log; a system marker row is appended so the agent knows the data changed under it.
+  * **Rewind UI (R2-Q5):** per-bubble ⟲ button on each user chat bubble; a confirmation modal shows the changeset summary (`SELECT table_name, op, count(*) FROM turn_changesets WHERE turn_id >= ? GROUP BY table_name, op`).
+  * **Boot repair (R2-Q7):** ~15-line boot-time repair for orphaned `tool_call` pairs (append a synthetic tool row) — guards against imported cartridges, manual scratchpad edits, and provider 400s on orphaned ids.
+  * **Verified facts (probed on the real build):** F1 a UDF throw propagates to JS + truncates the cascade + keeps prior work (no open tx); F2 a tool-UDF throw leaves an orphaned assistant row; F3 `SAVEPOINT` illegal in triggers; F4 `IDBBatchAtomicVFS` is crash-atomic per SQLite tx (`pendingVersion` marker + cleanup on open). The full turn-lifecycle probe (savepoint → mid-cascade throw → rollback → close/reopen, `integrity_check: ok`) passes.
+  * **New dependencies:** T3 → T9 (scratchpad DML/DDL needs turn-identity + changeset capture), T3 → T13 (materialization needs DDL capture). T2's windowing aligns to this 20-turn window + `current_turn_id`.
+  * **Implemented & verified (2026-08-14):** All build units landed — `src/schema.js` (turn tables, capture triggers, `agent_turn_init`, `evictChangesets`, suppression helpers, `repairOrphanedToolCalls`, `migrateTurnTables`), `src/harness.js` (turn stop state, `ask_llm` stop-check + `AbortController` + transport re-throw, `allow_dml` gate), `src/rewind.js` (reverse-delta replay + DDL inverse + marker + changeset consumption), `src/main.js` (turn wrapper, Stop-morph, per-bubble ⟲, boot setup), `src/styles.css`. Verified end-to-end in the browser against the **real Gemini harness**: a normal turn commits; **graceful Stop** aborts the in-flight fetch and ends the cascade with the sentinel (completed work kept); **per-bubble ⟲ rewind** does a data-only undo with a confirmation summary + marker row; boot orphan-repair runs clean; `integrity_check: ok` throughout. Two verification probes (real `schema.js`/`rewind.js`; fake-LLM for the SQL engine, real-LLM for the UI): [ticket-3-integration-probe.mjs](file:///home/nick/Documents/projects/web-sql-agent/docs/prototypes/ticket-3-integration-probe.mjs) and [ticket-3-rewind-ui-probe.mjs](file:///home/nick/Documents/projects/web-sql-agent/docs/prototypes/ticket-3-rewind-ui-probe.mjs).
+  * **Bugs found & fixed during verification:** (1) the Stop button was disabled by `setLoading(true)` at turn start, so it was unclickable mid-turn — `setSendButtonStop(true)` now re-enables it; (2) an early T3 schema draft left a stale NOT NULL `seq` column on `turn_changesets`/`turn_ddl_log` that `CREATE TABLE IF NOT EXISTS` never alters, silently breaking **all** DML capture + DDL logging on existing DBs — added `migrateTurnTables` (drops the column via `ALTER TABLE DROP COLUMN`, with a drop+recreate fallback for SQLite < 3.35).
+  * **AGY review (2026-08-14, `Gemini 3.6 Flash (Medium)`) — fixes applied:** (a) `turnSignalWith` used `typeof AbortSignal === 'object'` (always false — it's a function), so tool-fetch timeouts were silently dropped → now `typeof AbortSignal !== 'undefined'`; (b) `evictChangesets` ranked recency by each table's independent AUTOINCREMENT `id` → now orders by `turn_id DESC` (monotonic); (c) a crashed/reloaded tab could leave `suppress_cascade`/`suppress_capture` stuck at `'1'` (permanently killing the cascade) → boot now resets both to `'0'`; (d) CSV upload during a turn would clobber the turn's loading state → `handleCsvUpload` now bails on `isProcessing`; (e) session switching mid-turn mis-stamped that turn's changesets (capture reads `active_session_id` at fire time) → the session dropdown is disabled while a turn is in flight; (f) orphan repair now runs for **every** session, not just the active one. **False positive rejected:** AGY claimed `reinsertRow` crashes on `INTEGER PRIMARY KEY` tables (duplicate `rowid`/`id`); empirically disproven — the exact generated SQL succeeds (SQLite treats `id` as the rowid alias) and the integration probe's DELETE-undo on `sample_data` passes. **Known limitations (deferred, rare/out-of-scope):** `WITHOUT ROWID` tables have no `rowid` so capture triggers can't stamp them (the app never creates these); an `UPDATE` that changes a row's rowid would make the rewind's `WHERE rowid = ?` miss (rowid-mutating DML is not an agent path); column names containing single quotes would need escaping in the generated `json_object`.
 
 ---
 
@@ -101,8 +123,10 @@ graph TD
 
 ### Ticket 5: Native Vector Search Integration (`sqlite-vec`)
 * **Label:** `wayfinder:research` (AFK)
-* **Status:** Open (Frontier)
-* **Question:** What is the minimal build/load process to statically link `sqlite-vec` into `wa-sqlite-jspi`, and how should the local embedding pipeline (Transformers.js / ONNX) interface with `vec0` tables?
+* **Status:** ✅ COMPLETE
+* **Question:** How should the local embedding pipeline (Transformers.js / ONNX) interface with `vec0` tables?
+* **Solved fact (2026-08-14):** The build/load half is done — `vec0` is statically linked into the vendored `wa-sqlite-jspi.wasm` (verified in binary; no `load_extension` step needed at runtime).
+* **Resolution (2026-08-14):** Research complete. `vec0` API confirmed (DDL with vector/metadata/auxiliary/partition columns, KNN via `MATCH` + `k`, cosine/L2/L1 metrics, works in views, sync from regular-table triggers). Recommended pipeline: `Xenova/all-MiniLM-L6-v2` (q8, 23 MB, 384-dim, cosine) via Transformers.js with WebGPU→WASM fallback; brute-force flat SIMD scan is fine to ~50k chunks (partition key beyond); async JSPI UDF `embed_text()` must return vectors via `result_blob` with a `Uint8Array` view of the Float32Array buffer (raw Float32Array corrupts the bytes). Full report: [ticket-5-vec0-embedding-pipeline.md](file:///home/nick/Documents/projects/web-sql-agent/docs/research/ticket-5-vec0-embedding-pipeline.md). App-layer design graduated to Ticket 20.
 
 ---
 
@@ -124,14 +148,14 @@ graph TD
 
 ### Ticket 8: DB Schema Inspector & View Exporter UI
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Blocked by Ticket 1
+* **Status:** Open (Frontier)
 * **Question:** How should the left sidebar dynamically query `sqlite_master` to present table names, column types, row counts, and interactive preview modals, along with a "Save Query as View" button on chat bubbles?
 
 ---
 
 ### Ticket 9: Direct SQL Scratchpad (`!SELECT` / `!!DDL`)
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Blocked by Ticket 1
+* **Status:** Open (Frontier)
 * **Question:** How should the chat input parser intercept `!` and `!!` prefixes, bypass LLM triggers, run direct SQL, and render formatted tabular output inside the message stream?
 
 ---
@@ -146,35 +170,35 @@ graph TD
 
 ### Ticket 11: 3-Pane Workstation Layout & Grid Engine (`dashboard_cards`)
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Blocked by Ticket 1
+* **Status:** Open (Frontier)
 * **Question:** How should the UI implement the 3-pane layout (DB Explorer / Chat & Console / 3x3 Reactive Canvas) and create the `dashboard_cards` SQLite table with `row_span` and `col_span` support?
 
 ---
 
 ### Ticket 12: Drag-and-Drop Chat $\rightarrow$ Grid Pinning
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Blocked by Ticket 11
+* **Status:** Open (Frontier)1
 * **Question:** How should HTML5 Drag-and-Drop handlers be attached to chat query results to allow dragging live SQL queries onto grid drop zones, executing `INSERT INTO dashboard_cards`, and rendering reactive data widgets?
 
 ---
 
 ### Ticket 13: Tool-Output Materialization Engine
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Blocked by Ticket 1
+* **Status:** Open (Frontier)
 * **Question:** How should helper macros or tools allow the agent to execute `CREATE TABLE ... AS SELECT ... FROM messages, json_each(content)` to materialize raw API JSON into indexed tables with zero token overhead?
 
 ---
 
 ### Ticket 14: Dynamic Skills & Rules Table (`agent_skills`)
 * **Label:** `wayfinder:task` (AFK)
-* **Status:** Blocked by Ticket 1
+* **Status:** Open (Frontier)
 * **Question:** How should `agent_skills (id, name, rules, is_active)` be created and dynamically combined into the system prompt string in `v_active_context`?
 
 ---
 
 ### Ticket 15: Durable Semantic Memory (`agent_knowledge`)
 * **Label:** `wayfinder:task` (AFK)
-* **Status:** Blocked by Ticket 1
+* **Status:** Open (Frontier)
 * **Question:** How should `agent_knowledge (key, topic, fact)` and the `remember_fact` tool be registered to provide cross-session persistent memory?
 
 ---
@@ -183,27 +207,35 @@ graph TD
 * **Label:** `wayfinder:task` (AFK)
 * **Status:** Open (Frontier)
 * **Question:** How should documents be ingested into SQLite WASM's native `fts5` virtual table to enable BM25 keyword search queries by the agent?
+* **Solved fact (2026-08-14):** `fts5` is compiled into the vendored `wa-sqlite-jspi.wasm` (verified in binary) — no build work required. Remaining work is the app layer: document ingestion flow, the `fts5` virtual table definition, and registering a BM25 `MATCH` search tool in the `tools` table.
 
 ---
 
 ### Ticket 17: Human-in-the-Loop Approval Queue (`tool_approvals`)
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Blocked by Ticket 1
+* **Status:** Open (Frontier)
 * **Question:** How should destructive tools insert into `tool_approvals` with status `'pending'`, pausing the cascade until the user clicks an [Approve] button in the UI?
 
 ---
 
 ### Ticket 18: Self-Rendering Reactive Dashboards via SQL Views
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Blocked by Ticket 1
+* **Status:** Open (Frontier)
 * **Question:** How should the UI listen to agent-created SQL Views (`v_dashboard_*`) to render dynamic bar charts, line graphs, and metric widgets automatically?
 
 ---
 
 ### Ticket 19: Persona & System Prompt Presets
 * **Label:** `wayfinder:task` (AFK)
-* **Status:** Blocked by Ticket 1
+* **Status:** Open (Frontier)
 * **Question:** How should `personas (id, name, prompt, default_model)` be structured with a UI dropdown to allow switching agent roles at runtime?
+
+---
+
+### Ticket 20: Vector Search App Layer (`embed_text` + `vec_documents`)
+* **Label:** `wayfinder:prototype` (HITL)
+* **Status:** Open (Frontier)
+* **Question:** Per the Ticket 5 research, how should the embedding pipeline be wired as an agent capability — `embed_text` UDF registration, `vec_documents` vec0 table (384-dim, cosine, `document_id` partition key, `+contents`), which document sources get chunked & embedded on ingestion, and the `search_similar` tool registered in `tools` (including lazy model-load UX)?
 
 ---
 

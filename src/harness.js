@@ -16,7 +16,7 @@ import { Factory } from '../vendor/wa-sqlite-jspi/sqlite-api.js';
 import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_ROW, SQLITE_INSERT } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
-import { SCHEMA_SQL } from './schema.js';
+import { SCHEMA_SQL, migrateTurnTables } from './schema.js';
 
 /**
  * Live Event Stream for real-time UI streaming (tokens, tool execution, ReAct steps).
@@ -81,6 +81,60 @@ export const agentEventStream = new AgentEventStream();
  */
 export function getEventStream() {
   return agentEventStream.getStream();
+}
+
+// ── T3: Turn Stop (graceful) ─────────────────────────────────────────
+// A shared AbortController for the in-flight turn. The turn wrapper (main.js)
+// calls beginTurn() before the user INSERT and endTurn() after. requestStop()
+// (the Stop button) sets stopRequested and aborts any in-flight fetch.
+//
+// ask_llm checks stopRequested at its start and on abort → returns a stop
+// sentinel (tool_calls: null) so the cascade ends cleanly and completed work
+// is kept. Tool UDFs use the same signal so their fetches abort promptly; the
+// cascade then reaches the next ask_llm, which returns the sentinel.
+let stopRequested = false;
+let currentAbort = null;
+
+export function beginTurn() {
+  stopRequested = false;
+  currentAbort = new AbortController();
+  return currentAbort;
+}
+
+export function requestStop() {
+  stopRequested = true;
+  if (currentAbort) {
+    try { currentAbort.abort(); } catch { /* already aborted */ }
+  }
+}
+
+export function endTurn() {
+  stopRequested = false;
+  currentAbort = null;
+}
+
+export function isStopRequested() {
+  return stopRequested;
+}
+
+/** The shared in-flight signal (undefined when no turn is active). */
+function turnSignal() {
+  return currentAbort ? currentAbort.signal : undefined;
+}
+
+/** Combine the turn-abort signal with an optional timeout (for tool UDFs). */
+function turnSignalWith(timeoutMs) {
+  const signals = [];
+  if (currentAbort) signals.push(currentAbort.signal);
+  if (timeoutMs) signals.push(AbortSignal.timeout(timeoutMs));
+  if (!signals.length) return undefined;
+  if (signals.length === 1) return signals[0];
+  // AbortSignal is a constructor (typeof === 'function'), not an object — guard
+  // only for its existence so `AbortSignal.any` is actually used (otherwise tool
+  // fetches would silently drop the timeout signal).
+  return (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function')
+    ? AbortSignal.any(signals)
+    : signals[0];
 }
 
 /**
@@ -197,6 +251,18 @@ export async function bootSqliteAgent(config = {}) {
   await sqlite3.create_function(
     db, 'ask_llm', 2, SQLITE_UTF8, null,
     async (context, args) => {
+      // T3: graceful stop — if the user hit Stop before this LLM call, end the
+      // cascade cleanly (no tool_calls) and keep completed work.
+      if (stopRequested) {
+        agentEventStream.emit('done', { stopped: true });
+        sqlite3.result_text(context, JSON.stringify({
+          content: '⏹ Turn stopped by user.',
+          tool_calls: null,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+        }));
+        return;
+      }
       try {
         const contextJson = sqlite3.value_text(args[0]);
         const toolsJson = sqlite3.value_text(args[1]);
@@ -237,6 +303,7 @@ export async function bootSqliteAgent(config = {}) {
               'Content-Type': 'application/json',
               ...(targetApiKey ? { Authorization: `Bearer ${targetApiKey}` } : {}),
             },
+            signal: turnSignal(),
             body: JSON.stringify({
               model: llmModel,
               messages: apiMessages,
@@ -338,6 +405,18 @@ export async function bootSqliteAgent(config = {}) {
             }
           }
         } catch (streamErr) {
+          // T3: if the stop aborted the streaming fetch, end the cascade now —
+          // do NOT fall back to a second (also-aborted) fetch.
+          if (stopRequested || (streamErr && (streamErr.name === 'AbortError' || streamErr.name === 'TimeoutError'))) {
+            agentEventStream.emit('done', { stopped: true });
+            sqlite3.result_text(context, JSON.stringify({
+              content: '⏹ Turn stopped by user.',
+              tool_calls: null,
+              prompt_tokens: 0,
+              completion_tokens: 0,
+            }));
+            return;
+          }
           console.warn('[ask_llm] Streaming attempt failed, falling back to non-streaming:', streamErr);
         }
 
@@ -349,6 +428,7 @@ export async function bootSqliteAgent(config = {}) {
               'Content-Type': 'application/json',
               ...(targetApiKey ? { Authorization: `Bearer ${targetApiKey}` } : {}),
             },
+            signal: turnSignal(),
             body: JSON.stringify({
               model: llmModel,
               messages: apiMessages,
@@ -439,14 +519,25 @@ export async function bootSqliteAgent(config = {}) {
           completion_tokens: completionTokens,
         }));
       } catch (e) {
-        console.error('[ask_llm]', e);
+        // T3: graceful stop — the abort (or a stop flag set mid-flight) ends the
+        // cascade cleanly; completed work is kept.
+        if (stopRequested || (e && (e.name === 'AbortError' || e.name === 'TimeoutError'))) {
+          agentEventStream.emit('done', { stopped: true });
+          sqlite3.result_text(context, JSON.stringify({
+            content: '⏹ Turn stopped by user.',
+            tool_calls: null,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+          }));
+          return;
+        }
+        // T3: hard transport error — RE-THROW so the turn wrapper rolls back the
+        // whole turn (savepoint) and re-inserts the user message with an error
+        // note. (Previously this swallowed the error into a "⚠ SYSTEM ERROR"
+        // row, which poisoned the next turn's context.)
+        console.error('[ask_llm] transport error, re-throwing for turn rollback:', e);
         agentEventStream.emit('error', { error: e.message });
-        sqlite3.result_text(context, JSON.stringify({
-          content: `⚠ SYSTEM ERROR: ${e.message}`,
-          tool_calls: null,
-          prompt_tokens: 0,
-          completion_tokens: 0,
-        }));
+        throw e;
       }
     }
   );
@@ -468,8 +559,22 @@ export async function bootSqliteAgent(config = {}) {
           return;
         }
         const t = sql.trim().toUpperCase();
-        if (!t.startsWith('SELECT') && !t.startsWith('WITH')) {
-          const res = { error: 'Only SELECT queries allowed' };
+        const firstWord = (t.split(/\s+/)[0] || '').replace(/[^A-Z]/g, '');
+        const isReadOnly = firstWord === 'SELECT' || firstWord === 'WITH';
+        const isDML = firstWord === 'INSERT' || firstWord === 'UPDATE' || firstWord === 'DELETE';
+
+        // T3: read the DML gate (default OFF → agent is read-only).
+        let allowDml = false;
+        for await (const cfgStmt of sqlite3.statements(db, `SELECT value FROM system_config WHERE key = 'allow_dml'`)) {
+          if (await sqlite3.step(cfgStmt) === SQLITE_ROW) allowDml = sqlite3.row(cfgStmt)[0] === '1';
+        }
+
+        if (!isReadOnly && !(isDML && allowDml)) {
+          const res = {
+            error: allowDml
+              ? 'Only SELECT/WITH and INSERT/UPDATE/DELETE are allowed (DDL stays locked).'
+              : 'Only SELECT queries allowed. DML (INSERT/UPDATE/DELETE) is disabled — set system_config.allow_dml = 1 to let the agent write data.',
+          };
           agentEventStream.emit('tool_result', { tool: 'execute_sql', query: sql, error: res.error, result: res });
           sqlite3.result_text(context, JSON.stringify(res));
           return;
@@ -517,7 +622,7 @@ export async function bootSqliteAgent(config = {}) {
           return;
         }
         const searchUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1`;
-        const resp = await fetch(searchUrl, { headers: { 'Accept': 'application/json' } });
+        const resp = await fetch(searchUrl, { headers: { 'Accept': 'application/json' }, signal: turnSignalWith(15000) });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         const results = [];
@@ -591,7 +696,7 @@ export async function bootSqliteAgent(config = {}) {
             return;
           }
         }
-        const resp = await fetch(url, { headers: { 'User-Agent': 'WebSQLAgent/1.0' }, signal: AbortSignal.timeout(10000) });
+        const resp = await fetch(url, { headers: { 'User-Agent': 'WebSQLAgent/1.0' }, signal: turnSignalWith(10000) });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const html = await resp.text();
         const text = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8000);
@@ -630,6 +735,14 @@ export async function bootSqliteAgent(config = {}) {
     }
   } catch (e) {
     if (!e.message?.includes('agent_memory')) console.warn('[harness] Migration error (non-fatal):', e.message);
+  }
+
+  // 10b. Migration: drop the stale NOT NULL `seq` column from the T3 turn
+  // tables (an early draft had it; the final schema orders by `id`).
+  try {
+    await migrateTurnTables(sqlite3, db);
+  } catch (e) {
+    console.warn('[harness] migrateTurnTables failed (non-fatal):', e.message);
   }
 
   console.log('[harness] Agent booted (wa-sqlite JSPI). LLM:', endpointUrl || '(none)');

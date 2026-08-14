@@ -6,8 +6,13 @@
  * Live Event Streaming: renders tokens, tool execution indicators, and results in real time.
  */
 
-import { bootSqliteAgent, getEventStream } from './harness.js';
-import { setActiveSession, createSession, listSessions, deleteSession, getSessionTokenUsage } from './schema.js';
+import { bootSqliteAgent, getEventStream, beginTurn, requestStop, endTurn } from './harness.js';
+import {
+  setActiveSession, createSession, listSessions, deleteSession, getSessionTokenUsage,
+  sweepCaptureTriggers, repairOrphanedToolCalls, evictChangesets, setSuppressCascade,
+  setSuppressCapture, ensureCaptureTriggers,
+} from './schema.js';
+import { rewindToBeforeTurn, getChangesetSummary } from './rewind.js';
 import { exportCartridge, importCartridge, exportSqlDump } from './cartridge.js';
 import { ingestCsvToSqlite } from './csv-ingestion.js';
 import { SQLITE_ROW } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
@@ -243,7 +248,7 @@ async function renderMessages() {
   const rows = [];
   for await (const stmt of agent.sqlite3.statements(
     agent.db,
-    `SELECT role, content, tool_call_id FROM messages WHERE session_id = ? ORDER BY id ASC`
+    `SELECT id, role, content, tool_call_id FROM messages WHERE session_id = ? ORDER BY id ASC`
   )) {
     agent.sqlite3.bind_collection(stmt, [activeSessionId]);
     while (await agent.sqlite3.step(stmt) === SQLITE_ROW) {
@@ -252,7 +257,7 @@ async function renderMessages() {
   }
 
   messagesEl.innerHTML = '';
-  rows.forEach(([role, content, toolCallId]) => {
+  rows.forEach(([id, role, content, toolCallId]) => {
     if (role === 'system') return;
     const div = document.createElement('div');
     div.className = `message ${role}`;
@@ -268,6 +273,17 @@ async function renderMessages() {
       div.appendChild(contentDiv);
     } else {
       div.textContent = content || '[empty]';
+    }
+
+    // T3: per-bubble rewind button on user messages — "rewind the database to
+    // before this message".
+    if (role === 'user') {
+      const rewindBtn = document.createElement('button');
+      rewindBtn.className = 'rewind-btn';
+      rewindBtn.title = 'Rewind the database to the state before this message';
+      rewindBtn.textContent = '⟲';
+      rewindBtn.addEventListener('click', () => rewindToBefore(id));
+      div.appendChild(rewindBtn);
     }
 
     messagesEl.appendChild(div);
@@ -440,7 +456,29 @@ function setLoading(on) {
   if (loadingEl) loadingEl.classList.toggle('hidden', true); // replaced by live streaming UI
   inputEl.disabled = on;
   sendBtn.disabled = on;
+  // Lock session switching mid-turn: the capture triggers read
+  // session_context.active_session_id at fire time, so switching sessions while
+  // a turn is in flight would mis-stamp that turn's changesets. (The Stop button
+  // is re-enabled separately by setSendButtonStop.)
+  if (sessionSelect) sessionSelect.disabled = on;
   isProcessing = on;
+}
+
+// T3: morph the Send button into a Stop button while a turn is in flight.
+function setSendButtonStop(on) {
+  if (!sendBtn) return;
+  if (on) {
+    sendBtn.dataset.mode = 'stop';
+    sendBtn.textContent = '⏹ Stop';
+    sendBtn.classList.add('stop-btn');
+    // T3: the button is disabled by setLoading(true) at turn start, but Stop must
+    // stay clickable while the turn is in flight — re-enable it here.
+    sendBtn.disabled = false;
+  } else {
+    delete sendBtn.dataset.mode;
+    sendBtn.textContent = 'Send';
+    sendBtn.classList.remove('stop-btn');
+  }
 }
 
 function updateReadyStatus() {
@@ -495,6 +533,28 @@ async function bootAgent() {
     activeSessionId = 'default';
     await setActiveSession(agent.sqlite3, agent.db, activeSessionId);
 
+    // T3: clear any suppression flags left stuck at '1' by a crashed/reloaded
+    // tab — a stuck suppress_cascade permanently kills the cascade on reboot.
+    try {
+      await setSuppressCascade(agent.sqlite3, agent.db, false);
+      await setSuppressCapture(agent.sqlite3, agent.db, false);
+    } catch (e) {
+      console.warn('[main] T3 flag reset failed (non-fatal):', e);
+    }
+
+    // T3: attach capture triggers to every user data table (idempotent) and
+    // repair orphaned tool_call pairs in EVERY session (a crash mid-cascade can
+    // leave an assistant row with tool_calls but no tool row → LLM 400 later).
+    try {
+      await sweepCaptureTriggers(agent.sqlite3, agent.db);
+      const allSessions = await listSessions(agent.sqlite3, agent.db);
+      for (const s of allSessions) {
+        await repairOrphanedToolCalls(agent.sqlite3, agent.db, s.id);
+      }
+    } catch (e) {
+      console.warn('[main] T3 boot setup failed (non-fatal):', e);
+    }
+
     updateReadyStatus();
 
     inputEl.disabled = false;
@@ -517,6 +577,7 @@ async function sendMessage(text) {
   const userText = text.trim();
   inputEl.value = '';
   setLoading(true);
+  setSendButtonStop(true); // T3: morph Send → Stop while the turn is in flight
 
   // Optimistically render user message immediately
   const userDiv = document.createElement('div');
@@ -528,25 +589,73 @@ async function sendMessage(text) {
   activeStreamingBubble = null;
   activeToolIndicator = null;
 
+  const { sqlite3, db } = agent;
+  beginTurn(); // T3: reset stop state + create the turn AbortController
+
   try {
-    // Single INSERT → trigger cascade (JSPI suspends during LLM fetches & streaming) → done
+    // T3: open the turn savepoint. SAVEPOINT is illegal inside a trigger body,
+    // so it must be opened from JS; the whole cascade runs inside it.
+    await sqlite3.exec(db, 'SAVEPOINT turn_sp');
+
+    // Single INSERT → trigger cascade (JSPI suspends during LLM fetches &
+    // streaming) → done.
     const sql = `INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)`;
-    for await (const stmt of agent.sqlite3.statements(agent.db, sql)) {
-      agent.sqlite3.bind_collection(stmt, [activeSessionId, userText]);
-      await agent.sqlite3.step(stmt);
+    for await (const stmt of sqlite3.statements(db, sql)) {
+      sqlite3.bind_collection(stmt, [activeSessionId, userText]);
+      await sqlite3.step(stmt);
     }
 
-    // Update session's updated_at timestamp
-    await agent.sqlite3.exec(agent.db, `UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [activeSessionId]);
+    // Normal end (or graceful stop) → commit the turn.
+    await sqlite3.exec(db, 'RELEASE turn_sp');
+
+    // T3: evict changesets beyond the 20-turn rolling window.
+    await evictChangesets(sqlite3, db, activeSessionId, 20);
+
+    // Update session's updated_at timestamp.
+    for await (const stmt of sqlite3.statements(db, `UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`)) {
+      sqlite3.bind_collection(stmt, [activeSessionId]);
+      await sqlite3.step(stmt);
+    }
 
     // Emit 'done' event
     agent.eventStream?.emit('done', { sessionId: activeSessionId });
   } catch (e) {
-    console.error('[main] Cascade error:', e);
+    // T3: hard error — ask_llm re-threw a transport error (or a tool UDF threw).
+    // Roll back the whole turn, then re-insert the user message (cascade
+    // suppressed) + an assistant error note.
+    console.error('[main] Cascade error, rolling back turn:', e);
+    try {
+      await sqlite3.exec(db, 'ROLLBACK TO turn_sp; RELEASE turn_sp;');
+    } catch (rbErr) {
+      console.error('[main] Rollback failed:', rbErr);
+      try { await sqlite3.exec(db, 'RELEASE turn_sp'); } catch { /* already gone */ }
+    }
+
+    // Re-insert the user message with the cascade suppressed. The flag toggle
+    // MUST be in try/finally — a stuck '1' permanently kills the cascade.
+    await setSuppressCascade(sqlite3, db, true);
+    try {
+      const ins = `INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)`;
+      for await (const stmt of sqlite3.statements(db, ins)) {
+        sqlite3.bind_collection(stmt, [activeSessionId, userText]);
+        await sqlite3.step(stmt);
+      }
+      const errNote = `⚠ **Turn failed** — the model request could not complete (${e.message}). Your message was kept; please try again.`;
+      const insErr = `INSERT INTO messages (session_id, role, content) VALUES (?, 'assistant', ?)`;
+      for await (const stmt of sqlite3.statements(db, insErr)) {
+        sqlite3.bind_collection(stmt, [activeSessionId, errNote]);
+        await sqlite3.step(stmt);
+      }
+    } finally {
+      await setSuppressCascade(sqlite3, db, false);
+    }
+
     agent.eventStream?.emit('error', { error: e.message });
     statusBar.textContent = `⚠ Error: ${e.message}`;
     statusBar.style.color = '#f85149';
   } finally {
+    endTurn();
+    setSendButtonStop(false);
     setLoading(false);
     // Reconcile and finalize state with SQLite database
     await renderMessages();
@@ -557,9 +666,46 @@ async function sendMessage(text) {
   }
 }
 
+// ── T3: Rewind ──────────────────────────────────────────────────────
+
+async function rewindToBefore(messageId) {
+  if (!agent || isProcessing) return;
+  const { sqlite3, db } = agent;
+  try {
+    const summary = await getChangesetSummary(sqlite3, db, activeSessionId, messageId);
+    const ok = confirm(
+      `Rewind the database to the state before this message?\n\n` +
+      `This undoes:\n${summary}\n\n` +
+      `The conversation history is preserved (data-only rewind).`
+    );
+    if (!ok) return;
+
+    statusBar.textContent = '⟲ Rewinding…';
+    statusBar.style.color = '#d29922';
+    const n = await rewindToBeforeTurn(sqlite3, db, activeSessionId, messageId);
+    statusBar.textContent = `✓ Rewound ${n} turn${n === 1 ? '' : 's'}`;
+    statusBar.style.color = '#3fb950';
+    await renderMessages();
+    setTimeout(updateReadyStatus, 3000);
+  } catch (e) {
+    console.error('[rewind]', e);
+    statusBar.textContent = `⚠ Rewind failed: ${e.message}`;
+    statusBar.style.color = '#f85149';
+  }
+}
+
 // ── Event Listeners ─────────────────────────────────────────────────
 
 formEl.addEventListener('submit', e => { e.preventDefault(); sendMessage(inputEl.value); });
+
+// T3: when the Send button has morphed into Stop, a click aborts the in-flight
+// turn instead of submitting a new message.
+sendBtn.addEventListener('click', (e) => {
+  if (sendBtn.dataset.mode === 'stop') {
+    e.preventDefault();
+    requestStop();
+  }
+});
 
 configProvider.addEventListener('change', () => {
   updateConfigVisibility(configProvider.value);
@@ -671,6 +817,10 @@ function hideIngestionProgress() {
 
 async function handleCsvUpload(file) {
   if (!file) return;
+  if (isProcessing) {
+    alert('Please wait for the current turn to finish before uploading a CSV.');
+    return;
+  }
   if (!agent) {
     alert('Agent is still initializing. Please wait a moment.');
     return;
@@ -715,6 +865,14 @@ async function handleCsvUpload(file) {
         }
       }
     );
+
+    // T3: attach row-image capture triggers to the new table so its changes
+    // are rewound-able.
+    try {
+      await ensureCaptureTriggers(agent.sqlite3, agent.db, result.tableName);
+    } catch (e) {
+      console.warn('[csv-ingestion] Failed to attach capture triggers:', e);
+    }
 
     setTimeout(() => {
       hideIngestionProgress();
