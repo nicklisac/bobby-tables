@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html><head><title>Non-JSPI Test</title></head><body>
+<pre id="log"></pre>
+<script type="module">
+const log = m => { document.getElementById('log').textContent += m + '\n'; };
+log('Testing NON-JSPI build...');
+try {
+  const mod = await import('./vendor/sqlite-wasm-jspi/dist/sqlite3-bundler-friendly.mjs');
+  const sqlite3 = await mod.default({
+    locateFile: f => f === 'sqlite3.wasm' ? './vendor/sqlite-wasm-jspi/dist/sqlite3.wasm' : f,
+  });
+  log('✓ Init OK, version: ' + sqlite3.version.libVersion);
+  const db = new sqlite3.oo1.DB(':memory:');
+  db.exec('CREATE TABLE t (id INT)');
+  db.exec('INSERT INTO t VALUES (42)');
+  log('✓ DB OK, query: ' + JSON.stringify(db.exec('SELECT * FROM t')));
+  log('✓ ALL PASSED — non-JSPI build works!');
+} catch(e) { log('✗ ' + e.message); }
+</script>
+</body></html>

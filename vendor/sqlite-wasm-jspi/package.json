@@ -1,0 +1,11 @@
+{
+  "name": "sqlite-wasm-jspi",
+  "version": "3.54.0-jspi",
+  "type": "module",
+  "description": "Custom JSPI-enabled SQLite WASM build",
+  "main": "./dist/sqlite3-bundler-friendly.mjs",
+  "exports": {
+    ".": "./dist/sqlite3-bundler-friendly.mjs",
+    "./sqlite3.wasm": "./dist/sqlite3.wasm"
+  }
+}

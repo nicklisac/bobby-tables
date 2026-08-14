@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Web SQL Agent</title>
+  <link rel="stylesheet" href="/src/styles.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Web SQL Agent</h1>
+      <p class="subtitle">Pure-SQL Brain-in-a-Box &middot; JSPI-Powered</p>
+    </header>
+
+    <!-- LLM Configuration Panel -->
+    <section id="config-panel">
+      <details id="config-details">
+        <summary>Configure LLM</summary>
+        <form id="config-form">
+          <div class="config-row">
+            <label for="config-provider">Provider</label>
+            <select id="config-provider">
+              <option value="openai">OpenAI Compatible (Ollama, LM Studio)</option>
+              <option value="gemini">Google Gemini API</option>
+            </select>
+          </div>
+          <div class="config-row">
+            <label for="config-url">Endpoint URL</label>
+            <input type="text" id="config-url" placeholder="http://localhost:11434/api/chat" />
+          </div>
+          <div class="config-row">
+            <label for="config-model">Model</label>
+            <input type="text" id="config-model" placeholder="llama3" value="gemini-2.5-flash" />
+          </div>
+          <div class="config-row">
+            <label for="config-key">API Key <span class="optional">(optional for local)</span></label>
+            <input type="password" id="config-key" placeholder="sk-... or AIza..." />
+          </div>
+          <button type="submit" id="config-apply">Apply &amp; Reboot Agent</button>
+        </form>
+      </details>
+    </section>
+
+    <main id="chat-container">
+      <div id="messages"></div>
+      <div id="loading" class="hidden">
+        <span class="dot"></span>
+        <span class="dot"></span>
+        <span class="dot"></span>
+      </div>
+    </main>
+
+    <footer>
+      <div id="status-bar">Initializing&hellip;</div>
+      <form id="input-form">
+        <input
+          type="text"
+          id="user-input"
+          placeholder="Ask me to query your data&hellip;"
+          autocomplete="off"
+          disabled
+        />
+        <button type="submit" id="send-btn" disabled>Send</button>
+      </form>
+    </footer>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

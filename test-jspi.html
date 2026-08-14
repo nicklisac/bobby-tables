@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head><title>JSPI Test</title></head>
+<body>
+<pre id="log"></pre>
+<script type="module">
+const log = (msg) => { document.getElementById('log').textContent += msg + '\n'; console.log(msg); };
+
+log('Loading sqlite3-bundler-friendly.mjs directly (no Vite)...');
+
+try {
+  const mod = await import('./vendor/sqlite-wasm-jspi/dist/sqlite3-bundler-friendly.mjs');
+  const sqlite3InitModule = mod.default;
+
+  log('Initializing SQLite WASM...');
+  const sqlite3 = await sqlite3InitModule({
+    locateFile: (f) => {
+      if (f === 'sqlite3.wasm') return './vendor/sqlite-wasm-jspi/dist/sqlite3.wasm';
+      return f;
+    },
+  });
+
+  log('✓ SQLite initialized successfully!');
+  log('Version: ' + sqlite3.version.libVersion);
+
+  // Check the aggregate_context export
+  const raw = sqlite3.wasmExports?.sqlite3_aggregate_context;
+  log('raw wasmExports.sqlite3_aggregate_context: ' + (raw ? 'present (' + typeof raw + ')' : 'MISSING'));
+
+  const capi = sqlite3.capi?.sqlite3_aggregate_context;
+  log('capi.sqlite3_aggregate_context: ' + (capi ? 'present (' + typeof capi + ')' : 'MISSING'));
+
+  // Try opening a DB
+  log('Opening in-memory DB...');
+  const db = new sqlite3.oo1.DB(':memory:');
+  log('✓ DB opened!');
+
+  db.exec('CREATE TABLE test (id INTEGER, name TEXT)');
+  db.exec("INSERT INTO test VALUES (1, 'hello')");
+  const result = db.exec('SELECT * FROM test');
+  log('Query result: ' + JSON.stringify(result));
+  log('✓ ALL TESTS PASSED!');
+
+} catch (e) {
+  log('✗ ERROR: ' + e.message);
+  log('Stack: ' + e.stack);
+}
+</script>
+</body>
+</html>
