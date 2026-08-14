@@ -36,7 +36,7 @@ A production-ready, local-first **Pure-SQL Web Agent & Data Operating System** r
 
 ```mermaid
 graph TD
-    T1[Ticket 1: Session Management & Schema Refactor] --> T2[Ticket 2: Context Declutter View]
+    T1[Ticket 1: Session Management & Schema Refactor - DONE] --> T2[Ticket 2: Context Declutter View]
     T1 --> T3[Ticket 3: Rolling Rewind, Savepoints & Stop Button]
     T1 --> T8[Ticket 8: DB Schema Inspector & View Exporter]
     T1 --> T9[Ticket 9: Direct SQL Console !SELECT]
@@ -48,18 +48,20 @@ graph TD
     T1 --> T17[Ticket 17: Human-in-the-Loop Approvals]
     T1 --> T18[Ticket 18: Self-Rendering Reactive Views]
     T1 --> T19[Ticket 19: Persona & Prompt Presets]
-    
+
     T4[Ticket 4: Live Event Streaming & Token Pipe]
     T5[Ticket 5: Native Vector Search sqlite-vec]
     T6[Ticket 6: CSV & Tabular Ingestion Engine]
-    T7[Ticket 7: Web Search Exa & URL Fetch Tools]
-    T10[Ticket 10: Cartridge Import / Export]
+    T7[Ticket 7: Web Search & URL Fetch Tools - DONE]
+    T10[Ticket 10: Cartridge Import / Export - DONE]
     T16[Ticket 16: In-Browser Full-Text Search FTS5]
 
+    classDef done fill:#238636,stroke:#2ea043,color:#fff;
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
-    
-    class T1,T4,T5,T6,T7,T10,T16 frontier;
+
+    class T1,T7,T10 done;
+    class T4,T5,T6,T16 frontier;
     class T2,T3,T8,T9,T11,T12,T13,T14,T15,T17,T18,T19 blocked;
 ```
 
@@ -69,8 +71,9 @@ graph TD
 
 ### Ticket 1: Session Management & Schema Refactor
 * **Label:** `wayfinder:task` (AFK)
-* **Status:** Open (Frontier)
+* **Status:** ✅ COMPLETE
 * **Question:** How do we refactor `src/schema.js` and `src/harness.js` to support multi-session partitioning (`sessions` table, foreign keys in `messages`), token count columns (`prompt_tokens`, `completion_tokens`), and conversation forking queries?
+* **Resolution:** Implemented `sessions` table (TEXT PK), `messages` table with `session_id` FK, `session_context` for active session tracking. Triggers scoped via `NEW.session_id`. Token tracking in `ask_llm` UDF. Session CRUD: create, list, delete, fork. UI: session dropdown + new/delete buttons + token usage counter. Migration from legacy `agent_memory` included.
 
 ---
 
@@ -109,10 +112,11 @@ graph TD
 
 ---
 
-### Ticket 7: Web Search (Exa) & URL Fetching Tools
+### Ticket 7: Web Search & URL Fetching Tools
 * **Label:** `wayfinder:task` (AFK)
-* **Status:** Open (Frontier)
+* **Status:** ✅ COMPLETE
 * **Question:** How should the `tools` table and `execute_tool` trigger define and route `search_web_exa(query)` and `fetch_url(url)` UDFs safely through JSPI?
+* **Resolution:** Added `search_web` (DuckDuckGo Lite API, no key needed) and `fetch_url` UDFs. SSRF protection blocks localhost/private IPs. HTML stripping + 8000 char cap on fetch results. Tool routing via CASE in `execute_tool` trigger.
 
 ---
 
@@ -132,8 +136,9 @@ graph TD
 
 ### Ticket 10: Cartridge Import / Export (.sqlite3)
 * **Label:** `wayfinder:task` (AFK)
-* **Status:** Open (Frontier)
+* **Status:** ✅ COMPLETE
 * **Question:** How should `sqlite3.serialize()` and File System Access API integration be implemented to allow one-click export/import of complete `.sqlite3` agent brains?
+* **Resolution:** `src/cartridge.js` with `exportCartridge()` (VACUUM INTO + serialize + File System Access API download) and `importCartridge()` (file picker + deserialize + backup API). SQL dump fallback for builds without serialize. UI: Export/Import buttons in header.
 
 ---
 
