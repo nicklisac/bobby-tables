@@ -16,7 +16,8 @@ import { Factory } from '../vendor/wa-sqlite-jspi/sqlite-api.js';
 import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_ROW, SQLITE_INSERT } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
-import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable } from './schema.js';
+import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, queryAll } from './schema.js';
+import { runCompaction, queryActiveContextJson } from './compaction.js';
 
 /**
  * Live Event Stream for real-time UI streaming (tokens, tool execution, ReAct steps).
@@ -137,6 +138,23 @@ function turnSignalWith(timeoutMs) {
     : signals[0];
 }
 
+// ── T2: Reactive compaction — context-length 400 detection ───────────
+// A provider context-length overflow surfaces as an HTTP 400 whose body
+// mentions the limit. We detect it so ask_llm can compact + retry once.
+export class ContextLengthError extends Error {
+  constructor(status, text) {
+    super(`context length exceeded (HTTP ${status}): ${text}`);
+    this.name = 'ContextLengthError';
+    this.status = status;
+    this.text = text;
+  }
+}
+
+export function isContextLengthError(status, text) {
+  if (status !== 400) return false;
+  return /context|too many tokens|prompt is too long|exceeds the (context|token|maximum)|token limit|maximum context|window is too small|longer than the model/i.test(text || '');
+}
+
 /**
  * Resolve provider endpoint URL.
  */
@@ -247,6 +265,195 @@ export async function bootSqliteAgent(config = {}) {
     }
   });
 
+  // 5a. T2: one LLM call (streaming + non-streaming fallback). Returns
+  // { content, toolCalls, promptTokens, completionTokens, stopped }. Throws
+  // ContextLengthError on a provider context-length 400 so the caller (ask_llm)
+  // can compact + retry once. (Extracted from the UDF so the retry can re-invoke
+  // it with a rebuilt context.)
+  async function performLLMCall(apiMessages, tools) {
+    let content = '';
+    let toolCalls = null;
+    let promptTokens = 0;
+    let completionTokens = 0;
+    let streamSucceeded = false;
+
+    const targetUrl = endpointUrl || resolveEndpointUrl(llmUrl, llmProvider);
+    const targetApiKey = llmApiKey;
+    const toolsPayload = tools.length ? tools.map(t => {
+      const schema = typeof t === 'string' ? JSON.parse(t) : t;
+      return schema;
+    }) : undefined;
+
+    // Try streaming via SSE first
+    try {
+      const streamResp = await fetch(targetUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(targetApiKey ? { Authorization: `Bearer ${targetApiKey}` } : {}),
+        },
+        signal: turnSignal(),
+        body: JSON.stringify({
+          model: llmModel,
+          messages: apiMessages,
+          tools: toolsPayload,
+          stream: true,
+          stream_options: { include_usage: true },
+        }),
+      });
+
+      if (!streamResp.ok) {
+        const errText = await streamResp.text().catch(() => '');
+        if (isContextLengthError(streamResp.status, errText)) {
+          throw new ContextLengthError(streamResp.status, errText);
+        }
+        // Non-context 4xx/5xx: fall through to the non-streaming fallback.
+      } else if (streamResp.body) {
+        const contentType = streamResp.headers.get('content-type') || '';
+        if (contentType.includes('text/event-stream') || !contentType.includes('application/json')) {
+          // Process SSE stream chunks
+          const reader = streamResp.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          const toolCallsMap = new Map();
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith(':')) continue; // skip keep-alive comments
+              if (trimmed === 'data: [DONE]') continue;
+              if (trimmed.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(trimmed.slice(6));
+                  const choice = data.choices?.[0];
+                  if (choice?.delta?.content) {
+                    const token = choice.delta.content;
+                    content += token;
+                    agentEventStream.emit('token', {
+                      token,
+                      accumulated: content,
+                      role: 'assistant',
+                    });
+                  }
+                  if (choice?.delta?.tool_calls) {
+                    for (const tc of choice.delta.tool_calls) {
+                      const idx = tc.index ?? 0;
+                      if (!toolCallsMap.has(idx)) {
+                        toolCallsMap.set(idx, {
+                          id: tc.id || `call_${Date.now()}_${idx}`,
+                          type: 'function',
+                          function: {
+                            name: tc.function?.name || '',
+                            arguments: tc.function?.arguments || '',
+                          },
+                        });
+                      } else {
+                        const existing = toolCallsMap.get(idx);
+                        if (tc.id) existing.id = tc.id;
+                        if (tc.function?.name) existing.function.name += tc.function.name;
+                        if (tc.function?.arguments) existing.function.arguments += tc.function.arguments;
+                      }
+                    }
+                  }
+                  if (data.usage) {
+                    promptTokens = data.usage.prompt_tokens || promptTokens;
+                    completionTokens = data.usage.completion_tokens || completionTokens;
+                  }
+                } catch {
+                  // Skip invalid SSE JSON chunk
+                }
+              }
+            }
+          }
+
+          if (toolCallsMap.size > 0) {
+            toolCalls = Array.from(toolCallsMap.values());
+          }
+          streamSucceeded = true;
+        } else {
+          // Endpoint returned normal JSON despite stream: true
+          const data = await streamResp.json();
+          const msg = data.choices?.[0]?.message || data.message || {};
+          content = msg.content || '';
+          toolCalls = msg.tool_calls || null;
+          if (data.usage) {
+            promptTokens = data.usage.prompt_tokens || 0;
+            completionTokens = data.usage.completion_tokens || 0;
+          }
+          if (content) {
+            agentEventStream.emit('token', {
+              token: content,
+              accumulated: content,
+              role: 'assistant',
+            });
+          }
+          streamSucceeded = true;
+        }
+      }
+    } catch (streamErr) {
+      if (streamErr instanceof ContextLengthError) throw streamErr; // T2: propagate
+      // T3: if the stop aborted the streaming fetch, end the cascade now —
+      // do NOT fall back to a second (also-aborted) fetch.
+      if (stopRequested || (streamErr && (streamErr.name === 'AbortError' || streamErr.name === 'TimeoutError'))) {
+        agentEventStream.emit('done', { stopped: true });
+        return { content: '⏹ Turn stopped by user.', toolCalls: null, promptTokens: 0, completionTokens: 0, stopped: true };
+      }
+      console.warn('[ask_llm] Streaming attempt failed, falling back to non-streaming:', streamErr);
+    }
+
+    // Non-streaming fallback if streaming did not succeed
+    if (!streamSucceeded) {
+      const resp = await fetch(targetUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(targetApiKey ? { Authorization: `Bearer ${targetApiKey}` } : {}),
+        },
+        signal: turnSignal(),
+        body: JSON.stringify({
+          model: llmModel,
+          messages: apiMessages,
+          tools: toolsPayload,
+          stream: false,
+        }),
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => '');
+        if (isContextLengthError(resp.status, errText)) {
+          throw new ContextLengthError(resp.status, errText);
+        }
+        throw new Error(`HTTP ${resp.status}: ${errText}`);
+      }
+      const data = await resp.json();
+      const msg = data.choices?.[0]?.message || data.message || {};
+
+      // Extract token usage
+      const usage = data.usage || {};
+      promptTokens = usage.prompt_tokens || 0;
+      completionTokens = usage.completion_tokens || 0;
+
+      content = msg.content || '';
+      toolCalls = msg.tool_calls || null;
+
+      if (content) {
+        agentEventStream.emit('token', {
+          token: content,
+          accumulated: content,
+          role: 'assistant',
+        });
+      }
+    }
+
+    return { content, toolCalls, promptTokens, completionTokens, stopped: false };
+  }
+
   // 5. Register async UDF: ask_llm (JSPI suspends WASM during fetch & streaming)
   await sqlite3.create_function(
     db, 'ask_llm', 2, SQLITE_UTF8, null,
@@ -266,15 +473,15 @@ export async function bootSqliteAgent(config = {}) {
       try {
         const contextJson = sqlite3.value_text(args[0]);
         const toolsJson = sqlite3.value_text(args[1]);
-        const messages = JSON.parse(contextJson);
+        let messages = JSON.parse(contextJson);
         const tools = JSON.parse(toolsJson);
 
         // Build system prompt with tool definitions
-        const systemMsg = messages.find(m => m.role === 'system');
-        const systemPrompt = buildSystemPrompt(tools, systemMsg?.content);
+        let systemMsg = messages.find(m => m.role === 'system');
+        let systemPrompt = buildSystemPrompt(tools, systemMsg?.content);
 
         // Format messages for API
-        const apiMessages = [
+        let apiMessages = [
           { role: 'system', content: systemPrompt },
           ...formatMessages(messages.filter(m => m.role !== 'system'))
         ];
@@ -286,180 +493,56 @@ export async function bootSqliteAgent(config = {}) {
           model: llmModel,
         });
 
-        const targetUrl = endpointUrl || resolveEndpointUrl(llmUrl, llmProvider);
-        const targetApiKey = llmApiKey;
-
-        let content = '';
-        let toolCalls = null;
-        let promptTokens = 0;
-        let completionTokens = 0;
-        let streamSucceeded = false;
-
-        // Try streaming via SSE first
-        try {
-          const streamResp = await fetch(targetUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...(targetApiKey ? { Authorization: `Bearer ${targetApiKey}` } : {}),
-            },
-            signal: turnSignal(),
-            body: JSON.stringify({
-              model: llmModel,
-              messages: apiMessages,
-              tools: tools.length ? tools.map(t => {
-                const schema = typeof t === 'string' ? JSON.parse(t) : t;
-                return schema;
-              }) : undefined,
-              stream: true,
-              stream_options: { include_usage: true },
-            }),
-          });
-
-          if (streamResp.ok && streamResp.body) {
-            const contentType = streamResp.headers.get('content-type') || '';
-            if (contentType.includes('text/event-stream') || !contentType.includes('application/json')) {
-              // Process SSE stream chunks
-              const reader = streamResp.body.getReader();
-              const decoder = new TextDecoder();
-              let buffer = '';
-              const toolCallsMap = new Map();
-
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n');
-                buffer = lines.pop() || '';
-
-                for (const line of lines) {
-                  const trimmed = line.trim();
-                  if (!trimmed || trimmed.startsWith(':')) continue; // skip keep-alive comments
-                  if (trimmed === 'data: [DONE]') continue;
-                  if (trimmed.startsWith('data: ')) {
-                    try {
-                      const data = JSON.parse(trimmed.slice(6));
-                      const choice = data.choices?.[0];
-                      if (choice?.delta?.content) {
-                        const token = choice.delta.content;
-                        content += token;
-                        agentEventStream.emit('token', {
-                          token,
-                          accumulated: content,
-                          role: 'assistant',
-                        });
-                      }
-                      if (choice?.delta?.tool_calls) {
-                        for (const tc of choice.delta.tool_calls) {
-                          const idx = tc.index ?? 0;
-                          if (!toolCallsMap.has(idx)) {
-                            toolCallsMap.set(idx, {
-                              id: tc.id || `call_${Date.now()}_${idx}`,
-                              type: 'function',
-                              function: {
-                                name: tc.function?.name || '',
-                                arguments: tc.function?.arguments || '',
-                              },
-                            });
-                          } else {
-                            const existing = toolCallsMap.get(idx);
-                            if (tc.id) existing.id = tc.id;
-                            if (tc.function?.name) existing.function.name += tc.function.name;
-                            if (tc.function?.arguments) existing.function.arguments += tc.function.arguments;
-                          }
-                        }
-                      }
-                      if (data.usage) {
-                        promptTokens = data.usage.prompt_tokens || promptTokens;
-                        completionTokens = data.usage.completion_tokens || completionTokens;
-                      }
-                    } catch {
-                      // Skip invalid SSE JSON chunk
-                    }
-                  }
-                }
-              }
-
-              if (toolCallsMap.size > 0) {
-                toolCalls = Array.from(toolCallsMap.values());
-              }
-              streamSucceeded = true;
-            } else {
-              // Endpoint returned normal JSON despite stream: true
-              const data = await streamResp.json();
-              const msg = data.choices?.[0]?.message || data.message || {};
-              content = msg.content || '';
-              toolCalls = msg.tool_calls || null;
-              if (data.usage) {
-                promptTokens = data.usage.prompt_tokens || 0;
-                completionTokens = data.usage.completion_tokens || 0;
-              }
-              if (content) {
-                agentEventStream.emit('token', {
-                  token: content,
-                  accumulated: content,
+        // T2: reactive compaction — on a provider context-length 400, compact,
+        // rebuild the context from the view, and retry the fetch ONCE (the failed
+        // call inserted nothing, so the view is unchanged by the failure).
+        let result;
+        let retried = false;
+        while (true) {
+          try {
+            result = await performLLMCall(apiMessages, tools);
+            break;
+          } catch (e) {
+            if (e instanceof ContextLengthError && !retried) {
+              const sessRows = await queryAll(sqlite3, db, `SELECT value FROM session_context WHERE key = 'active_session_id'`);
+              const activeSessionId = sessRows.length ? sessRows[0][0] : 'default';
+              const llmCfg = { model: llmModel, endpointUrl: endpointUrl || resolveEndpointUrl(llmUrl, llmProvider), apiKey: llmApiKey };
+              const comp = await runCompaction(sqlite3, db, activeSessionId, llmCfg, { reason: 'reactive', signal: turnSignal() });
+              if (comp) {
+                // Rebuild the context from the view (the watermark advanced).
+                messages = JSON.parse(await queryActiveContextJson(sqlite3, db));
+                systemMsg = messages.find(m => m.role === 'system');
+                systemPrompt = buildSystemPrompt(tools, systemMsg?.content);
+                apiMessages = [
+                  { role: 'system', content: systemPrompt },
+                  ...formatMessages(messages.filter(m => m.role !== 'system'))
+                ];
+                agentEventStream.emit('thinking', {
                   role: 'assistant',
+                  messageCount: apiMessages.length,
+                  model: llmModel,
+                  compacted: true,
                 });
+                retried = true;
+                continue; // retry the fetch with the compacted context
               }
-              streamSucceeded = true;
             }
-          }
-        } catch (streamErr) {
-          // T3: if the stop aborted the streaming fetch, end the cascade now —
-          // do NOT fall back to a second (also-aborted) fetch.
-          if (stopRequested || (streamErr && (streamErr.name === 'AbortError' || streamErr.name === 'TimeoutError'))) {
-            agentEventStream.emit('done', { stopped: true });
-            sqlite3.result_text(context, JSON.stringify({
-              content: '⏹ Turn stopped by user.',
-              tool_calls: null,
-              prompt_tokens: 0,
-              completion_tokens: 0,
-            }));
-            return;
-          }
-          console.warn('[ask_llm] Streaming attempt failed, falling back to non-streaming:', streamErr);
-        }
-
-        // Non-streaming fallback if streaming did not succeed
-        if (!streamSucceeded) {
-          const resp = await fetch(targetUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...(targetApiKey ? { Authorization: `Bearer ${targetApiKey}` } : {}),
-            },
-            signal: turnSignal(),
-            body: JSON.stringify({
-              model: llmModel,
-              messages: apiMessages,
-              tools: tools.length ? tools.map(t => {
-                const schema = typeof t === 'string' ? JSON.parse(t) : t;
-                return schema;
-              }) : undefined,
-              stream: false,
-            }),
-          });
-
-          if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text().catch(() => '')}`);
-          const data = await resp.json();
-          const msg = data.choices?.[0]?.message || data.message || {};
-
-          // Extract token usage
-          const usage = data.usage || {};
-          promptTokens = usage.prompt_tokens || 0;
-          completionTokens = usage.completion_tokens || 0;
-
-          content = msg.content || '';
-          toolCalls = msg.tool_calls || null;
-
-          if (content) {
-            agentEventStream.emit('token', {
-              token: content,
-              accumulated: content,
-              role: 'assistant',
-            });
+            throw e; // non-context error, or context error with no compaction possible
           }
         }
+
+        // T3: graceful stop — the in-flight fetch was aborted.
+        if (result.stopped) {
+          sqlite3.result_text(context, JSON.stringify({
+            content: result.content,
+            tool_calls: null,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+          }));
+          return;
+        }
+
+        let { content, toolCalls, promptTokens, completionTokens } = result;
 
         // If the model returned JSON in content instead of using native tool_calls, parse it
         if (!toolCalls && content) {
@@ -759,5 +842,10 @@ export async function bootSqliteAgent(config = {}) {
   // `module` is the raw WASM module — exposed so cartridge.js can cwrap
   // exports the JS API wrapper lacks (sqlite3_serialize, sqlite3_deserialize,
   // sqlite3_backup_*).
-  return { sqlite3, db, eventStream: agentEventStream, module };
+  // `llm` is the resolved LLM config — exposed so compaction.js (T2) can make
+  // its one-shot summary fetch to the same model/endpoint.
+  return {
+    sqlite3, db, eventStream: agentEventStream, module,
+    llm: { model: llmModel, endpointUrl, apiKey: llmApiKey, provider: llmProvider },
+  };
 }

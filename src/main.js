@@ -6,13 +6,17 @@
  * Live Event Streaming: renders tokens, tool execution indicators, and results in real time.
  */
 
-import { bootSqliteAgent, getEventStream, beginTurn, requestStop, endTurn } from './harness.js';
+import { bootSqliteAgent, getEventStream, beginTurn, requestStop, endTurn, isStopRequested } from './harness.js';
 import {
   setActiveSession, createSession, listSessions, deleteSession, getSessionTokenUsage,
   sweepCaptureTriggers, repairOrphanedToolCalls, evictChangesets, setSuppressCascade,
   setSuppressCapture, ensureCaptureTriggers, setCurrentTurnId,
-  getRewindableScratchpadTurns, queryAll, quoteIdent, logDDL,
+  getRewindableScratchpadTurns, queryAll, quoteIdent, logDDL, execParams,
 } from './schema.js';
+import {
+  runCompaction, estimateActiveContextTokens, resolveContextWindow,
+  COMPACTION_THRESHOLD, FALLBACK_WINDOW,
+} from './compaction.js';
 import {
   rewindToBeforeTurn, getChangesetSummary,
   rewindToBeforeScratchpadTurn, getScratchpadChangesetSummary,
@@ -35,6 +39,7 @@ const configUrl         = document.getElementById('config-url');
 const configModel       = document.getElementById('config-model');
 const configKey         = document.getElementById('config-key');
 const labelConfigKey    = document.getElementById('label-config-key');
+const configContextWindow = document.getElementById('config-context-window');
 const sessionSelect     = document.getElementById('session-select');
 const sessionActions    = document.getElementById('session-actions');
 const chatContainer     = document.getElementById('chat-container');
@@ -89,6 +94,7 @@ function populateConfigForm() {
   if (c.url !== undefined) configUrl.value = c.url;
   if (c.model !== undefined) configModel.value = c.model;
   if (c.apiKey !== undefined) configKey.value = c.apiKey;
+  if (c.contextWindow !== undefined) configContextWindow.value = c.contextWindow;
   updateConfigVisibility(configProvider.value);
 }
 
@@ -312,6 +318,18 @@ async function renderMessages() {
     console.warn('[main] rewindable-scratchpad query failed (non-fatal):', e);
   }
 
+  // T2: compaction watermarks — a subtle divider marks where the context was
+  // compacted (rendered from the compactions table, not a messages row).
+  const compactionWatermarks = new Set();
+  try {
+    for (const [wm] of await queryAll(agent.sqlite3, agent.db,
+      `SELECT watermark_id FROM compactions WHERE session_id = ? ORDER BY watermark_id ASC`, [activeSessionId])) {
+      compactionWatermarks.add(wm);
+    }
+  } catch (e) {
+    console.warn('[main] compactions query failed (non-fatal):', e);
+  }
+
   messagesEl.innerHTML = '';
   rows.forEach(([id, role, content, toolCallId]) => {
     if (role === 'system') return;
@@ -375,6 +393,15 @@ async function renderMessages() {
     }
 
     messagesEl.appendChild(div);
+
+    // T2: compaction divider at the watermark position (the summarized prefix
+    // ends here; the visible tail starts at the next message).
+    if (compactionWatermarks.has(id)) {
+      const divider = document.createElement('div');
+      divider.className = 'compaction-divider';
+      divider.textContent = '— context compacted —';
+      messagesEl.appendChild(divider);
+    }
   });
 
   scrollChatToBottom();
@@ -643,6 +670,25 @@ async function bootAgent() {
       console.warn('[main] T3 boot setup failed (non-fatal):', e);
     }
 
+    // T2: persist the user's context-window override (settings field). Empty /
+    // invalid → reset to the fallback sentinel (128000), so window resolution
+    // falls through to the cloud model-name lookup. Then reflect the stored
+    // value back into the field (the DB is the source of truth after boot).
+    try {
+      const raw = (cfg.contextWindow || '').trim();
+      const n = parseInt(raw, 10);
+      const value = (Number.isFinite(n) && n >= 1000) ? String(n) : String(FALLBACK_WINDOW);
+      await execParams(agent.sqlite3, agent.db, `
+        INSERT INTO system_config (key, value) VALUES ('effective_context_window', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `, [value]);
+      const stored = await queryAll(agent.sqlite3, agent.db,
+        `SELECT value FROM system_config WHERE key = 'effective_context_window'`);
+      if (stored.length) configContextWindow.value = stored[0][0];
+    } catch (e) {
+      console.warn('[main] T2 context-window persist failed (non-fatal):', e);
+    }
+
     updateReadyStatus();
 
     inputEl.disabled = false;
@@ -663,6 +709,15 @@ async function bootAgent() {
 async function sendMessage(text) {
   if (isProcessing || !agent || !text.trim()) return;
   const userText = text.trim();
+
+  // T2: manual compaction — /compact [instructions] (input interception, same
+  // path as T9's bang commands; a command, not a message — never stored).
+  const compactCmd = parseCompactCommand(userText);
+  if (compactCmd) {
+    inputEl.value = '';
+    await runManualCompaction(compactCmd.instructions);
+    return;
+  }
 
   // T9: scratchpad branch — leading bang(s) mean "run this SQL directly",
   // bypassing the LLM trigger cascade entirely.
@@ -688,9 +743,26 @@ async function sendMessage(text) {
   activeToolIndicator = null;
 
   const { sqlite3, db } = agent;
-  beginTurn(); // T3: reset stop state + create the turn AbortController
+  const turnAbort = beginTurn(); // T3: reset stop state + create the turn AbortController
 
   try {
+    // T2: proactive compaction — BEFORE the user-row insert / turn savepoint.
+    // Provider-anchored estimate (latest assistant prompt_tokens + chars÷4 over
+    // visible rows after it); over 85% of the resolved window → compact first.
+    // The compaction commits independently of the turn's savepoint (T3).
+    try {
+      await maybeProactiveCompaction(sqlite3, db, turnAbort.signal);
+    } catch (e) {
+      // Stop during the compaction fetch → end the turn cleanly (the user
+      // message was never inserted). Any other failure is non-fatal: the turn
+      // proceeds and the reactive trigger catches a context-length 400.
+      if (isStopRequested() || (e && e.name === 'AbortError')) {
+        agent.eventStream?.emit('done', { stopped: true });
+        return;
+      }
+      console.warn('[main] Proactive compaction failed (non-fatal):', e);
+    }
+
     // T3: open the turn savepoint. SAVEPOINT is illegal inside a trigger body,
     // so it must be opened from JS; the whole cascade runs inside it.
     await sqlite3.exec(db, 'SAVEPOINT turn_sp');
@@ -762,6 +834,92 @@ async function sendMessage(text) {
     inputEl.focus();
     updateReadyStatus();
   }
+}
+
+// ── T2: Context Compaction ──────────────────────────────────────────
+//
+// The LLM's working context is the v_active_context view (system + latest
+// rolling summary + rows after the compaction watermark). Three triggers:
+//   - proactive: at turn start, if the provider-anchored estimate is over 85%
+//                of the resolved window (see maybeProactiveCompaction).
+//   - reactive:  inside ask_llm on a context-length 400 (harness.js).
+//   - manual:    /compact [instructions] — summarize the ENTIRE active context
+//                (keep 0, tau's manual behavior).
+// Compaction writes a row to `compactions` (summaries only); `messages` is
+// never touched. The chat divider (renderMessages) marks each watermark.
+
+/** Parse a /compact [instructions] command. Returns null for normal chat. */
+function parseCompactCommand(text) {
+  const m = text.trim().match(/^\/compact(?:\s+([\s\S]*))?$/i);
+  if (!m) return null;
+  return { instructions: (m[1] || '').trim() || undefined };
+}
+
+/** Manual compaction: /compact [instructions] — keep 0, summarize everything. */
+async function runManualCompaction(instructions) {
+  if (!agent) return;
+  const { sqlite3, db } = agent;
+  setLoading(true);
+  setSendButtonStop(true); // Stop works: the summary fetch uses the turn signal
+  const turnAbort = beginTurn();
+  try {
+    statusBar.textContent = 'Compacting context…';
+    statusBar.style.color = '#d29922';
+    const result = await runCompaction(sqlite3, db, activeSessionId, agent.llm, {
+      instructions,
+      keepBudget: 0, // manual: summarize the ENTIRE active context
+      reason: 'manual',
+      signal: turnAbort.signal,
+    });
+    if (result) {
+      statusBar.textContent = `✓ Context compacted (summarized ${result.summarizedCount} messages)`;
+      statusBar.style.color = '#3fb950';
+    } else {
+      statusBar.textContent = 'Nothing to compact.';
+      statusBar.style.color = '#8b949e';
+    }
+  } catch (e) {
+    if (isStopRequested() || (e && e.name === 'AbortError')) {
+      statusBar.textContent = '⏹ Compaction stopped.';
+      statusBar.style.color = '#d29922';
+    } else {
+      console.error('[compact]', e);
+      statusBar.textContent = `⚠ Compaction failed: ${e.message}`;
+      statusBar.style.color = '#f85149';
+    }
+  } finally {
+    endTurn();
+    setSendButtonStop(false);
+    setLoading(false);
+    await renderMessages();
+    inputEl.focus();
+    setTimeout(updateReadyStatus, 3000);
+  }
+}
+
+/**
+ * Proactive compaction at turn start (before the user-row insert / savepoint).
+ * Provider-anchored estimate: the latest assistant row's prompt_tokens +
+ * chars÷4 over the visible rows after it. Over 85% of the resolved window →
+ * compact first. Returns true if a compaction was performed.
+ */
+async function maybeProactiveCompaction(sqlite3, db, signal) {
+  if (!agent?.llm?.endpointUrl) return false; // no LLM endpoint — nothing to compact
+  const rows = await queryAll(sqlite3, db, `SELECT value FROM system_config WHERE key = 'effective_context_window'`);
+  const window = resolveContextWindow(rows.length ? rows[0][0] : null, agent.llm.model);
+  const est = await estimateActiveContextTokens(sqlite3, db, activeSessionId);
+  if (est <= window * COMPACTION_THRESHOLD) return false;
+
+  // Session switcher guard (setLoading(true) already disabled it — belt and
+  // braces, per the design: "disabled during the compaction fetch").
+  if (sessionSelect) sessionSelect.disabled = true;
+  statusBar.textContent = `Compacting context… (~${Math.round(est / 1000)}k / ${Math.round(window * COMPACTION_THRESHOLD / 1000)}k token threshold)`;
+  statusBar.style.color = '#d29922';
+  const result = await runCompaction(sqlite3, db, activeSessionId, agent.llm, { reason: 'proactive', signal });
+  if (result) {
+    console.log(`[main] Proactive compaction: seq=${result.seq} watermark=${result.watermarkId} summarized=${result.summarizedCount}`);
+  }
+  return !!result;
 }
 
 // ── T3: Rewind ──────────────────────────────────────────────────────
@@ -1187,6 +1345,7 @@ configForm.addEventListener('submit', e => {
     url: provider === 'openai' ? (configUrl.value.trim() || 'http://localhost:11434/v1') : '',
     model: configModel.value.trim() || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2'),
     apiKey: configKey.value.trim(),
+    contextWindow: configContextWindow.value.trim(), // T2: '' = auto (cloud lookup / fallback)
   };
   saveConfig(config);
   document.getElementById('config-details').open = false;

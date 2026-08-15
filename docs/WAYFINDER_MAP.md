@@ -54,7 +54,7 @@ A fresh session resumes from **this map alone** — destination, philosophy, and
 
 ```mermaid
 graph TD
-    T1[Ticket 1: Session Management & Schema Refactor - DONE] --> T2[Ticket 2: Context Compaction (design locked, build next)]
+    T1[Ticket 1: Session Management & Schema Refactor - DONE] --> T2[Ticket 2: Context Compaction - DONE]
     T2 --> T14
     T1 --> T3[Ticket 3: Rolling Rewind, Savepoints & Stop Button - DONE]
     T1 --> T9[Ticket 9: Direct SQL Scratchpad !SQL / !!SQL - DONE]
@@ -81,8 +81,8 @@ graph TD
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T3,T4,T5,T6,T7,T9,T10 done;
-    class T2,T8,T11,T13,T14,T15,T16,T17,T18,T19,T20 frontier;
+    class T1,T2,T3,T4,T5,T6,T7,T9,T10 done;
+    class T8,T11,T13,T14,T15,T16,T17,T18,T19,T20 frontier;
     class T12 blocked;
 ```
 
@@ -100,7 +100,11 @@ graph TD
 
 ### Ticket 2: Context Declutter View Specification
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Open (Frontier) — 🟡 CLAIMED (design locked 2026-08-14; implementation = next session)
+* **Status:** ✅ COMPLETE (2026-08-14)
+* **Resolution (2026-08-14):** Built & verified per the DESIGN LOCKED section. Build units: `src/schema.js` (`compactions` table `(session_id, seq, summary, watermark_id, UNIQUE(session_id,seq))`; `v_active_context` view = [system row id=0] + [latest summary as synthetic `user` row, `Previous conversation summary:` wrapper] + [in_context=1 rows with `id >` latest watermark], ordered by `ctx_order`; `agent_think` switched to `FROM v_active_context ORDER BY ctx_order`; `forkSession` copies compactions with watermark **rank-remapping** (forked rows get new autoincrement ids); `deleteSession` cleans compactions; `execute_tool` trigger gated by `suppress_cascade`); `src/compaction.js` (`runCompaction` one-shot fetch, tau summary schema, rolling seq>0 update over `<previous-summary>` + newly-summarized rows only; `planCompaction` pair-safe watermark walk — back to ≥ keep budget, forward to next `user` row; `estimateActiveContextTokens` provider-anchored; `resolveContextWindow` user override → cloud model-name lookup → 128000 fallback); `src/harness.js` (`performLLMCall` SSE + non-streaming fallback, `ContextLengthError`, reactive retry loop — context-length 400 → compact + retry ONCE); `src/main.js` (proactive compaction at turn start BEFORE the savepoint, `/compact [instructions]` interception (keep 0), chat divider, settings field); `index.html` + `src/styles.css` (context-window input + `.compaction-divider`).
+  * **Verified:** fake-LLM probe ([ticket-2-compaction-probe.mjs](file:///home/nick/Documents/projects/web-sql-agent/docs/prototypes/ticket-2-compaction-probe.mjs)) `ok: true` — compaction fires past the 85% threshold, view = [system, summary, tail], tail starts at a user boundary, pair-safe (no orphaned tool rows), rolling second compaction folds the previous summary, `/compact` + `/compact [instructions]`, fork/delete with compactions present. Real-LLM cache probe ([ticket-2-cache-probe.mjs](file:///home/nick/Documents/projects/web-sql-agent/docs/prototypes/ticket-2-cache-probe.mjs)) `ok: true` — turn 2's `prompt_tokens_details.cached_tokens = 12491` (provider KV-cache HIT on the stable prefix; the whole point of interval compaction over the superseded sliding window).
+  * **AGY review (2026-08-14, `Gemini 3.7 Flash (Low)`, job `agy-1786763751-3349217`):** watermark walk, rolling summary, fork rank-remapping, reactive retry bound (max 2 iterations; user message preserved via the T3 rollback path), statement/cursor cleanup, and T3/T9/T1 interactions all **correct**. One **minor finding fixed**: `v_active_context` Branch 3 double-emitted the `id=0` system row on uncompacted sessions (`watermark_id IS NULL` admits all rows) — `ask_llm` was safe (it filters system rows out of the tail) but `estimateActiveContextTokens` double-counted the system prompt → added `AND m.id != 0` to Branch 3; re-verified (view emits `system:1` exactly once on the default session).
+  * **Root cause found during verification — JSPI + IDB fiber-resumption race:** an `async fetch` wrapper (any wrapper adding a microtask tick to the caller's await path) combined with a prior DB op in the same JS fiber before the turn caused the turn's first DB op (`sqlite3_prepare` suspending for an IDB schema read) to **never resume** — the browser auto-commits the open IndexedDB transaction, desyncing `IDBBatchAtomicVFS`'s `#chain` `#request`/`#txComplete` promises, deadlocking the resumed WASM fiber (AGY confirmed the mechanism from vendor code). **App-layer rule: never wrap `fetch` in an `async function` that adds microtask ticks before dispatching — return the native promise directly** (inspected via a separate `.then` + `resp.clone()` for SSE).
 * **Draft Asset:** [v_active_context draft SQL](file:///home/nick/Documents/projects/web-sql-agent/docs/prototypes/ticket-2-v_active_context_draft.sql) — direction superseded: a sliding 20-turn window rewrites the LLM prefix mid-stream every turn, busting the provider KV-cache; re-scoped to **interval compaction** (stable prefix between compactions, "in spirit" continuation)
 * **Re-scoped Question (2026-08-14):** How should context compaction work so the LLM prefix stays byte-stable between compactions (KV-cache friendly), with compaction as an interval event that carries the conversation "in spirit" into a subsession — while keeping `messages` immutable and T3 rewind / T9 scratchpad / T10 cartridge / T1 forking intact?
 * **Facts gathered (2026-08-14, researcher):** Gemini implicit caching on our OpenAI-compat endpoint (`generativelanguage…/openai/chat/completions`): strict token-for-token prefix match; 90% discount on cached input tokens; ~5-min TTL refreshed on hit; min prefix 2,048 tokens (2.x) / 4,096 (3.x); strictly prefix-incremental (tail appends preserve the cache); prefix builder must be deterministic (no timestamps/random ids in the prefix).
@@ -118,8 +122,7 @@ graph TD
   * **UI:** subtle "— context compacted —" divider in chat at each compaction's watermark position (rendered from the `compactions` table, not a `messages` row); one session in the picker (no visible chapters).
   * **Flagged (vetoable):** the subtle "— context compacted —" chat divider. (The window is no longer a flagged default — it's resolved: user-configured for local models, model-name lookup for cloud, 128k fallback.)
   * **Verification plan (next session, per sign-off standard):** probe that (1) builds a long fake-LLM conversation past the threshold and asserts compaction fires + view = [system, summary, tail] with the tail starting at a user boundary; (2) pair-safety (no orphaned tool rows in the view); (3) a rolling second compaction folds the previous summary; (4) real-LLM cache check — turn N+1's usage shows `cached_tokens > 0` for the shared prefix (the OpenAI-compat endpoint returns `prompt_tokens_details.cached_tokens`); (5) `/compact` + `/compact [instructions]` paths; (6) fork/delete with compactions present; (7) AGY review pass.
-* **Status: design phase COMPLETE — implementation is the next session's work (this ticket stays open as the build vehicle, per the T3/T9 pattern).**
-* **Surviving constraints:** pair-safe boundaries — cut at turn boundaries (tool pairs never cross a user message); prefix builder must be deterministic (no timestamps/random ids in the prefix).
+* **Surviving constraints:** pair-safe boundaries — cut at turn boundaries (tool pairs never cross a user message); prefix builder must be deterministic (no timestamps/random ids in the prefix); never wrap `fetch` in an `async` function that adds microtask ticks (JSPI+IDB fiber-resumption race — see Resolution).
 
 ---
 

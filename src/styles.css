@@ -231,6 +231,29 @@ header .subtitle {
   to   { opacity: 1; transform: translateY(0); }
 }
 
+/* T2: subtle "— context compacted —" divider at each compaction watermark.
+   Full-width (unlike the 85%-max messages), hairline rules on both sides. */
+.compaction-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  margin: 0.4rem 0;
+  color: #8b949e;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  user-select: none;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.compaction-divider::before,
+.compaction-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border, #30363d);
+}
+
 .message.user {
   align-self: flex-end;
   background: var(--user-bg);

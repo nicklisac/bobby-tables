@@ -44,6 +44,11 @@
             <label for="config-key" id="label-config-key">API Key <span class="optional">(optional for local Ollama/LM Studio)</span></label>
             <input type="password" id="config-key" placeholder="AIza... or sk-..." />
           </div>
+          <div class="config-row">
+            <label for="config-context-window">Context Window (tokens)</label>
+            <input type="number" id="config-context-window" min="1000" step="1000" placeholder="auto" />
+            <small class="hint">T2: context for interval compaction. Leave empty for auto (cloud model lookup, 128k fallback). Set explicitly for local models.</small>
+          </div>
           <button type="submit" id="config-apply">Apply &amp; Reboot Agent</button>
         </form>
       </details>

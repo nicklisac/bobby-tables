@@ -26,10 +26,15 @@ CREATE TABLE IF NOT EXISTS system_config (
 
 INSERT OR IGNORE INTO system_config (key, value) VALUES
   ('system_prompt',
-    'You are an autonomous SQL-driven data analyst agent. You have access to a SQLite database and can execute SELECT queries to analyze data. '
-    || 'Always write correct, safe, read-only SQL. Think step by step. '
-    || 'If the user asks something you cannot answer with available data, say so honestly.'),
-  ('llm_model', 'gemini-2.5-flash');
+     'You are an autonomous SQL-driven data analyst agent. You have access to a SQLite database and can execute SELECT queries to analyze data. '
+     || 'Always write correct, safe, read-only SQL. Think step by step. '
+     || 'If the user asks something you cannot answer with available data, say so honestly.'),
+  ('llm_model', 'gemini-2.5-flash'),
+  -- T2: fallback effective context window (tau's DEFAULT_CONTEXT_WINDOW_TOKENS).
+  -- The LIVE window resolves as: user override (settings field, written to this
+  -- same key) -> cloud model-name lookup -> this fallback. The 85% compaction
+  -- threshold and the tail formula are code constants (compaction.js), not stored.
+  ('effective_context_window', '128000');
 
 -- =====================================================================
 -- 2. Tool Definitions
@@ -161,6 +166,80 @@ CREATE TABLE IF NOT EXISTS turn_ddl_log (
 CREATE INDEX IF NOT EXISTS idx_ddl_log_turn ON turn_ddl_log(session_id, turn_id, id);
 
 -- =====================================================================
+-- 4d. Compactions (T2: interval compaction via in-session watermark)
+--
+-- Holds SUMMARIES ONLY. The messages table is untouched by design — no
+-- watermark column, no rows added/moved/deleted/flagged. A compaction row
+-- points at the last summarized message (watermark_id); the v_active_context
+-- view simply stops reading rows below that watermark. seq = 0,1,2,… per session
+-- ("which compaction are we on"); the view reads only max(seq) — earlier rows
+-- stay as provenance (their newest summary subsumed them).
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS compactions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    seq          INTEGER NOT NULL,
+    summary      TEXT NOT NULL,
+    watermark_id INTEGER NOT NULL,
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_compactions_session ON compactions(session_id, seq);
+
+-- =====================================================================
+-- 4e. v_active_context (T2: the LLM's working context)
+--
+-- [system row (id=0, if present)] + [latest rolling summary rendered as a
+-- synthetic user row, tau-style "Previous conversation summary:" wrapper]
+-- + [in_context=1 rows with id > latest watermark].
+--
+-- Emits a ctx_order column (system=0, summary=1, messages=id+1) because the
+-- synthetic summary row cannot sort between id=0 and id=1 as a raw id.
+--
+-- C2 (from the draft): views take no parameters — the view pins to the active
+-- session via session_context. Safe because the ReAct cascade only ever runs
+-- on the active session (the trigger's WHERE session_id = NEW.session_id is
+-- belt-and-braces).
+--
+-- DROP VIEW + recreate (not IF NOT EXISTS) so existing brains pick up changes
+-- (the superseded sliding-window draft may exist in dev brains).
+-- =====================================================================
+DROP VIEW IF EXISTS v_active_context;
+CREATE VIEW v_active_context AS
+WITH active AS (
+    SELECT value AS session_id FROM session_context WHERE key = 'active_session_id'
+),
+latest AS (
+    -- The current compaction = max(seq) per session.
+    SELECT c.session_id, c.seq, c.summary, c.watermark_id
+    FROM compactions c
+    WHERE c.seq = (SELECT MAX(seq) FROM compactions WHERE session_id = c.session_id)
+)
+SELECT 0 AS ctx_order, m.id AS id, m.session_id AS session_id, 'system' AS role,
+       m.content AS content, NULL AS tool_calls, NULL AS tool_call_id
+FROM messages m
+CROSS JOIN active a
+WHERE m.id = 0 AND m.session_id = a.session_id
+UNION ALL
+SELECT 1 AS ctx_order, -1 AS id, l.session_id AS session_id, 'user' AS role,
+       ('Previous conversation summary:' || char(10) || l.summary) AS content,
+       NULL AS tool_calls, NULL AS tool_call_id
+FROM latest l
+CROSS JOIN active a
+WHERE l.session_id = a.session_id
+UNION ALL
+SELECT (m.id + 1) AS ctx_order, m.id AS id, m.session_id AS session_id, m.role AS role,
+       m.content AS content, m.tool_calls AS tool_calls, m.tool_call_id AS tool_call_id
+FROM messages m
+CROSS JOIN active a
+LEFT JOIN latest l ON l.session_id = a.session_id
+WHERE m.session_id = a.session_id
+  AND COALESCE(m.in_context, 1) = 1
+  AND m.id != 0  -- the system row (id=0) is emitted by Branch 1, not here
+  AND (l.watermark_id IS NULL OR m.id > l.watermark_id)
+ORDER BY ctx_order ASC;
+
+-- =====================================================================
 -- 5. Sample Data
 -- =====================================================================
 CREATE TABLE IF NOT EXISTS sample_data (
@@ -220,17 +299,19 @@ BEGIN
         COALESCE(json_extract(llm_response, '$.completion_tokens'), 0)
     FROM (
         SELECT ask_llm(
-            -- Build session-scoped message context (T9: in_context = 0 rows
-            -- are private scratchpad traffic — excluded from the agent's view)
+            -- T2: build session-scoped context from v_active_context =
+            -- [system, latest rolling summary (synthetic user row), rows after
+            -- the compaction watermark]. The view already applies the T9
+            -- in_context = 1 filter and the watermark; ctx_order gives
+            -- system=0, summary=1, messages=id+1.
             (SELECT json_group_array(json_object(
                 'role', CASE WHEN role = 'tool' THEN 'tool' ELSE role END,
                 'content', COALESCE(content, ''),
                 'tool_calls', CASE WHEN role = 'assistant' AND tool_calls IS NOT NULL THEN json(tool_calls) ELSE NULL END,
                 'tool_call_id', CASE WHEN role = 'tool' AND tool_call_id IS NOT NULL THEN tool_call_id ELSE NULL END
-            )) FROM messages
+            )) FROM v_active_context
             WHERE session_id = NEW.session_id
-              AND COALESCE(in_context, 1) = 1
-            ORDER BY id ASC),
+            ORDER BY ctx_order ASC),
             -- Tool definitions
             (SELECT json_group_array(json(schema)) FROM tools)
         ) AS llm_response
@@ -241,10 +322,17 @@ END;
 -- 8. TRIGGER 2: Acting Phase (session-scoped)
 --    Fires when assistant message with tool_calls is inserted.
 --    Executes the tool → inserts tool result into same session.
+--    T3: suppressed while session_context.suppress_cascade = '1' — same gate
+--    as agent_think. Required for T1 forking: forkSession copies messages
+--    (including assistant rows with tool_calls) with the cascade suppressed;
+--    without this gate the copy would RE-EXECUTE the tools into the fork.
+--    Drop+create (not IF NOT EXISTS) so existing brains pick up the gate.
 -- =====================================================================
-CREATE TRIGGER IF NOT EXISTS execute_tool
+DROP TRIGGER IF EXISTS execute_tool;
+CREATE TRIGGER execute_tool
 AFTER INSERT ON messages
 WHEN NEW.role = 'assistant' AND NEW.tool_calls IS NOT NULL AND json_array_length(NEW.tool_calls) > 0
+  AND (SELECT COALESCE(value, '0') FROM session_context WHERE key = 'suppress_cascade') != '1'
 BEGIN
     INSERT INTO messages (session_id, role, content, tool_call_id)
     SELECT
@@ -324,6 +412,13 @@ export async function deleteSession(sqlite3, db, sessionId) {
     sqlite3.bind_collection(stmt, [sessionId]);
     await sqlite3.step(stmt);
   }
+  // T2: compactions are per-session artifacts — delete them with the session.
+  // (compactions.session_id has ON DELETE CASCADE to sessions, but the explicit
+  // delete keeps the intent visible and works even if the FK is not enforced.)
+  for await (const stmt of sqlite3.statements(db, `DELETE FROM compactions WHERE session_id = ?`)) {
+    sqlite3.bind_collection(stmt, [sessionId]);
+    await sqlite3.step(stmt);
+  }
   for await (const stmt of sqlite3.statements(db, `DELETE FROM sessions WHERE id = ?`)) {
     sqlite3.bind_collection(stmt, [sessionId]);
     await sqlite3.step(stmt);
@@ -335,17 +430,74 @@ export async function deleteSession(sqlite3, db, sessionId) {
  */
 export async function forkSession(sqlite3, db, sourceSessionId, forkPointId, newName = 'Forked Session') {
   const newId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  for await (const stmt of sqlite3.statements(db, `INSERT INTO sessions (id, name) VALUES (?, ?)`)) {
-    sqlite3.bind_collection(stmt, [newId, newName]);
-    await sqlite3.step(stmt);
-  }
-  for await (const stmt of sqlite3.statements(db, `
-    INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, in_context, created_at)
-    SELECT ?, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, COALESCE(in_context, 1), created_at
-    FROM messages WHERE session_id = ? AND id <= ?
-  `)) {
-    sqlite3.bind_collection(stmt, [newId, sourceSessionId, forkPointId]);
-    await sqlite3.step(stmt);
+  // T2: suppress the cascade while copying. The copied user/tool rows must NOT
+  // fire agent_think: (1) v_active_context is pinned to the ACTIVE session, so
+  // a forked (non-active) session would build an empty context and ask_llm
+  // would throw, failing the fork; (2) even before the view, firing the cascade
+  // mid-copy would corrupt the fork with stray assistant rows. (try/finally —
+  // a stuck '1' permanently kills the cascade.)
+  await setSuppressCascade(sqlite3, db, true);
+  try {
+    for await (const stmt of sqlite3.statements(db, `INSERT INTO sessions (id, name) VALUES (?, ?)`)) {
+      sqlite3.bind_collection(stmt, [newId, newName]);
+      await sqlite3.step(stmt);
+    }
+    for await (const stmt of sqlite3.statements(db, `
+      INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, in_context, created_at)
+      SELECT ?, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, COALESCE(in_context, 1), created_at
+      FROM messages WHERE session_id = ? AND id <= ?
+    `)) {
+      sqlite3.bind_collection(stmt, [newId, sourceSessionId, forkPointId]);
+      await sqlite3.step(stmt);
+    }
+    // T2: copy compactions whose watermark is at or before the fork point.
+    // Watermarks increase monotonically with seq, so this selects a contiguous
+    // prefix (seq 0..k); the fork's active context uses the latest such
+    // compaction (the view reads max(seq)). Later compactions (watermark >
+    // fork point) summarize content the fork doesn't have, so they're excluded.
+    //
+    // The watermark must be REMAPPED: the message copy above assigns NEW
+    // autoincrement ids (messages.id is global across sessions), so the
+    // source's watermark_id would point at the wrong rows in the fork. The
+    // copy is 1:1 and id-ordered, so the watermark's RANK in the source's
+    // copied rows is its rank in the fork's rows. (Every row with id <=
+    // watermark is also <= forkPointId, so the rank always exists.)
+    const origIds = [];
+    for await (const stmt of sqlite3.statements(db, `
+      SELECT id FROM messages WHERE session_id = ? AND id <= ? ORDER BY id ASC
+    `)) {
+      sqlite3.bind_collection(stmt, [sourceSessionId, forkPointId]);
+      while (await sqlite3.step(stmt) === SQLITE_ROW) origIds.push(sqlite3.row(stmt)[0]);
+    }
+    const newIds = [];
+    for await (const stmt of sqlite3.statements(db, `
+      SELECT id FROM messages WHERE session_id = ? ORDER BY id ASC
+    `)) {
+      sqlite3.bind_collection(stmt, [newId]);
+      while (await sqlite3.step(stmt) === SQLITE_ROW) newIds.push(sqlite3.row(stmt)[0]);
+    }
+    const compactions = [];
+    for await (const stmt of sqlite3.statements(db, `
+      SELECT seq, summary, watermark_id, created_at FROM compactions
+      WHERE session_id = ? AND watermark_id <= ? ORDER BY seq ASC
+    `)) {
+      sqlite3.bind_collection(stmt, [sourceSessionId, forkPointId]);
+      while (await sqlite3.step(stmt) === SQLITE_ROW) compactions.push(sqlite3.row(stmt));
+    }
+    for (const [seq, summary, watermarkId, createdAt] of compactions) {
+      const rank = origIds.indexOf(watermarkId);
+      if (rank === -1) continue; // defensive: watermark row wasn't copied
+      const remapped = newIds[rank];
+      for await (const stmt of sqlite3.statements(db, `
+        INSERT INTO compactions (session_id, seq, summary, watermark_id, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `)) {
+        sqlite3.bind_collection(stmt, [newId, seq, summary, remapped, createdAt]);
+        await sqlite3.step(stmt);
+      }
+    }
+  } finally {
+    await setSuppressCascade(sqlite3, db, false);
   }
   return newId;
 }
@@ -383,7 +535,7 @@ export function quoteIdent(name) {
  *  sqlite_master is a data table subject to rewind. */
 const INTERNAL_TABLES = new Set([
   'messages', 'sessions', 'session_context', 'system_config', 'tools',
-  'turn_changesets', 'turn_ddl_log',
+  'turn_changesets', 'turn_ddl_log', 'compactions',
 ]);
 
 export function isInternalTable(name) {
