@@ -25,6 +25,7 @@ import { exportCartridge, importCartridge, exportSqlDump } from './cartridge.js'
 import { ingestCsvToSqlite } from './csv-ingestion.js';
 import * as gridUi from './grid-ui.js';
 import * as gridEngine from './grid.js';
+import { initPaneResizers } from './panes.js';
 import { SQLITE_ROW, SQLITE_DONE } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
 import './styles.css';
 
@@ -1626,6 +1627,10 @@ window.addEventListener('dragover', (e) => {
 window.addEventListener('drop', (e) => {
   e.preventDefault();
 });
+
+// T11 follow-up: draggable dividers between the 3 panes (pure UI state;
+// widths persist in localStorage, never in the brain DB).
+initPaneResizers();
 
 // CSV Upload button handler
 if (btnUploadCsv && csvFileInput) {

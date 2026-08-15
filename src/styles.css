@@ -121,7 +121,51 @@ header .subtitle {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-right: 1px solid var(--border);
+}
+
+/* Draggable dividers between the panes (T11 follow-up — src/panes.js). The
+   divider draws the separator line, so the panes drop their facing borders. */
+
+.pane-divider {
+  flex: 0 0 6px;
+  cursor: col-resize;
+  touch-action: none;
+  position: relative;
+  z-index: 5;
+}
+
+.pane-divider::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border);
+}
+
+.pane-divider:hover::before,
+.pane-divider.active::before {
+  width: 3px;
+  background: var(--accent);
+}
+
+/* While a divider is being dragged: lock the cursor, kill text selection,
+   and suppress hover states inside the panes (no flicker under the cursor). */
+
+body.pane-resizing {
+  cursor: col-resize;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+body.pane-resizing #workstation > * {
+  pointer-events: none;
+}
+
+body.pane-resizing .pane-divider {
+  pointer-events: auto;
 }
 
 #explorer-body {
@@ -186,7 +230,6 @@ header .subtitle {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-left: 1px solid var(--border);
 }
 
 #canvas-pane.disabled,
@@ -504,6 +547,7 @@ header .subtitle {
 
 @media (max-width: 900px) {
   #explorer-pane { display: none; }
+  #divider-explorer { display: none; }
   #canvas-pane { width: 320px; }
 }
 
