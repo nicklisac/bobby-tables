@@ -250,7 +250,8 @@ graph TD
 
 ### Ticket 13: Tool-Output Materialization Engine
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Open (Frontier) — **sequenced first** on the frontier (2026-08-15; T12's web/fetch drag depends on it)
+* **Status:** 🟡 In Progress — claimed 2026-08-15 (design lock in flight)
+* **Next steps:** (1) grill the 4 HITL design points (tool signature, schema inference, shape scope, naming/collision) → DESIGN LOCKED; (2) build the shared materialize function + agent tool; (3) probe (fake-LLM SQL engine + real-LLM UI); (4) AGY review; (5) sign-off (re-run probe on the final code, commit, push, update map).
 * **Question (refined 2026-08-15, user-confirmed):** How should the shared materialize function — *JSON blob in a `messages` row → named table* — be built and exposed both as an **agent tool** (`materialize`, keyed off `tool_call_id` or the most recent tool result) and as a **library function the T12 drag handler calls**? Open design points: (1) tool signature & source-row discovery (the LLM sees `tool_call_id` in context but never `messages.id`); (2) schema inference — reuse T6's `inferCellType`/`promoteType` or ship all-TEXT; (3) shape handling — flat arrays of objects vs. nested/heterogeneous (`json_tree` depth); (4) naming & collision (auto-convention + rename-later vs. error vs. auto-suffix — names are load-bearing: card FROM clauses reference them); (5) DDL logging to `turn_ddl_log` (pre-image = "table didn't exist") + `sweepCaptureTriggers` on the new table — T9's scratchpad DDL path is the template; materialized tables are real **data** tables, not internal (rewound-able, refreshable, cartridge-exported); (6) refuse protected target names (T21); (7) feedback envelope — `{table, columns, row_count}`, never the data.
 * **Locked direction:** json_each/json_tree unpacking, zero token transcription cost — the "golden goose": the bridge from transient, compaction-destroyable tool output to durable relational state.
 
