@@ -218,8 +218,9 @@ graph TD
 
 ### Ticket 11: 3-Pane Workstation Layout & Grid Engine (`dashboard_cards`)
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Open (Frontier)
+* **Status:** 🟡 IN PROGRESS (claimed 2026-08-14)
 * **Question:** How should the UI implement the 3-pane layout (DB Explorer / Chat & Console / 3x3 Reactive Canvas) and create the `dashboard_cards` SQLite table with `row_span` and `col_span` support?
+* **Next steps:** Design locked with user (global scoping, read-only SELECT cards, fixed 3×3 free placement + auto-pack, metric+table rendering, change-triggered reactivity as T18 groundwork). Build units: `schema.js` (`dashboard_cards` + `INTERNAL_TABLES`), `src/grid.js` (engine), `src/grid-ui.js` (UI + reactivity), `harness.js` (`data_change` from `update_hook`), 3-pane `index.html`/`styles.css`, `main.js` wiring. Then probe → AGY review → commit → close.
 
 ---
 
