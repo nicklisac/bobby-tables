@@ -59,15 +59,18 @@ A fresh session resumes from **this map alone** — destination, philosophy, and
 ```mermaid
 graph TD
     T1[Ticket 1: Session Management & Schema Refactor - DONE] --> T2[Ticket 2: Context Compaction - DONE]
-    T2 --> T14
+    T2 --> T14[Ticket 14: Dynamic Skills Table]
+    T2 --> T23[Ticket 23: SQL-Native Context Metrics & Compaction Views]
     T1 --> T3[Ticket 3: Rolling Rewind, Savepoints & Stop Button - DONE]
     T1 --> T9[Ticket 9: Direct SQL Scratchpad !SQL / !!SQL - DONE]
     T3 --> T9
+    T9 --> T24[Ticket 24: Schema-Aware SQL Autocomplete & Editor]
     T1 --> T8[Ticket 8: DB Schema Inspector & View Exporter]
-    T1 --> T11[Ticket 11: 3-Pane Layout & Grid Engine]
-    T11 --> T12[Ticket 12: Drag-Drop Chat to Grid Pinning]
-    T1 --> T13[Ticket 13: Tool-Output Materialization]
-    T1 --> T14[Ticket 14: Dynamic Skills Table]
+    T8 --> T24
+    T1 --> T11[Ticket 11: 3-Pane Layout & Grid Engine - DONE]
+    T11 --> T12[Ticket 12: Dynamic Grid Canvas, Drag-to-Move, Resize & Chat Pinning]
+    T1 --> T13[Ticket 13: Tool-Output Materialization - DONE]
+    T1 --> T14
     T1 --> T15[Ticket 15: Durable Semantic Memory]
     T1 --> T17[Ticket 17: Human-in-the-Loop Approvals]
     T1 --> T18[Ticket 18: Self-Rendering Reactive Views]
@@ -90,9 +93,9 @@ graph TD
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T2,T3,T4,T5,T6,T7,T9,T10,T11 done;
-    class T8,T13,T14,T15,T16,T17,T18,T19,T20,T21 frontier;
-    class T12,T22 blocked;
+    class T1,T2,T3,T4,T5,T6,T7,T9,T10,T11,T13 done;
+    class T8,T12,T14,T15,T16,T17,T18,T19,T20,T21,T23,T24 frontier;
+    class T22 blocked;
 ```
 
 ---
@@ -240,30 +243,26 @@ graph TD
 
 ---
 
-### Ticket 12: Drag-and-Drop Chat $\rightarrow$ Grid Pinning
+### Ticket 12: Dynamic Grid Canvas, Drag-to-Move, Resize & Chat Pinning
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Open — blocked by T13 (re-sequenced 2026-08-15; T11's 9 `.grid-cell` drop-zone anchors are in place). The SQL-bubble half is independent of T13 and could be built first if desired.
-* **Question (refined 2026-08-15, user-confirmed):** How should HTML5 Drag-and-Drop handlers attach to **rendered assets only** (table bubbles, web-search lists, fetch previews — plain text is not draggable) so that: (a) a table bubble recovers its SQL from the transcript (the scratchpad envelope's `sql` field, or `tool_call_id` → the assistant row's `tool_calls`) → `addCard` with that SELECT; (b) a web-search/fetch bubble calls T13's shared materialize function → `addCard` with a SELECT over the new table? Per the pointer decision: the card holds a view definition (read-only SELECT); the FROM clause is the pointer; the substance lives in named tables/views.
+* **Status:** Open (Frontier) — unblocked by T13 (T11's `.grid-cell` drop-zone anchors and T13's `materializeToolResult` are ready).
+* **Question (expanded 2026-08-15, user-confirmed):** How should the 3-pane workstation's right canvas support:
+  1. **Dynamic Expanding Canvas:** 3 fixed columns with vertically growing rows. The canvas maintains at least a 3-row blank buffer below the lowest occupied row (`max(row + row_span) + 3`), creating a smooth, slowly growing infinite canvas. Adding cards to a lower row automatically grows rows below it.
+  2. **Drag-to-Move & Drag-to-Resize with Reflow:** Card headers act as drag handles to reposition across cells; corner handles resize `col_span`/`row_span`. Overlapping cards push down (collision reflow) to avoid visual collisions. Coordinates/spans persist in SQLite `dashboard_cards (col, row, col_span, row_span)`.
+  3. **Chat-to-Grid Pinning:** HTML5 Drag-and-Drop on rendered chat assets (table bubbles recover SELECT from envelope / tool_calls; search/fetch bubbles invoke `materializeToolResult` $\rightarrow$ `addCard` with SELECT over the newly materialized table).
 * **Design notes:** see Decisions So Far — "Cards Hold View Definitions" and "T13 Is the Shared Materialize Function".
 
 ---
 
 ### Ticket 13: Tool-Output Materialization Engine
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** 🟡 In Progress — claimed 2026-08-15 (design lock in flight)
-* **Next steps:** (1) grill the 4 HITL design points (tool signature, schema inference, shape scope, naming/collision) → DESIGN LOCKED; (2) build the shared materialize function + agent tool; (3) probe (fake-LLM SQL engine + real-LLM UI); (4) AGY review; (5) sign-off (re-run probe on the final code, commit, push, update map).
-* **Question (refined 2026-08-15, user-confirmed):** How should the shared materialize function — *JSON blob in a `messages` row → named table* — be built and exposed both as an **agent tool** (`materialize`, keyed off `tool_call_id` or the most recent tool result) and as a **library function the T12 drag handler calls**?
-* **DESIGN LOCKED (2026-08-15, all 4 HITL points user-confirmed as recommended):**
-  * **Tool surface:** `materialize(table_name, tool_call_id?)` — seeded in `tools`, new `WHEN 'materialize'` branch in `execute_tool` (COALESCE double-extract pattern like the other tools, so a string-valued `arguments` works), 2-arg UDF in `harness.js`. Source resolution: explicit `tool_call_id` → that `role='tool'` row in the session; omitted → most recent tool row (unambiguous in practice — the cascade executes `$[0]` only, one tool row per turn).
-  * **Shape detection (order matters):** (0) **columnar envelope first — explicit reject**: array of objects each with `columns:[str]` + `values:[[…]]` (execute_sql's shape) → error "re-runnable — pin a live card, or snapshot via `!!CREATE TABLE … AS SELECT`" (without this, it would match "array of objects" and produce a garbage table with stringified `values`); (a) top-level array, every element a plain object → rows; (b) plain object with **exactly one** non-empty array-of-objects property (search_web's `results`) → rows from it (two such properties → ambiguous error); (c) plain object, no array-of-objects property (fetch_url) → 1 row. Anything else (scalar arrays, mixed, empty) → error envelope.
-  * **Columns & types:** union of keys, first-seen order, missing → NULL; case-insensitive dedupe (first-seen name kept, later collision → `_2` suffix). Native JSON types: number → INTEGER (whole) / REAL, string → TEXT, boolean → INTEGER 1/0, null → NULL, nested object/array → TEXT (JSON.stringify, lossless). T6-style promotion across rows (INTEGER→REAL→TEXT). Identifiers double-quoted.
-  * **Collisions:** **error** (names are load-bearing — card FROM clauses reference them). Case-insensitive check (`COLLATE NOCASE`) against `sqlite_master` (any type: table/index/view).
-  * **Execution sequence** (inside the caller's savepoint — turn savepoint for the agent, T12's own savepoint for drags; NO `BEGIN/COMMIT` — that's an error inside a savepoint, unlike T6's out-of-turn ingest path): (1) validate name (identifier regex, not `isInternalTable`, not in sqlite_master); (2) `logDDL` (turn_id from `session_context.current_turn_id`, pre-image NULL = "didn't exist" → ⟲ inverse = DROP TABLE); (3) `CREATE TABLE`; (4) `sweepCaptureTriggers` (instrument BEFORE populating, so the INSERTs are captured); (5) batch INSERT (prepared statement, per-row bind — T6's pattern minus the explicit transactions); (6) return `{materialized: true, table, columns: [{name, type}], row_count, source: {tool_call_id}}` — **never the data**.
-  * **Refusals:** protected/`sqlite_%` names, collision, non-JSON content, error envelopes (`{error: …}`), unsupported shapes, missing source row / bad `tool_call_id`. All return an error envelope (the cascade sees it as a normal tool result — no hard errors).
-  * **Not gated by `allow_dml`** — materialization is the sanctioned DDL path (only ever creates a NEW table; never touches existing data).
-  * **Inherited (no new code):** ⟲ on the turn → DDL inverse drops the table, lenient replay skips the now-missing deletes; capture triggers make later writes rewound-able + fire `data_change` (card refresh); left-pane explorer, cartridge export, fork see it automatically.
-  * **Mechanism note (locked by pattern):** the JS core is a shared `materializeToolResult()` in a new `src/materialize.js` — the UDF is a thin wrapper that resolves turn_id/session_id from `session_context` and emits `tool_call`/`tool_result` events; T12's drag handler will call the same function.
-  * **Verification plan:** probe (fake-LLM full cascade: user submit → materialize tool call → real execute_tool → envelope tool row → final answer; direct UDF calls for shapes/types/refusals; ⟲ on the materialize turn drops the table; capture triggers present; envelope carries no data; brain left clean) + real-LLM UI check (agent materializes a live search_web result, picks the name itself) + AGY review + full re-run on final code.
+* **Status:** ✅ Done — implemented & verified 2026-08-15
+* **Implemented Components:**
+  * `src/materialize.js`: Shared engine `materializeToolResult()` + shape extraction, column inference, type promotion (INTEGER -> REAL -> TEXT), collision check, DDL logging, capture trigger sweep, and batch INSERT.
+  * `src/schema.js`: `materialize` tool seeded in `tools` table; `execute_tool` trigger updated with `WHEN 'materialize'` branch using double-COALESCE argument extraction.
+  * `src/harness.js`: Async UDF `materialize` registered on SQLite instance with event streaming (`tool_call`, `tool_result`).
+  * `src/main.js`: Materialization envelope formatting in chat message rendering.
+  * `docs/prototypes/ticket-13-materialize-probe.mjs`: Complete 8-step verification probe testing shape detection, schema inference, name validation, DDL logging, search/fetch materialization, collisions, omitted `tool_call_id` resolution, and rolling state rewind.
 * **Locked direction:** json_each/json_tree unpacking, zero token transcription cost — the "golden goose": the bridge from transient, compaction-destroyable tool output to durable relational state.
 
 ---
@@ -293,7 +292,12 @@ graph TD
 ### Ticket 17: Human-in-the-Loop Approval Queue (`tool_approvals`)
 * **Label:** `wayfinder:prototype` (HITL)
 * **Status:** Open (Frontier)
-* **Question:** How should destructive tools insert into `tool_approvals` with status `'pending'`, pausing the cascade until the user clicks an [Approve] button in the UI?
+* **Question:** How should destructive tools and database write operations insert into a relational `tool_approvals` table with status `'pending'`, pausing the cascade until the user clicks an [Approve] or [Reject] button in the UI, replacing synchronous JS `window.confirm()` with pure-SQL state management?
+* **Design notes (2026-08-15):** 
+  * Replaces the interim JS `window.confirm()` popup in `run_dynamic_sql` with a durable, auditable SQL table: `tool_approvals (id INTEGER PRIMARY KEY, turn_id INTEGER, session_id TEXT, tool_name TEXT, payload TEXT, status TEXT CHECK(status IN ('pending', 'approved', 'rejected')), created_at DATETIME)`.
+  * The ReAct loop or UDF suspends execution cleanly while `status = 'pending'`.
+  * The UI renders an interactive approval widget in the chat transcript.
+  * User clicking [Approve] runs `UPDATE tool_approvals SET status = 'approved' WHERE id = ?`, and trigger/event machinery resumes the cascade seamlessly.
 
 ---
 
@@ -335,6 +339,38 @@ graph TD
 * **Semantics locked (2026-08-15, user-confirmed):** **Rename** → rewrite referencing cards' SQL (emulating SQLite's native view-rewrite under `ALTER TABLE … RENAME TO`, 3.25+) + report "updated N cards". **Delete** → extract references first → confirm popup lists the N cards that will be removed → cascade-delete cards + object. **Alter** → apply in a savepoint → **dry-run** each referencing card (read-only by construction, so it's safe to run) → alert on breakage, keep or ⟲.
 * **Design agenda:** (1) the shared `extractReferencedObjects(cardSql) → [names]` primitive (table/view identifiers in FROM/JOIN; traps: substring collisions — `users` inside `user_sessions` — string literals & comments, quoted identifiers, CTE aliases; reuse T11's `isReadOnlySql` comment/string stripping; the same primitive serves T21's write-path target check); (2) token-level identifier rewrite, not string replace; (3) the dry-run backstop — a false negative in the extractor degrades to "a card shows an error", never silent corruption; (4) scope: user data tables/views only — never protected tables (T21); (5) the "source missing" card UX — a card whose object was rewound/dropped renders a hint ("re-materialize or re-pin"), not a mystery error (T11's `runCardSql` already reports errors without throwing).
 * **Note:** column-level breakage prediction is deliberately out of reach statically (qualifiers, aliases, `SELECT *`) — the dry-run sidesteps it entirely.
+
+---
+
+### Ticket 23: SQL-Native Context Metrics & Compaction Views (`v_context_metrics` / `v_compaction_candidates`)
+* **Label:** `wayfinder:task` (AFK)
+* **Status:** Open (Frontier)
+* **Question:** How should running token/character totals, turn boundaries, active context statistics, and compaction candidate watermarks be computed in pure relational SQL views using window functions (`SUM(LENGTH(content)) OVER (...)`), eliminating ad-hoc JavaScript calculations in `compaction.js` and `main.js`?
+* **Design notes (2026-08-15):**
+  * **Core Philosophy:** Push context calculations into SQLite views rather than running loops in JS.
+  * **Views to Create:**
+    * `v_context_metrics`: Scoped to the active session (`session_context.active_session_id`), computes running character lengths, token approximations (chars / 4), cumulative turn counts, and role indicators across `messages` using SQLite window functions.
+    * `v_compaction_candidates`: Computes safe pair-safe turn-boundary watermark candidates based on the configured effective context window (from `system_config`), 85% threshold, and tail retention formula directly in SQL.
+  * **Benefits:** Single query for JS compaction runner, instant UI token counters, and clean scalability for multi-session and subsession tabs.
+
+---
+
+### Ticket 24: Schema-Aware SQL Autocomplete, Editor & Bang-Mode Visuals
+* **Label:** `wayfinder:task` (AFK)
+* **Status:** Open (Frontier)
+* **Question:** How should the chat input (for `!` / `!!` scratchpad commands), SQL scratchpad modal, and Card SQL editors integrate schema-aware autocomplete, syntax highlighting, and dynamic visual morphing?
+* **Design notes (2026-08-15):**
+  * **Stack:** CodeMirror 6 with `@codemirror/lang-sql` and `@codemirror/autocomplete` (or lightweight textarea completion).
+  * **Bang-Mode Visual Morph (Look & Feel):**
+    * When the user types a leading `!` (shared SQL) or `!!` (private SQL) into the chat input, the input field dynamically morphs into a dedicated **SQL Codeblock Editor** style:
+      * Distinct IDE dark background, syntax highlighting, monospace font, and a glowing indicator/badge (`[ ! Direct SQL ]` or `[ !! Private SQL ]`).
+      * Provides instant visual clarity that the user has switched from conversational agent chat into direct SQL execution mode.
+  * **Capabilities:**
+    * **Schema-aware completions:** Dynamic dictionary of table names and column names derived from `sqlite_master` and `PRAGMA table_info`.
+    * **SQL keyword completions:** `SELECT`, `FROM`, `WHERE`, `JOIN`, `GROUP BY`, `ORDER BY`, `CREATE TABLE`, `INSERT INTO`, `UPDATE`, `DELETE`, etc.
+    * **SQLite built-in functions:** `json_extract`, `json_each`, `COUNT`, `AVG`, `SUM`, `COALESCE`, etc.
+    * **Schema reactivity:** Automatically updates the completion schema map on database changes (`data_change` events, CSV ingestion, materializations).
+  * **Integration points:** Main chat prompt input (activates on leading `!`), Card SQL edit modals, and direct query runners.
 
 ---
 

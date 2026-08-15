@@ -241,7 +241,18 @@ function renderToolContent(content) {
     return html;
   }
 
-  // 4. Tool error: { error: '...' }
+  // 4. Materialize result: { materialized: true, table, columns, row_count, source }
+  if (parsed && parsed.materialized === true) {
+    const colList = (parsed.columns || []).map(c => `<code>${escapeHtml(c.name)}</code> <span style="opacity: 0.7; font-size: 0.85em;">${escapeHtml(c.type)}</span>`).join(', ');
+    return `
+      <div class="materialize-preview" style="padding: 4px 0;">
+        <div style="font-weight: 600; color: #58a6ff; margin-bottom: 4px;">✨ Materialized table <code>${escapeHtml(parsed.table)}</code> (${escapeHtml(String(parsed.row_count))} rows)</div>
+        <div style="font-size: 0.88em; color: #8b949e;">Columns: ${colList}</div>
+      </div>
+    `;
+  }
+
+  // 5. Tool error: { error: '...' }
   if (parsed && parsed.error) {
     return `<div class="tool-error">⚠ Tool Error: ${escapeHtml(parsed.error)}</div>`;
   }

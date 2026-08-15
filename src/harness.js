@@ -16,8 +16,9 @@ import { Factory } from '../vendor/wa-sqlite-jspi/sqlite-api.js';
 import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_ROW, SQLITE_INSERT, SQLITE_DELETE, SQLITE_UPDATE } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
-import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, queryAll, isInternalTable } from './schema.js';
+import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, queryAll, isInternalTable, logDDL, sweepCaptureTriggers } from './schema.js';
 import { runCompaction, queryActiveContextJson } from './compaction.js';
+import { materializeToolResult } from './materialize.js';
 
 /**
  * Live Event Stream for real-time UI streaming (tokens, tool execution, ReAct steps).
@@ -201,8 +202,27 @@ export function buildSystemPrompt(tools = [], basePrompt = '') {
 /**
  * Format conversation history for the LLM API.
  */
-export function formatMessages(messages = []) {
+export function formatMessages(messages = [], provider = 'openai') {
+  const isGemini = provider === 'gemini';
   return messages.map(m => {
+    if (isGemini) {
+      if (m.role === 'assistant' && m.tool_calls) {
+        const parsedCalls = typeof m.tool_calls === 'string' ? JSON.parse(m.tool_calls) : m.tool_calls;
+        const body = {
+          content: m.content || '',
+          tool_calls: parsedCalls,
+        };
+        return { role: 'assistant', content: JSON.stringify(body) };
+      }
+      if (m.role === 'tool') {
+        return {
+          role: 'user',
+          content: `[Tool Result for ${m.tool_call_id || 'tool'}]:\n${m.content || ''}`,
+        };
+      }
+      return { role: m.role, content: m.content || '' };
+    }
+
     const msg = { role: m.role === 'tool' ? 'tool' : m.role, content: m.content || '' };
     if (m.role === 'assistant' && m.tool_calls) {
       msg.tool_calls = typeof m.tool_calls === 'string' ? JSON.parse(m.tool_calls) : m.tool_calls;
@@ -294,7 +314,8 @@ export async function bootSqliteAgent(config = {}) {
 
     const targetUrl = endpointUrl || resolveEndpointUrl(llmUrl, llmProvider);
     const targetApiKey = llmApiKey;
-    const toolsPayload = tools.length ? tools.map(t => {
+    const isGemini = llmProvider === 'gemini' || /generativelanguage\.googleapis\.com/i.test(targetUrl);
+    const toolsPayload = (tools.length && !isGemini) ? tools.map(t => {
       const schema = typeof t === 'string' ? JSON.parse(t) : t;
       return schema;
     }) : undefined;
@@ -311,7 +332,8 @@ export async function bootSqliteAgent(config = {}) {
         body: JSON.stringify({
           model: llmModel,
           messages: apiMessages,
-          tools: toolsPayload,
+          ...(toolsPayload ? { tools: toolsPayload } : {}),
+          ...(isGemini ? { response_format: { type: 'json_object' } } : {}),
           stream: true,
           stream_options: { include_usage: true },
         }),
@@ -434,7 +456,8 @@ export async function bootSqliteAgent(config = {}) {
         body: JSON.stringify({
           model: llmModel,
           messages: apiMessages,
-          tools: toolsPayload,
+          ...(toolsPayload ? { tools: toolsPayload } : {}),
+          ...(isGemini ? { response_format: { type: 'json_object' } } : {}),
           stream: false,
         }),
       });
@@ -498,7 +521,7 @@ export async function bootSqliteAgent(config = {}) {
         // Format messages for API
         let apiMessages = [
           { role: 'system', content: systemPrompt },
-          ...formatMessages(messages.filter(m => m.role !== 'system'))
+          ...formatMessages(messages.filter(m => m.role !== 'system'), llmProvider)
         ];
 
         // Emit 'thinking' event
@@ -530,7 +553,7 @@ export async function bootSqliteAgent(config = {}) {
                 systemPrompt = buildSystemPrompt(tools, systemMsg?.content);
                 apiMessages = [
                   { role: 'system', content: systemPrompt },
-                  ...formatMessages(messages.filter(m => m.role !== 'system'))
+                  ...formatMessages(messages.filter(m => m.role !== 'system'), llmProvider)
                 ];
                 agentEventStream.emit('thinking', {
                   role: 'assistant',
@@ -658,25 +681,54 @@ export async function bootSqliteAgent(config = {}) {
         }
         const t = sql.trim().toUpperCase();
         const firstWord = (t.split(/\s+/)[0] || '').replace(/[^A-Z]/g, '');
-        const isReadOnly = firstWord === 'SELECT' || firstWord === 'WITH';
-        const isDML = firstWord === 'INSERT' || firstWord === 'UPDATE' || firstWord === 'DELETE';
+        const isReadOnly = firstWord === 'SELECT' || firstWord === 'WITH' || firstWord === 'EXPLAIN' || firstWord === 'PRAGMA';
+        const isDDL = firstWord === 'CREATE' || firstWord === 'DROP' || firstWord === 'ALTER';
 
-        // T3: read the DML gate (default OFF → agent is read-only).
-        let allowDml = false;
-        for await (const cfgStmt of sqlite3.statements(db, `SELECT value FROM system_config WHERE key = 'allow_dml'`)) {
-          if (await sqlite3.step(cfgStmt) === SQLITE_ROW) allowDml = sqlite3.row(cfgStmt)[0] === '1';
+        if (!isReadOnly) {
+          // Read allow_dml from system_config (default ON '1')
+          let allowDml = true;
+          for await (const cfgStmt of sqlite3.statements(db, `SELECT value FROM system_config WHERE key = 'allow_dml'`)) {
+            if (await sqlite3.step(cfgStmt) === SQLITE_ROW) allowDml = sqlite3.row(cfgStmt)[0] !== '0';
+          }
+
+          if (!allowDml) {
+            const res = {
+              error: 'Database write operations are disabled in system_config (allow_dml = 0).',
+            };
+            agentEventStream.emit('tool_result', { tool: 'execute_sql', query: sql, error: res.error, result: res });
+            sqlite3.result_text(context, JSON.stringify(res));
+            return;
+          }
+
+          // Permission popup for the user
+          const userApproved = (typeof window !== 'undefined' && typeof window.confirm === 'function')
+            ? window.confirm(`Agent requests permission to execute write SQL:\n\n${sql.trim()}\n\nAllow execution?`)
+            : true;
+
+          if (!userApproved) {
+            const res = { error: 'Permission denied: user rejected the database write operation.' };
+            agentEventStream.emit('tool_result', { tool: 'execute_sql', query: sql, error: res.error, result: res });
+            sqlite3.result_text(context, JSON.stringify(res));
+            return;
+          }
+
+          // If DDL, log to turn_ddl_log for rewind undo
+          if (isDDL) {
+            const sessRows = await queryAll(sqlite3, db, `SELECT value FROM session_context WHERE key = 'active_session_id'`);
+            const sessId = sessRows.length ? sessRows[0][0] : 'default';
+            const turnRows = await queryAll(sqlite3, db, `SELECT value FROM session_context WHERE key = 'current_turn_id'`);
+            const turnId = turnRows.length && turnRows[0][0] !== '' ? parseInt(turnRows[0][0], 10) : 0;
+
+            await logDDL(sqlite3, db, {
+              turnId,
+              sessionId: sessId,
+              tableName: null,
+              ddlSql: sql,
+              preImage: null,
+            });
+          }
         }
 
-        if (!isReadOnly && !(isDML && allowDml)) {
-          const res = {
-            error: allowDml
-              ? 'Only SELECT/WITH and INSERT/UPDATE/DELETE are allowed (DDL stays locked).'
-              : 'Only SELECT queries allowed. DML (INSERT/UPDATE/DELETE) is disabled — set system_config.allow_dml = 1 to let the agent write data.',
-          };
-          agentEventStream.emit('tool_result', { tool: 'execute_sql', query: sql, error: res.error, result: res });
-          sqlite3.result_text(context, JSON.stringify(res));
-          return;
-        }
         const rows = [];
         let cols = [];
         for await (const stmt of sqlite3.statements(db, sql)) {
@@ -685,10 +737,23 @@ export async function bootSqliteAgent(config = {}) {
             rows.push(sqlite3.row(stmt));
           }
         }
-        const result = [{
-          columns: cols,
-          values: rows,
-        }];
+
+        if (isDDL) {
+          await sweepCaptureTriggers(sqlite3, db);
+        }
+
+        let result;
+        if (cols.length > 0 || rows.length > 0) {
+          result = [{
+            columns: cols,
+            values: rows,
+          }];
+        } else {
+          result = [{
+            columns: ['status', 'changes'],
+            values: [['OK', 1]],
+          }];
+        }
         agentEventStream.emit('tool_result', {
           tool: 'execute_sql',
           query: sql,
@@ -794,11 +859,53 @@ export async function bootSqliteAgent(config = {}) {
             return;
           }
         }
-        const resp = await fetch(url, { headers: { 'User-Agent': 'WebSQLAgent/1.0' }, signal: turnSignalWith(10000) });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const html = await resp.text();
+
+        let html = '';
+        let respStatus = 200;
+
+        // 1. Try local dev proxy endpoint first
+        try {
+          const proxyUrl = `/api/fetch-proxy?url=${encodeURIComponent(url)}`;
+          const proxyResp = await fetch(proxyUrl, { signal: turnSignalWith(12000) });
+          if (proxyResp.ok) {
+            respStatus = proxyResp.status;
+            html = await proxyResp.text();
+          }
+        } catch { /* proceed to direct fetch fallback */ }
+
+        // 2. If dev proxy did not respond, try direct fetch
+        if (!html) {
+          try {
+            const resp = await fetch(url, { signal: turnSignalWith(10000) });
+            if (resp.ok) {
+              respStatus = resp.status;
+              html = await resp.text();
+            }
+          } catch { /* proceed to public CORS proxy fallback */ }
+        }
+
+        // 3. Fallback to public CORS proxies if direct browser fetch was blocked by CORS
+        if (!html) {
+          const corsProxies = [
+            `https://corsproxy.io/?${encodeURIComponent(url)}`,
+            `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+          ];
+          for (const cp of corsProxies) {
+            try {
+              const resp = await fetch(cp, { signal: turnSignalWith(10000) });
+              if (resp.ok) {
+                respStatus = resp.status;
+                html = await resp.text();
+                if (html) break;
+              }
+            } catch { /* try next proxy */ }
+          }
+        }
+
+        if (!html) throw new Error('Failed to fetch page (blocked by CORS or network error)');
+
         const text = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8000);
-        const payload = { url, status: resp.status, title: html.match(/<title>(.*?)<\/title>/i)?.[1] || '(no title)', content: text, truncated: html.length > 8000 };
+        const payload = { url, status: respStatus, title: html.match(/<title>(.*?)<\/title>/i)?.[1] || '(no title)', content: text, truncated: html.length > 8000 };
         agentEventStream.emit('tool_result', {
           tool: 'fetch_url',
           url,
@@ -809,6 +916,42 @@ export async function bootSqliteAgent(config = {}) {
         console.error('[fetch_url]', e);
         const res = { error: e.message };
         agentEventStream.emit('tool_result', { tool: 'fetch_url', url, error: e.message, result: res });
+        sqlite3.result_text(context, JSON.stringify(res));
+      }
+    }
+  );
+
+  // 8b. Register async UDF: materialize (T13: tool-output materialization engine)
+  await sqlite3.create_function(
+    db, 'materialize', -1, SQLITE_UTF8, null,
+    async (context, args) => {
+      const tableName = args.length > 0 ? sqlite3.value_text(args[0]) : null;
+      const toolCallId = args.length > 1 ? sqlite3.value_text(args[1]) : null;
+      agentEventStream.emit('tool_call', {
+        name: 'materialize',
+        arguments: { table_name: tableName, tool_call_id: toolCallId || undefined },
+      });
+      try {
+        const res = await materializeToolResult(sqlite3, db, {
+          tableName,
+          toolCallId: toolCallId || null,
+        });
+        agentEventStream.emit('tool_result', {
+          tool: 'materialize',
+          table: tableName,
+          result: res,
+          error: res.error,
+        });
+        sqlite3.result_text(context, JSON.stringify(res));
+      } catch (e) {
+        console.error('[materialize]', e);
+        const res = { error: e.message };
+        agentEventStream.emit('tool_result', {
+          tool: 'materialize',
+          table: tableName,
+          error: e.message,
+          result: res,
+        });
         sqlite3.result_text(context, JSON.stringify(res));
       }
     }

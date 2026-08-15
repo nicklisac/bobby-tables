@@ -30,6 +30,7 @@ INSERT OR IGNORE INTO system_config (key, value) VALUES
      || 'Always write correct, safe, read-only SQL. Think step by step. '
      || 'If the user asks something you cannot answer with available data, say so honestly.'),
   ('llm_model', 'gemini-2.5-flash'),
+  ('allow_dml', '1'),
   -- T2: fallback effective context window (tau's DEFAULT_CONTEXT_WINDOW_TOKENS).
   -- The LIVE window resolves as: user override (settings field, written to this
   -- same key) -> cloud model-name lookup -> this fallback. The 85% compaction
@@ -53,6 +54,9 @@ INSERT OR IGNORE INTO tools (name, schema) VALUES
   ),
   ('fetch_url',
     '{"type":"function","function":{"name":"fetch_url","description":"Fetch the content of a web URL. Returns the page text content.","parameters":{"type":"object","properties":{"url":{"type":"string","description":"The absolute HTTP/HTTPS URL to fetch"}},"required":["url"]}}}'
+  ),
+  ('materialize',
+    '{"type":"function","function":{"name":"materialize","description":"Materialize raw JSON output from a prior tool call into a permanent, queryable SQLite table. Useful for storing web search results, fetched web page data, or external API responses so they can be queried with SQL.","parameters":{"type":"object","properties":{"table_name":{"type":"string","description":"The name for the new SQLite table to create (must be a valid identifier that does not already exist)"},"tool_call_id":{"type":"string","description":"Optional: the specific tool_call_id whose result should be materialized. If omitted, uses the most recent tool output in the session."}},"required":["table_name"]}}}'
   );
 
 -- =====================================================================
@@ -386,6 +390,15 @@ BEGIN
                 fetch_url(COALESCE(
                     json_extract(NEW.tool_calls, '$[0].function.arguments.url'),
                     json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.url')))
+            WHEN 'materialize' THEN
+                materialize(
+                    COALESCE(
+                        json_extract(NEW.tool_calls, '$[0].function.arguments.table_name'),
+                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.table_name')),
+                    COALESCE(
+                        json_extract(NEW.tool_calls, '$[0].function.arguments.tool_call_id'),
+                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.tool_call_id'))
+                )
             ELSE json_object('error', 'Unknown tool: ' || json_extract(NEW.tool_calls, '$[0].function.name'))
         END,
         json_extract(NEW.tool_calls, '$[0].id');
