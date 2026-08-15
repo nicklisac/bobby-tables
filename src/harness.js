@@ -13,10 +13,10 @@
 
 import ModuleFactory from '../vendor/wa-sqlite-jspi/wa-sqlite-jspi.mjs';
 import { Factory } from '../vendor/wa-sqlite-jspi/sqlite-api.js';
-import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_ROW, SQLITE_INSERT } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
+import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_ROW, SQLITE_INSERT, SQLITE_DELETE, SQLITE_UPDATE } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
-import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, queryAll } from './schema.js';
+import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, queryAll, isInternalTable } from './schema.js';
 import { runCompaction, queryActiveContextJson } from './compaction.js';
 
 /**
@@ -48,7 +48,7 @@ export class AgentEventStream {
 
   /**
    * Emit a structured event to all active stream readers.
-   * @param {string} type - Event type ('thinking', 'token', 'tool_call', 'tool_result', 'react_step', 'done', 'error')
+   * @param {string} type - Event type ('thinking', 'token', 'tool_call', 'tool_result', 'react_step', 'data_change', 'done', 'error')
    * @param {object} [data] - Event payload
    */
   emit(type, data = {}) {
@@ -254,6 +254,14 @@ export async function bootSqliteAgent(config = {}) {
   await sqlite3.exec(db, 'PRAGMA recursive_triggers = ON;');
 
   // 4b. Register update_hook on db to emit 'react_step' events on message INSERTs
+  // and 'data_change' events on DATA-table row changes (T11 reactivity
+  // groundwork). The callback runs synchronously inside sqlite3.step — it must
+  // do NO database work (single-threaded connection; the cascade may be
+  // suspended mid-transaction). It only enqueues a small event; consumers
+  // (grid-ui) accumulate changed tables and re-run affected cards at a
+  // committed point (turn/scratchpad/ingest end), never mid-savepoint.
+  // Internal tables (messages, session_context, dashboard_cards, …) are
+  // excluded — they are agent/UI state, not data.
   sqlite3.update_hook(db, (iUpdateType, dbNameStr, tblName, rowid) => {
     if (tblName === 'messages' && iUpdateType === SQLITE_INSERT) {
       agentEventStream.emit('react_step', {
@@ -261,6 +269,13 @@ export async function bootSqliteAgent(config = {}) {
         action: 'INSERT',
         rowid: typeof rowid === 'bigint' ? Number(rowid) : rowid,
         dbName: dbNameStr,
+      });
+    }
+    if (!isInternalTable(tblName)) {
+      agentEventStream.emit('data_change', {
+        table: tblName,
+        op: iUpdateType === SQLITE_INSERT ? 'INSERT'
+          : iUpdateType === SQLITE_DELETE ? 'DELETE' : 'UPDATE',
       });
     }
   });

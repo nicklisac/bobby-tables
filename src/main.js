@@ -23,6 +23,8 @@ import {
 } from './rewind.js';
 import { exportCartridge, importCartridge, exportSqlDump } from './cartridge.js';
 import { ingestCsvToSqlite } from './csv-ingestion.js';
+import * as gridUi from './grid-ui.js';
+import * as gridEngine from './grid.js';
 import { SQLITE_ROW, SQLITE_DONE } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
 import './styles.css';
 
@@ -406,6 +408,9 @@ async function renderMessages() {
 
   scrollChatToBottom();
   await updateTokenUsage();
+  // T11: keep the left-pane table list current (cheap sqlite_master read;
+  // runs after every turn/scratchpad/ingest/import re-render).
+  gridUi.renderExplorer().catch(e => console.warn('[main] explorer render failed (non-fatal):', e));
 }
 
 async function updateTokenUsage() {
@@ -576,6 +581,10 @@ function setLoading(on) {
   // a turn is in flight would mis-stamp that turn's changesets. (The Stop button
   // is re-enabled separately by setSendButtonStop.)
   if (sessionSelect) sessionSelect.disabled = on;
+  // T11: gate the dashboard grid while a turn is in flight — card CRUD issued
+  // mid-turn would join the turn savepoint and roll back with it on a hard
+  // error; data_change re-runs are deferred to the turn-end flush.
+  gridUi.setBusy(on);
   isProcessing = on;
 }
 
@@ -696,6 +705,18 @@ async function bootAgent() {
 
     await populateSessionDropdown();
     await renderMessages();
+
+    // T11: 3-pane workstation — render the 3×3 dashboard grid (right pane),
+    // the DB Explorer table list (left pane), and attach the data_change
+    // reactivity stream. Expose the grid engine on the live handle for probes.
+    try {
+      window.__agent.grid = gridEngine;
+      window.__agent.gridUi = gridUi;
+      gridUi.initGridUi(agent);
+    } catch (e) {
+      console.warn('[main] T11 grid init failed (non-fatal):', e);
+    }
+
     inputEl.focus();
   } catch (e) {
     console.error('[main] Boot failed:', e);
@@ -829,6 +850,9 @@ async function sendMessage(text) {
     setLoading(false);
     // Reconcile and finalize state with SQLite database
     await renderMessages();
+    // T11: re-run dashboard cards whose data tables changed during the turn
+    // (committed point — after RELEASE / ROLLBACK, so rollback is visible).
+    try { await gridUi.flushCards(); } catch (e) { console.warn('[main] card flush failed (non-fatal):', e); }
     inputEl.disabled = false;
     sendBtn.disabled = false;
     inputEl.focus();
@@ -1277,6 +1301,8 @@ async function runScratchpad(cmd, rawText) {
   } finally {
     setLoading(false);
     await renderMessages();
+    // T11: re-run dashboard cards whose data tables changed (committed point).
+    try { await gridUi.flushCards(); } catch (e) { console.warn('[main] card flush failed (non-fatal):', e); }
     inputEl.disabled = false;
     sendBtn.disabled = false;
     inputEl.focus();
@@ -1398,6 +1424,9 @@ document.getElementById('btn-import').addEventListener('click', async () => {
     await setActiveSession(agent.sqlite3, agent.db, 'default');
     await populateSessionDropdown();
     await renderMessages();
+    // T11: the whole DB was replaced — rebuild the dashboard grid + explorer
+    // from the imported brain (cards referencing dropped tables show errors).
+    try { await gridUi.rebuildGrid(); } catch (e) { console.warn('[main] grid rebuild failed (non-fatal):', e); }
     statusBar.textContent = '✓ Cartridge imported';
     statusBar.style.color = '#3fb950';
     setTimeout(() => {
@@ -1543,6 +1572,8 @@ async function handleCsvUpload(file) {
     await renderMessages();
   } finally {
     setLoading(false);
+    // T11: re-run dashboard cards whose data tables changed (new/updated table).
+    try { await gridUi.flushCards(); } catch (e) { console.warn('[main] card flush failed (non-fatal):', e); }
     inputEl.disabled = false;
     sendBtn.disabled = false;
     inputEl.focus();

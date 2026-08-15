@@ -235,9 +235,44 @@ CROSS JOIN active a
 LEFT JOIN latest l ON l.session_id = a.session_id
 WHERE m.session_id = a.session_id
   AND COALESCE(m.in_context, 1) = 1
-  AND m.id != 0  -- the system row (id=0) is emitted by Branch 1, not here
+   AND m.id != 0  -- the system row (id=0) is emitted by Branch 1, not here
   AND (l.watermark_id IS NULL OR m.id > l.watermark_id)
 ORDER BY ctx_order ASC;
+
+-- =====================================================================
+-- 4f. Dashboard Cards (T11: 3-pane workstation — right-pane grid)
+--
+-- UI state for the 3x3 reactive canvas, GLOBAL to the brain (no session_id —
+-- the grid is a workstation view over the DATA, not a conversation artifact;
+-- it persists across session switches and is untouched by fork/delete).
+--
+-- Placement: explicit grid coordinates on a fixed 3x3 grid. row/col = top-
+-- left cell (0-based); row_span/col_span = merged-cell extent (1-3). The grid
+-- engine (src/grid.js) enforces bounds + non-overlap in JS; the CHECK
+-- constraints are belt-and-braces for direct SQL (e.g. T12's drag-drop
+-- INSERT INTO dashboard_cards).
+--
+-- Cards are READ-ONLY: their sql must be a single SELECT/WITH/EXPLAIN
+-- statement (enforced by the grid engine at add/edit time). That keeps card
+-- execution outside T3's changeset capture and safe to re-run at any time.
+--
+-- dashboard_cards is in INTERNAL_TABLES (below): no row-image capture
+-- triggers are attached, so card CRUD never pollutes turn_changesets and a
+-- turn rewind never reverts the dashboard layout (grid = UI state, not data
+-- state). Cartridge export (T10) includes it automatically (page-level
+-- backup / VACUUM INTO).
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS dashboard_cards (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT NOT NULL,
+    sql        TEXT NOT NULL,
+    row        INTEGER NOT NULL DEFAULT 0 CHECK(row >= 0 AND row <= 2),
+    col        INTEGER NOT NULL DEFAULT 0 CHECK(col >= 0 AND col <= 2),
+    row_span   INTEGER NOT NULL DEFAULT 1 CHECK(row_span >= 1 AND row_span <= 3),
+    col_span   INTEGER NOT NULL DEFAULT 1 CHECK(col_span >= 1 AND col_span <= 3),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 
 -- =====================================================================
 -- 5. Sample Data
@@ -536,6 +571,8 @@ export function quoteIdent(name) {
 const INTERNAL_TABLES = new Set([
   'messages', 'sessions', 'session_context', 'system_config', 'tools',
   'turn_changesets', 'turn_ddl_log', 'compactions',
+  'dashboard_cards', // T11: grid = UI state, not data state — no capture triggers,
+                     // never rewound, and no data_change events for card CRUD
 ]);
 
 export function isInternalTable(name) {
@@ -628,7 +665,18 @@ export async function sweepCaptureTriggers(sqlite3, db) {
   const tables = await queryAll(sqlite3, db,
     `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`);
   for (const [name] of tables) {
-    if (isInternalTable(name)) continue;
+    if (isInternalTable(name)) {
+      // Internal tables must have NO capture triggers. Drop any stale ones —
+      // a table can become internal AFTER triggers were attached (T11
+      // dashboard_cards hit exactly this: it was created, a boot attached
+      // capture triggers before it was added to INTERNAL_TABLES, and card
+      // CRUD was being captured into turn_changesets + rewound). Sweeping the
+      // drop here keeps internal tables trigger-free on every boot.
+      await execParams(sqlite3, db, `DROP TRIGGER IF EXISTS cap_${name}_ins`);
+      await execParams(sqlite3, db, `DROP TRIGGER IF EXISTS cap_${name}_upd`);
+      await execParams(sqlite3, db, `DROP TRIGGER IF EXISTS cap_${name}_del`);
+      continue;
+    }
     await ensureCaptureTriggers(sqlite3, db, name);
   }
 }

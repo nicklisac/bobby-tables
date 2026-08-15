@@ -19,95 +19,175 @@
       </div>
     </header>
 
-    <!-- LLM Configuration Panel -->
-    <section id="config-panel">
-      <details id="config-details">
-        <summary>Configure LLM</summary>
-        <form id="config-form">
-          <div class="config-row">
-            <label for="config-provider">Provider</label>
-            <select id="config-provider">
-              <option value="openai">OpenAI Compatible (Ollama, LM Studio, Local, OpenRouter)</option>
-              <option value="gemini">Google Gemini API</option>
+    <!-- T11: 3-pane workstation — left: DB Explorer, center: Chat & Console,
+         right: 3×3 Reactive Canvas (dashboard_cards) -->
+    <div id="workstation">
+      <aside id="explorer-pane">
+        <div class="pane-header">
+          <h2>DB Explorer</h2>
+        </div>
+        <div id="explorer-body">
+          <ul id="table-list"></ul>
+          <p class="explorer-note">Column types, row counts &amp; previews land in Ticket 8.</p>
+        </div>
+      </aside>
+
+      <section id="center-pane">
+        <!-- LLM Configuration Panel -->
+        <section id="config-panel">
+          <details id="config-details">
+            <summary>Configure LLM</summary>
+            <form id="config-form">
+              <div class="config-row">
+                <label for="config-provider">Provider</label>
+                <select id="config-provider">
+                  <option value="openai">OpenAI Compatible (Ollama, LM Studio, Local, OpenRouter)</option>
+                  <option value="gemini">Google Gemini API</option>
+                </select>
+              </div>
+              <div class="config-row" id="row-config-url">
+                <label for="config-url">Base URL / Endpoint</label>
+                <input type="text" id="config-url" placeholder="http://localhost:11434/v1" />
+                <small class="hint">Ollama: http://localhost:11434/v1 &middot; LM Studio: http://localhost:1234/v1</small>
+              </div>
+              <div class="config-row">
+                <label for="config-model">Model Name</label>
+                <input type="text" id="config-model" placeholder="llama3.2 or gemini-2.5-flash" />
+              </div>
+              <div class="config-row">
+                <label for="config-key" id="label-config-key">API Key <span class="optional">(optional for local Ollama/LM Studio)</span></label>
+                <input type="password" id="config-key" placeholder="AIza... or sk-..." />
+              </div>
+              <div class="config-row">
+                <label for="config-context-window">Context Window (tokens)</label>
+                <input type="number" id="config-context-window" min="1000" step="1000" placeholder="auto" />
+                <small class="hint">T2: context for interval compaction. Leave empty for auto (cloud model lookup, 128k fallback). Set explicitly for local models.</small>
+              </div>
+              <button type="submit" id="config-apply">Apply &amp; Reboot Agent</button>
+            </form>
+          </details>
+        </section>
+
+        <main id="chat-container">
+          <div id="drag-overlay" class="drag-overlay hidden">
+            <div class="drag-overlay-box">
+              <div class="drag-icon">📊</div>
+              <div class="drag-title">Drop CSV to Ingest</div>
+              <div class="drag-subtitle">Auto-infers types &amp; creates queryable SQLite table</div>
+            </div>
+          </div>
+
+          <div id="ingestion-progress" class="ingestion-progress hidden">
+            <div class="progress-header">
+              <span class="progress-title" id="progress-title">Importing data&hellip;</span>
+              <span class="progress-count" id="progress-count">0 rows</span>
+            </div>
+            <div class="progress-bar-track">
+              <div class="progress-bar-fill" id="progress-bar-fill"></div>
+            </div>
+          </div>
+
+          <div id="messages"></div>
+          <div id="loading" class="hidden">
+            <span class="dot"></span>
+            <span class="dot"></span>
+            <span class="dot"></span>
+          </div>
+        </main>
+
+        <footer>
+          <div id="status-bar">Initializing&hellip;</div>
+
+          <!-- Session Selector -->
+          <div id="session-bar">
+            <label for="session-select">Session:</label>
+            <select id="session-select">
+              <option value="default">Default Session</option>
             </select>
+            <div id="session-actions">
+              <button type="button" id="session-new" data-action="new" title="New Session">+ New</button>
+              <button type="button" id="session-delete" data-action="delete" title="Delete Session">🗑</button>
+            </div>
+            <span id="token-usage" class="token-usage"></span>
           </div>
-          <div class="config-row" id="row-config-url">
-            <label for="config-url">Base URL / Endpoint</label>
-            <input type="text" id="config-url" placeholder="http://localhost:11434/v1" />
-            <small class="hint">Ollama: http://localhost:11434/v1 &middot; LM Studio: http://localhost:1234/v1</small>
+
+          <form id="input-form">
+            <input
+              type="text"
+              id="user-input"
+              placeholder="Ask me to query your data… or run SQL: ! = agent sees it, !! = private"
+              autocomplete="off"
+              disabled
+            />
+            <button type="submit" id="send-btn" disabled>Send</button>
+          </form>
+        </footer>
+      </section>
+
+      <aside id="canvas-pane">
+        <div class="pane-header">
+          <h2>Dashboard</h2>
+          <div class="canvas-actions">
+            <button type="button" id="btn-refresh-all" title="Re-run every card">⟳ All</button>
+            <button type="button" id="btn-add-card" title="Add a dashboard card">+ Add card</button>
+          </div>
+        </div>
+        <div id="dashboard-grid" class="dashboard-grid" aria-label="3x3 dashboard grid"></div>
+      </aside>
+    </div>
+
+    <!-- T11: card add/edit dialog -->
+    <div id="card-dialog" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <h3 id="card-dialog-title">New dashboard card</h3>
+        <form id="card-form">
+          <div class="config-row">
+            <label for="card-title">Title</label>
+            <input type="text" id="card-title" required maxlength="80" placeholder="e.g. Total products" />
           </div>
           <div class="config-row">
-            <label for="config-model">Model Name</label>
-            <input type="text" id="config-model" placeholder="llama3.2 or gemini-2.5-flash" />
+            <label for="card-sql">SQL (read-only SELECT)</label>
+            <textarea id="card-sql" rows="4" required placeholder="SELECT COUNT(*) AS n FROM sample_data"></textarea>
+            <small class="hint">Cards run live read-only queries — SELECT / WITH / EXPLAIN only, one statement.</small>
+          </div>
+          <div class="config-row hidden" id="card-placement-row">
+            <label>Position (top-left cell)</label>
+            <div class="placement-selects">
+              <select id="card-row" title="Row (0 = top)">
+                <option value="0">row 0</option>
+                <option value="1">row 1</option>
+                <option value="2">row 2</option>
+              </select>
+              <select id="card-col" title="Column (0 = left)">
+                <option value="0">col 0</option>
+                <option value="1">col 1</option>
+                <option value="2">col 2</option>
+              </select>
+            </div>
           </div>
           <div class="config-row">
-            <label for="config-key" id="label-config-key">API Key <span class="optional">(optional for local Ollama/LM Studio)</span></label>
-            <input type="password" id="config-key" placeholder="AIza... or sk-..." />
+            <label>Size (merged cells)</label>
+            <div class="placement-selects">
+              <select id="card-row-span" title="Row span">
+                <option value="1">1 row</option>
+                <option value="2">2 rows</option>
+                <option value="3">3 rows</option>
+              </select>
+              <select id="card-col-span" title="Column span">
+                <option value="1">1 col</option>
+                <option value="2">2 cols</option>
+                <option value="3">3 cols</option>
+              </select>
+            </div>
           </div>
-          <div class="config-row">
-            <label for="config-context-window">Context Window (tokens)</label>
-            <input type="number" id="config-context-window" min="1000" step="1000" placeholder="auto" />
-            <small class="hint">T2: context for interval compaction. Leave empty for auto (cloud model lookup, 128k fallback). Set explicitly for local models.</small>
+          <div id="card-error" class="card-dialog-error hidden"></div>
+          <div class="modal-actions">
+            <button type="button" id="card-cancel">Cancel</button>
+            <button type="submit" id="card-submit">Add card</button>
           </div>
-          <button type="submit" id="config-apply">Apply &amp; Reboot Agent</button>
         </form>
-      </details>
-    </section>
-
-    <main id="chat-container">
-      <div id="drag-overlay" class="drag-overlay hidden">
-        <div class="drag-overlay-box">
-          <div class="drag-icon">📊</div>
-          <div class="drag-title">Drop CSV to Ingest</div>
-          <div class="drag-subtitle">Auto-infers types &amp; creates queryable SQLite table</div>
-        </div>
       </div>
-
-      <div id="ingestion-progress" class="ingestion-progress hidden">
-        <div class="progress-header">
-          <span class="progress-title" id="progress-title">Importing data&hellip;</span>
-          <span class="progress-count" id="progress-count">0 rows</span>
-        </div>
-        <div class="progress-bar-track">
-          <div class="progress-bar-fill" id="progress-bar-fill"></div>
-        </div>
-      </div>
-
-      <div id="messages"></div>
-      <div id="loading" class="hidden">
-        <span class="dot"></span>
-        <span class="dot"></span>
-        <span class="dot"></span>
-      </div>
-    </main>
-
-    <footer>
-      <div id="status-bar">Initializing&hellip;</div>
-
-      <!-- Session Selector -->
-      <div id="session-bar">
-        <label for="session-select">Session:</label>
-        <select id="session-select">
-          <option value="default">Default Session</option>
-        </select>
-        <div id="session-actions">
-          <button type="button" id="session-new" data-action="new" title="New Session">+ New</button>
-          <button type="button" id="session-delete" data-action="delete" title="Delete Session">🗑</button>
-        </div>
-        <span id="token-usage" class="token-usage"></span>
-      </div>
-
-      <form id="input-form">
-        <input
-          type="text"
-          id="user-input"
-          placeholder="Ask me to query your data… or run SQL: ! = agent sees it, !! = private"
-          autocomplete="off"
-          disabled
-        />
-        <button type="submit" id="send-btn" disabled>Send</button>
-      </form>
-    </footer>
+    </div>
   </div>
 
   <script type="module" src="/src/main.js"></script>
