@@ -47,6 +47,10 @@ A fresh session resumes from **this map alone** — destination, philosophy, and
 * [Decision: Tool-Output Materialization (The Golden Goose)](#ticket-13-tool-output-materialization-engine) — Use `json_each()` / `json_tree()` to transform raw tool JSON responses in `messages` directly into permanent tables with zero token transcription cost.
 * [Research: Local Embedding Pipeline (Transformers.js + `vec0`)](#ticket-5-native-vector-search-integration-sqlite-vec) — `Xenova/all-MiniLM-L6-v2` q8 (384-dim, cosine, WebGPU→WASM fallback); brute-force flat scan fine to ~50k chunks; async JSPI UDF returns vectors via `result_blob` + `Uint8Array` view.
 * [Decision: Scratchpad Bang Grammar — Explicitness, Not Privilege (T9 locked)](#ticket-9-direct-sql-scratchpad-select--ddlddl) — `!SQL` = run any SQL directly, agent SEES it (`in_context=1`); `!!SQL` = run any SQL directly, PRIVATE (`in_context=0`). No write gates: the bang prefix is the explicitness marker; `confirm()` on every write (DML+DDL), never on reads. `allow_dml` stays agent-tool-only. Negative turn ids (`-M`), two independent 20-turn eviction windows, DDL-first lenient replay, `DROP TABLE` pre-images, data-only ⟲ with in-context marker.
+* [Decision: Cards Hold View Definitions — the FROM Clause Is the Pointer](#ticket-12-drag-and-drop-chat-rightarrow-grid-pinning) — A grid card's `sql` is a read-only SELECT (a view definition in spirit — not a registered `sqlite_master` view); it holds layout + definition, never the substance. Substance lives in named relational objects (tables = frozen/materialized, views = live logic) and the card's FROM clause is the pointer. No T11 rework — `dashboard_cards.sql` already stores a SELECT; the delta is intent + the materialization path (2026-08-15, user-confirmed).
+* [Decision: T13 Is the Shared Materialize Function — Sequenced First](#ticket-13-tool-output-materialization-engine) — Materialization = *JSON blob in a `messages` row → named table* (json_each unpacking, T6-style type inference, T9-style DDL logging + capture-trigger sweep), exposed two ways: an **agent tool** (`materialize`, keyed off `tool_call_id`) and a **library function the T12 drag handler calls**. Drag flow: table bubble → recover the SQL → card SELECT; web-search/fetch bubble → materialize → card SELECT over the new table; plain text → not draggable (2026-08-15, user-confirmed).
+* [Decision: Reference-Integrity Semantics for Card Pointers](#ticket-22-reference-integrity-for-dashboard-cards) — **Rename** rewrites referencing cards' SQL (emulating SQLite's native view-rewrite under `ALTER TABLE … RENAME TO`); **delete** cascade-deletes referencing cards behind a confirm that lists them; **alter** dry-runs referencing cards (read-only by construction) and alerts on breakage. Built on a shared `extractReferencedObjects` + dry-run; scoped to user data tables/views, never protected tables (2026-08-15).
+* [Decision: Protected-Tables Boundary Gets Its Own Ticket](#ticket-21-protected-tables-boundary) — "Untouchable" must be a formal predicate consulted at **every** write boundary, not just the rewind/reactivity machinery. Finding: `INTERNAL_TABLES` is enforced only in `ensureCaptureTriggers`/`update_hook` — the agent's DML (with `allow_dml=1`) and the scratchpad's DML/DDL have **no** target-table guard (`!!DELETE FROM messages` works today — a live gap). DDL on protected tables: refuse outright. One HITL decision pending: DML on protected tables — default refuse + narrow allowlist (`system_config`) vs. allow-with-loud-warning (2026-08-15).
 
 ---
 
@@ -76,13 +80,19 @@ graph TD
     T7[Ticket 7: Web Search & URL Fetch Tools - DONE]
     T10[Ticket 10: Cartridge Import / Export - DONE]
     T16[Ticket 16: In-Browser Full-Text Search FTS5]
+    T21[Ticket 21: Protected-Tables Boundary]
+    T13 --> T12
+    T12 --> T22[Ticket 22: Reference Integrity for Dashboard Cards]
+    T13 --> T22
+    T21 --> T22
 
     classDef done fill:#238636,stroke:#2ea043,color:#fff;
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
     class T1,T2,T3,T4,T5,T6,T7,T9,T10,T11 done;
-    class T8,T12,T13,T14,T15,T16,T17,T18,T19,T20 frontier;
+    class T8,T13,T14,T15,T16,T17,T18,T19,T20,T21 frontier;
+    class T12,T22 blocked;
 ```
 
 ---
@@ -232,15 +242,17 @@ graph TD
 
 ### Ticket 12: Drag-and-Drop Chat $\rightarrow$ Grid Pinning
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Open (Frontier) — unblocked 2026-08-15 (T11 complete; the 9 `.grid-cell` drop-zone anchors are in place)
-* **Question:** How should HTML5 Drag-and-Drop handlers be attached to chat query results to allow dragging live SQL queries onto grid drop zones, executing `INSERT INTO dashboard_cards`, and rendering reactive data widgets?
+* **Status:** Open — blocked by T13 (re-sequenced 2026-08-15; T11's 9 `.grid-cell` drop-zone anchors are in place). The SQL-bubble half is independent of T13 and could be built first if desired.
+* **Question (refined 2026-08-15, user-confirmed):** How should HTML5 Drag-and-Drop handlers attach to **rendered assets only** (table bubbles, web-search lists, fetch previews — plain text is not draggable) so that: (a) a table bubble recovers its SQL from the transcript (the scratchpad envelope's `sql` field, or `tool_call_id` → the assistant row's `tool_calls`) → `addCard` with that SELECT; (b) a web-search/fetch bubble calls T13's shared materialize function → `addCard` with a SELECT over the new table? Per the pointer decision: the card holds a view definition (read-only SELECT); the FROM clause is the pointer; the substance lives in named tables/views.
+* **Design notes:** see Decisions So Far — "Cards Hold View Definitions" and "T13 Is the Shared Materialize Function".
 
 ---
 
 ### Ticket 13: Tool-Output Materialization Engine
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Open (Frontier)
-* **Question:** How should helper macros or tools allow the agent to execute `CREATE TABLE ... AS SELECT ... FROM messages, json_each(content)` to materialize raw API JSON into indexed tables with zero token overhead?
+* **Status:** Open (Frontier) — **sequenced first** on the frontier (2026-08-15; T12's web/fetch drag depends on it)
+* **Question (refined 2026-08-15, user-confirmed):** How should the shared materialize function — *JSON blob in a `messages` row → named table* — be built and exposed both as an **agent tool** (`materialize`, keyed off `tool_call_id` or the most recent tool result) and as a **library function the T12 drag handler calls**? Open design points: (1) tool signature & source-row discovery (the LLM sees `tool_call_id` in context but never `messages.id`); (2) schema inference — reuse T6's `inferCellType`/`promoteType` or ship all-TEXT; (3) shape handling — flat arrays of objects vs. nested/heterogeneous (`json_tree` depth); (4) naming & collision (auto-convention + rename-later vs. error vs. auto-suffix — names are load-bearing: card FROM clauses reference them); (5) DDL logging to `turn_ddl_log` (pre-image = "table didn't exist") + `sweepCaptureTriggers` on the new table — T9's scratchpad DDL path is the template; materialized tables are real **data** tables, not internal (rewound-able, refreshable, cartridge-exported); (6) refuse protected target names (T21); (7) feedback envelope — `{table, columns, row_count}`, never the data.
+* **Locked direction:** json_each/json_tree unpacking, zero token transcription cost — the "golden goose": the bridge from transient, compaction-destroyable tool output to durable relational state.
 
 ---
 
@@ -291,6 +303,26 @@ graph TD
 * **Label:** `wayfinder:prototype` (HITL)
 * **Status:** Open (Frontier)
 * **Question:** Per the Ticket 5 research, how should the embedding pipeline be wired as an agent capability — `embed_text` UDF registration, `vec_documents` vec0 table (384-dim, cosine, `document_id` partition key, `+contents`), which document sources get chunked & embedded on ingestion, and the `search_similar` tool registered in `tools` (including lazy model-load UX)?
+
+---
+
+### Ticket 21: Protected-Tables Boundary
+* **Label:** `wayfinder:task` (HITL — one decision; the rest is mechanical)
+* **Status:** Open (Frontier) — independent of everything; also a **live safety gap** (not blocked by anything)
+* **Question:** How do we formalize "untouchable" as a predicate (`isProtectedTable`) consulted at **every** write boundary, with a boot-time invariant that makes the boundary self-enforcing?
+* **Findings (2026-08-15):** `INTERNAL_TABLES` (schema.js) is enforced at exactly two boundaries — `ensureCaptureTriggers`/`sweepCaptureTriggers` (no rewind capture) and the `update_hook` (no `data_change`). **No write path checks it:** with `allow_dml=1`, the agent's `execute_sql` can `DELETE FROM messages` / `UPDATE system_config` (the harness gate checks the verb, never the target table); the scratchpad's `!!DELETE FROM messages` / `!!DROP TABLE messages` run behind a plain confirm (the DROP would `captureDropPreImage` the entire `messages` table first). DDL on protected tables: **refuse outright** — no confirm is enough when the consequence is "the whole conversation history is gone".
+* **Design agenda:** (1) the predicate + the protected set (internal tables + `sqlite_%` + fts5/vec0 **shadow tables** — recognition heuristic: `sqlite_master.sql IS NULL` or the `<parent>_{data,idx,content,docsize,config}` shape; needed before T16/T20 or `sweepCaptureTriggers` will instrument index internals); (2) wire into `run_dynamic_sql` (DML target check) + the scratchpad's `classifyStatement` path (DML+DDL target check); (3) **the one HITL decision** — DML on protected tables: default refuse + narrow allowlist (`system_config` only) vs. allow-with-loud-warning ("writes a system table; not rewound-able"); (4) boot-time invariant — after schema init + sweep, assert: no capture trigger on any protected table, AND every non-protected data table has capture triggers (turns the T11 "stale triggers" bug from a one-time probe find into a boot failure); (5) reads stay always allowed (`SELECT * FROM messages` is useful and safe).
+* **Dependencies:** none — the gap is live today. Blocks T22 (reference integrity must exclude protected tables). Light dependency for T13 (materialization refuses protected target names — `isInternalTable` exists today, so T13 is not hard-blocked).
+
+---
+
+### Ticket 22: Reference Integrity for Dashboard Cards
+* **Label:** `wayfinder:prototype` (HITL)
+* **Status:** Open — blocked by T12, T13, T21
+* **Question:** How do rename / delete / alter of named objects (materialized tables, CSV-ingested tables, T18 views) keep referencing cards correct — given that a card's `sql` is an ad-hoc string with **no native dependency tracking** in SQLite?
+* **Semantics locked (2026-08-15, user-confirmed):** **Rename** → rewrite referencing cards' SQL (emulating SQLite's native view-rewrite under `ALTER TABLE … RENAME TO`, 3.25+) + report "updated N cards". **Delete** → extract references first → confirm popup lists the N cards that will be removed → cascade-delete cards + object. **Alter** → apply in a savepoint → **dry-run** each referencing card (read-only by construction, so it's safe to run) → alert on breakage, keep or ⟲.
+* **Design agenda:** (1) the shared `extractReferencedObjects(cardSql) → [names]` primitive (table/view identifiers in FROM/JOIN; traps: substring collisions — `users` inside `user_sessions` — string literals & comments, quoted identifiers, CTE aliases; reuse T11's `isReadOnlySql` comment/string stripping; the same primitive serves T21's write-path target check); (2) token-level identifier rewrite, not string replace; (3) the dry-run backstop — a false negative in the extractor degrades to "a card shows an error", never silent corruption; (4) scope: user data tables/views only — never protected tables (T21); (5) the "source missing" card UX — a card whose object was rewound/dropped renders a hint ("re-materialize or re-pin"), not a mystery error (T11's `runCardSql` already reports errors without throwing).
+* **Note:** column-level breakage prediction is deliberately out of reach statically (qualifiers, aliases, `SELECT *`) — the dry-run sidesteps it entirely.
 
 ---
 
