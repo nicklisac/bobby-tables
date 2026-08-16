@@ -1,78 +1,193 @@
 /**
- * PANE RESIZERS — T11 follow-up: draggable dividers between the 3 workstation
- * panes. The left divider resizes #explorer-pane, the right divider resizes
- * #canvas-pane; #center-pane (flex: 1) absorbs the difference.
+ * PANE RESIZERS & COLLAPSIBLE SIDE PANELS
  *
- * Widths persist in localStorage — this is pure UI state, never agent state
- * (it does not touch the brain DB, v_active_context, or cartridge export).
- * Double-click a divider to reset that pane to its default width.
+ * Draggable dividers & collapsible side panels between the 3 workstation panes:
+ * - Left pane: #explorer-pane (DB Explorer & Sessions) + #divider-explorer
+ * - Center pane: #center-pane (Chat & Console, flex: 1)
+ * - Right pane: #canvas-pane (Dashboard 3x3 Canvas) + #divider-canvas
  *
- * Resizing is allowed while a turn is in flight (it is layout-only, no DB
- * work), so it is intentionally NOT gated by the grid busy state.
+ * When collapsed, side panels shrink to a thin 38px activity rail displaying
+ * crisp schema / dashboard icons. Clicking anywhere on the collapsed rail or its
+ * icon button immediately re-expands the pane to its previous width.
+ *
+ * Keyboard shortcuts:
+ * - Ctrl+B / Cmd+B: Toggle Left Sidebar (Explorer & Sessions)
+ * - Ctrl+J / Cmd+J: Toggle Right Sidebar (Dashboard Canvas)
  */
 
-const STORAGE_KEY = 'bobby.paneWidths.v1';
+const STORAGE_KEY = 'bobby.paneLayout.v3';
 
-const DEFAULTS = { explorer: 250, canvas: 440 };
+const DEFAULTS = {
+  explorerWidth: 260,
+  canvasWidth: 440,
+  explorerCollapsed: false,
+  canvasCollapsed: false,
+};
+
+const COLLAPSED_WIDTH = 38;
 const MIN = { explorer: 160, canvas: 260 };
-// Max as a fraction of the workstation width, so the center pane stays usable.
 const MAX_FRACTION = { explorer: 0.45, canvas: 0.5 };
 
-function loadWidths() {
+function loadState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULTS };
     const p = JSON.parse(raw);
     return {
-      explorer: Number.isFinite(p.explorer) ? p.explorer : DEFAULTS.explorer,
-      canvas: Number.isFinite(p.canvas) ? p.canvas : DEFAULTS.canvas,
+      explorerWidth: Number.isFinite(p.explorerWidth) && p.explorerWidth >= MIN.explorer ? p.explorerWidth : DEFAULTS.explorerWidth,
+      canvasWidth: Number.isFinite(p.canvasWidth) && p.canvasWidth >= MIN.canvas ? p.canvasWidth : DEFAULTS.canvasWidth,
+      explorerCollapsed: Boolean(p.explorerCollapsed),
+      canvasCollapsed: Boolean(p.canvasCollapsed),
     };
   } catch {
-    return { ...DEFAULTS }; // corrupt value / storage unavailable
+    return { ...DEFAULTS };
   }
 }
 
-function saveWidths(widths) {
+function saveState(state) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(widths));
-  } catch { /* storage full/unavailable — resizing still works, just not persisted */ }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch { /* storage quota / private mode fallback */ }
 }
 
-function applyWidths(widths) {
+let layoutState = loadState();
+
+export function isLeftPaneCollapsed() {
+  return layoutState.explorerCollapsed;
+}
+
+export function isRightPaneCollapsed() {
+  return layoutState.canvasCollapsed;
+}
+
+export function setLeftPaneCollapsed(collapsed) {
+  layoutState.explorerCollapsed = Boolean(collapsed);
+  applyLayout();
+  saveState(layoutState);
+}
+
+export function setRightPaneCollapsed(collapsed) {
+  layoutState.canvasCollapsed = Boolean(collapsed);
+  applyLayout();
+  saveState(layoutState);
+}
+
+export function toggleLeftPane(force) {
+  const next = typeof force === 'boolean' ? force : !layoutState.explorerCollapsed;
+  setLeftPaneCollapsed(next);
+}
+
+export function toggleRightPane(force) {
+  const next = typeof force === 'boolean' ? force : !layoutState.canvasCollapsed;
+  setRightPaneCollapsed(next);
+}
+
+function applyLayout() {
   const explorer = document.getElementById('explorer-pane');
+  const dividerExplorer = document.getElementById('divider-explorer');
   const canvas = document.getElementById('canvas-pane');
-  if (explorer) explorer.style.width = `${widths.explorer}px`;
-  if (canvas) canvas.style.width = `${widths.canvas}px`;
+  const dividerCanvas = document.getElementById('divider-canvas');
+
+  // Left Pane
+  if (explorer) {
+    explorer.classList.toggle('is-collapsed', layoutState.explorerCollapsed);
+    explorer.style.width = layoutState.explorerCollapsed ? `${COLLAPSED_WIDTH}px` : `${layoutState.explorerWidth}px`;
+  }
+  if (dividerExplorer) {
+    dividerExplorer.classList.toggle('is-hidden', layoutState.explorerCollapsed);
+  }
+
+  // Right Pane
+  if (canvas) {
+    canvas.classList.toggle('is-collapsed', layoutState.canvasCollapsed);
+    canvas.style.width = layoutState.canvasCollapsed ? `${COLLAPSED_WIDTH}px` : `${layoutState.canvasWidth}px`;
+  }
+  if (dividerCanvas) {
+    dividerCanvas.classList.toggle('is-hidden', layoutState.canvasCollapsed);
+  }
 }
 
-/** Attach drag handlers to both dividers and restore persisted widths. */
+/** Attach drag handlers to dividers, toggle buttons, and keyboard shortcuts. */
 export function initPaneResizers() {
   const workstation = document.getElementById('workstation');
   if (!workstation) return;
 
+  layoutState = loadState();
+  applyLayout();
+
+  // 1. Collapse & Expand Handlers
+  document.getElementById('btn-collapse-explorer')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setLeftPaneCollapsed(true);
+  });
+  document.getElementById('rail-sec-explorer')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    setLeftPaneCollapsed(false);
+    document.getElementById('section-db-explorer')?.classList.add('is-open');
+  });
+  document.getElementById('rail-sec-sessions')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    setLeftPaneCollapsed(false);
+    document.getElementById('section-sessions')?.classList.add('is-open');
+  });
+  document.getElementById('rail-explorer')?.addEventListener('click', (e) => {
+    if (e.target.closest('.rail-section')) return; // handled by section listener
+    e.preventDefault();
+    setLeftPaneCollapsed(false);
+  });
+
+  document.getElementById('btn-collapse-canvas')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setRightPaneCollapsed(true);
+  });
+  document.getElementById('rail-canvas')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    setRightPaneCollapsed(false);
+  });
+
+  // 2. Keyboard shortcuts (Ctrl+B, Ctrl+J)
+  window.addEventListener('keydown', (e) => {
+    const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+    const mod = isMac ? e.metaKey : e.ctrlKey;
+    if (!mod || e.altKey || e.shiftKey) return;
+
+    if (e.key.toLowerCase() === 'b') {
+      if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return;
+      e.preventDefault();
+      toggleLeftPane();
+    } else if (e.key.toLowerCase() === 'j') {
+      if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return;
+      e.preventDefault();
+      toggleRightPane();
+    }
+  });
+
+  // 3. Dividers & Resizing
   const dividers = [
     { el: document.getElementById('divider-explorer'), key: 'explorer' },
     { el: document.getElementById('divider-canvas'), key: 'canvas' },
   ].filter(d => d.el);
-  if (!dividers.length) return;
-
-  const widths = loadWidths();
-  applyWidths(widths);
 
   for (const { el, key } of dividers) {
-    // Double-click resets this pane to its default width.
+    // Double-click resets this pane to its default width and ensures it's open.
     el.addEventListener('dblclick', () => {
-      widths[key] = DEFAULTS[key];
-      applyWidths(widths);
-      saveWidths(widths);
+      if (key === 'explorer') {
+        layoutState.explorerWidth = DEFAULTS.explorerWidth;
+        layoutState.explorerCollapsed = false;
+      } else {
+        layoutState.canvasWidth = DEFAULTS.canvasWidth;
+        layoutState.canvasCollapsed = false;
+      }
+      applyLayout();
+      saveState(layoutState);
     });
 
     el.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return; // left button only
       e.preventDefault();
-      // Capture the pointer so the drag keeps tracking even when the cursor
-      // leaves the 6px strip; fall back to window listeners if capture is
-      // unavailable (synthetic events, exotic pointers).
+
       let captured = false;
       try { el.setPointerCapture(e.pointerId); captured = true; } catch { /* fall through */ }
       const target = captured ? el : window;
@@ -82,13 +197,24 @@ export function initPaneResizers() {
       const onMove = (ev) => {
         const rect = workstation.getBoundingClientRect();
         const max = rect.width * MAX_FRACTION[key];
-        // Left divider: pane width = cursor distance from the workstation's
-        // left edge. Right divider: distance from the right edge.
         const raw = key === 'explorer'
           ? ev.clientX - rect.left
           : rect.right - ev.clientX;
-        widths[key] = Math.round(Math.min(Math.max(raw, MIN[key]), max));
-        applyWidths(widths);
+
+        // Auto-collapse if dragged very small (< 60px)
+        if (raw < 70) {
+          if (key === 'explorer') layoutState.explorerCollapsed = true;
+          else layoutState.canvasCollapsed = true;
+        } else {
+          if (key === 'explorer') {
+            layoutState.explorerCollapsed = false;
+            layoutState.explorerWidth = Math.round(Math.min(Math.max(raw, MIN[key]), max));
+          } else {
+            layoutState.canvasCollapsed = false;
+            layoutState.canvasWidth = Math.round(Math.min(Math.max(raw, MIN[key]), max));
+          }
+        }
+        applyLayout();
       };
 
       const onUp = (ev) => {
@@ -98,7 +224,7 @@ export function initPaneResizers() {
         target.removeEventListener('pointercancel', onUp);
         el.classList.remove('active');
         document.body.classList.remove('pane-resizing');
-        saveWidths(widths);
+        saveState(layoutState);
       };
 
       target.addEventListener('pointermove', onMove);

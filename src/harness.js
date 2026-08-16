@@ -16,7 +16,7 @@ import { Factory } from '../vendor/wa-sqlite-jspi/sqlite-api.js';
 import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_ROW, SQLITE_INSERT, SQLITE_DELETE, SQLITE_UPDATE } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
-import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, queryAll, isInternalTable, logDDL, sweepCaptureTriggers } from './schema.js';
+import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, migrateDashboardCardsTable, queryAll, isInternalTable, logDDL, sweepCaptureTriggers } from './schema.js';
 import { runCompaction, queryActiveContextJson } from './compaction.js';
 import { materializeToolResult } from './materialize.js';
 
@@ -994,6 +994,13 @@ export async function bootSqliteAgent(config = {}) {
     await migrateTurnTables(sqlite3, db);
   } catch (e) {
     console.warn('[harness] migrateTurnTables failed (non-fatal):', e.message);
+  }
+
+  // 10c. Migration: expand dashboard_cards table to infinite grid
+  try {
+    await migrateDashboardCardsTable(sqlite3, db);
+  } catch (e) {
+    console.warn('[harness] migrateDashboardCardsTable failed (non-fatal):', e.message);
   }
 
   console.log('[harness] Agent booted (wa-sqlite JSPI). LLM:', endpointUrl || '(none)');

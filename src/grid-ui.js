@@ -30,6 +30,7 @@ import {
 } from './grid.js';
 import { queryAll, execParams } from './schema.js';
 import { materializeToolResult } from './materialize.js';
+import { SqlAutocompleteController } from './sql-autocomplete.js';
 
 let agent = null;
 let busy = false;
@@ -37,12 +38,20 @@ let pendingTables = new Set();
 let flushTimer = null;
 let streamAttached = false;
 let editingCardId = null; // null = add mode
+let cardSqlAutocomplete = null;
 
 // ── Init ──────────────────────────────────────────────────────────────
 
 export function initGridUi(agentHandle) {
   agent = agentHandle;
   attachStream();
+
+  const cardSqlEl = document.getElementById('card-sql');
+  if (cardSqlEl && !cardSqlAutocomplete) {
+    cardSqlAutocomplete = new SqlAutocompleteController(cardSqlEl, {
+      alwaysSuggest: true,
+    });
+  }
 
   document.getElementById('btn-add-card')?.addEventListener('click', () => openCardDialog('add'));
   document.getElementById('btn-refresh-all')?.addEventListener('click', () => {
@@ -61,7 +70,6 @@ export function initGridUi(agentHandle) {
   });
 
   renderGrid().catch(e => console.warn('[grid-ui] initial render failed:', e));
-  renderExplorer().catch(e => console.warn('[grid-ui] explorer render failed:', e));
 }
 
 /** Subscribe to the shared event stream for 'data_change' events. */
@@ -405,7 +413,6 @@ export async function rebuildGrid() {
   pendingTables.clear();
   if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
   await renderGrid();
-  await renderExplorer();
 }
 
 /** Re-run every card's SQL (manual Refresh-all). */

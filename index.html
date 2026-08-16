@@ -9,9 +9,11 @@
 <body>
   <div id="app">
     <header>
-      <h1>Web SQL Agent</h1>
-      <p class="subtitle">Pure-SQL Brain-in-a-Box &middot; JSPI-Powered</p>
+      <div class="header-left">
+        <h1 class="app-title"><span class="title-bobby">Bobby</span> <span class="title-tables">Tables</span></h1>
+      </div>
       <div id="header-actions">
+        <button type="button" id="btn-toggle-config" title="Configure LLM provider &amp; settings">⚙ Config</button>
         <button type="button" id="btn-export" title="Export database as .sqlite3 cartridge">📦 Export</button>
         <button type="button" id="btn-import" title="Import a .sqlite3 cartridge">📥 Import</button>
         <button type="button" id="btn-upload-csv" title="Upload and ingest a CSV file">📊 Upload CSV</button>
@@ -23,12 +25,70 @@
          right: 3×3 Reactive Canvas (dashboard_cards) -->
     <div id="workstation">
       <aside id="explorer-pane">
-        <div class="pane-header">
-          <h2>DB Explorer</h2>
+        <!-- Collapsed Vertical Rail (Visible when collapsed) -->
+        <div class="collapsed-rail" id="rail-explorer">
+          <div class="rail-section" id="rail-sec-explorer" title="Expand DB Explorer (Ctrl+B)">
+            <button type="button" class="btn-rail-icon" aria-label="Expand DB Explorer">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+              </svg>
+            </button>
+            <span class="rail-title">Explorer</span>
+          </div>
+
+          <div class="rail-divider"></div>
+
+          <div class="rail-section" id="rail-sec-sessions" title="Expand Sessions (Ctrl+B)">
+            <button type="button" class="btn-rail-icon" aria-label="Expand Sessions">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+              </svg>
+            </button>
+            <span class="rail-title">Sessions</span>
+          </div>
         </div>
-        <div id="explorer-body">
-          <ul id="table-list"></ul>
-          <p class="explorer-note">Column types, row counts &amp; previews land in Ticket 8.</p>
+
+        <div class="pane-full-content">
+          <!-- Section 1: DB Explorer (Top Accordion) -->
+          <div class="accordion-section is-open" id="section-db-explorer">
+            <div class="accordion-header" id="header-db-explorer" title="Click to collapse / expand DB Explorer">
+              <div class="accordion-title-wrap">
+                <span class="accordion-chevron">▾</span>
+                <h2>DB Explorer</h2>
+              </div>
+              <div class="explorer-header-actions">
+                <button type="button" id="btn-refresh-explorer" title="Refresh catalog">⟳</button>
+                <button type="button" id="btn-new-table" title="Create a new table">+ New Table</button>
+                <button type="button" id="btn-collapse-explorer" class="btn-pane-collapse" title="Collapse Sidebar (Ctrl+B)">«</button>
+              </div>
+            </div>
+            <div class="accordion-content" id="content-db-explorer">
+              <div class="explorer-search-bar">
+                <input type="text" id="explorer-search-input" placeholder="Filter tables &amp; views…" autocomplete="off" />
+              </div>
+              <div id="explorer-body">
+                <div id="table-list"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Section 2: Sessions (Bottom Accordion) -->
+          <div class="accordion-section is-open" id="section-sessions">
+            <div class="accordion-header" id="header-sessions" title="Click to collapse / expand Sessions">
+              <div class="accordion-title-wrap">
+                <span class="accordion-chevron">▾</span>
+                <h2>Sessions</h2>
+              </div>
+              <div class="explorer-header-actions">
+                <button type="button" id="btn-new-session" title="Create a new session">+ New Session</button>
+              </div>
+            </div>
+            <div class="accordion-content" id="content-sessions">
+              <div id="session-list" class="session-list"></div>
+            </div>
+          </div>
         </div>
       </aside>
 
@@ -36,41 +96,6 @@
            title="Drag to resize · double-click to reset"></div>
 
       <section id="center-pane">
-        <!-- LLM Configuration Panel -->
-        <section id="config-panel">
-          <details id="config-details">
-            <summary>Configure LLM</summary>
-            <form id="config-form">
-              <div class="config-row">
-                <label for="config-provider">Provider</label>
-                <select id="config-provider">
-                  <option value="openai">OpenAI Compatible (Ollama, LM Studio, Local, OpenRouter)</option>
-                  <option value="gemini">Google Gemini API</option>
-                </select>
-              </div>
-              <div class="config-row" id="row-config-url">
-                <label for="config-url">Base URL / Endpoint</label>
-                <input type="text" id="config-url" placeholder="http://localhost:11434/v1" />
-                <small class="hint">Ollama: http://localhost:11434/v1 &middot; LM Studio: http://localhost:1234/v1</small>
-              </div>
-              <div class="config-row">
-                <label for="config-model">Model Name</label>
-                <input type="text" id="config-model" placeholder="llama3.2 or gemini-2.5-flash" />
-              </div>
-              <div class="config-row">
-                <label for="config-key" id="label-config-key">API Key <span class="optional">(optional for local Ollama/LM Studio)</span></label>
-                <input type="password" id="config-key" placeholder="AIza... or sk-..." />
-              </div>
-              <div class="config-row">
-                <label for="config-context-window">Context Window (tokens)</label>
-                <input type="number" id="config-context-window" min="1000" step="1000" placeholder="auto" />
-                <small class="hint">T2: context for interval compaction. Leave empty for auto (cloud model lookup, 128k fallback). Set explicitly for local models.</small>
-              </div>
-              <button type="submit" id="config-apply">Apply &amp; Reboot Agent</button>
-            </form>
-          </details>
-        </section>
-
         <main id="chat-container">
           <div id="drag-overlay" class="drag-overlay hidden">
             <div class="drag-overlay-box">
@@ -99,31 +124,27 @@
         </main>
 
         <footer>
-          <div id="status-bar">Initializing&hellip;</div>
-
-          <!-- Session Selector -->
-          <div id="session-bar">
-            <label for="session-select">Session:</label>
-            <select id="session-select">
-              <option value="default">Default Session</option>
-            </select>
-            <div id="session-actions">
-              <button type="button" id="session-new" data-action="new" title="New Session">+ New</button>
-              <button type="button" id="session-delete" data-action="delete" title="Delete Session">🗑</button>
-            </div>
+          <div class="footer-status-row">
+            <div id="status-bar">Initializing&hellip;</div>
             <span id="token-usage" class="token-usage"></span>
           </div>
 
           <form id="input-form">
-            <input
-              type="text"
-              id="user-input"
-              placeholder="Ask me to query your data… or run SQL: ! = agent sees it, !! = private"
-              autocomplete="off"
-              disabled
-            />
+            <div id="input-wrapper" class="input-wrapper">
+              <div id="bang-badge" class="bang-badge hidden" title="Direct SQL Execution Mode">
+                <span class="bang-badge-icon">⚡</span>
+                <span class="bang-badge-text">! Direct SQL</span>
+              </div>
+              <input
+                type="text"
+                id="user-input"
+                placeholder="Ask me to query your data… or run SQL: ! = agent sees it, !! = private"
+                autocomplete="off"
+                disabled
+              />
+            </div>
             <button type="submit" id="send-btn" disabled>Send</button>
-        </form>
+          </form>
       </footer>
       </section>
 
@@ -131,14 +152,30 @@
            title="Drag to resize · double-click to reset"></div>
 
       <aside id="canvas-pane">
-        <div class="pane-header">
-          <h2>Dashboard</h2>
-          <div class="canvas-actions">
-            <button type="button" id="btn-refresh-all" title="Re-run every card">⟳ All</button>
-            <button type="button" id="btn-add-card" title="Add a dashboard card">+ Add card</button>
-          </div>
+        <!-- Collapsed Vertical Rail (Visible when collapsed) -->
+        <div class="collapsed-rail" id="rail-canvas" title="Expand Dashboard Canvas (Ctrl+J)">
+          <button type="button" class="btn-rail-icon" aria-label="Expand Dashboard Canvas">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="7" height="9" rx="1.5"></rect>
+              <rect x="14" y="3" width="7" height="5" rx="1.5"></rect>
+              <rect x="14" y="12" width="7" height="9" rx="1.5"></rect>
+              <rect x="3" y="16" width="7" height="5" rx="1.5"></rect>
+            </svg>
+          </button>
+          <span class="rail-title">Dashboard</span>
         </div>
-        <div id="dashboard-grid" class="dashboard-grid" aria-label="3x3 dashboard grid"></div>
+
+        <div class="pane-full-content">
+          <div class="pane-header">
+            <h2>Dashboard</h2>
+            <div class="canvas-actions">
+              <button type="button" id="btn-refresh-all" title="Re-run every card">⟳ All</button>
+              <button type="button" id="btn-add-card" title="Add a dashboard card">+ Add card</button>
+              <button type="button" id="btn-collapse-canvas" class="btn-pane-collapse" title="Collapse Dashboard (Ctrl+J)">»</button>
+            </div>
+          </div>
+          <div id="dashboard-grid" class="dashboard-grid" aria-label="3x3 dashboard grid"></div>
+        </div>
       </aside>
     </div>
 
@@ -190,6 +227,134 @@
           <div class="modal-actions">
             <button type="button" id="card-cancel">Cancel</button>
             <button type="submit" id="card-submit">Add card</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- T8: Data Preview Modal / Drawer -->
+    <div id="data-preview-modal" class="modal-backdrop hidden">
+      <div class="modal-card modal-card-large">
+        <div class="modal-header">
+          <div class="preview-header-info">
+            <h3 id="preview-table-title">Table Data Preview</h3>
+            <span id="preview-row-count" class="preview-count-tag">0 total rows</span>
+          </div>
+          <button type="button" class="modal-close-btn" id="preview-modal-close" title="Close preview">✕</button>
+        </div>
+        <div class="preview-toolbar">
+          <div class="preview-search-wrap">
+            <input type="text" id="preview-filter-input" placeholder="Search rows in table…" autocomplete="off" />
+          </div>
+          <div class="preview-limit-wrap">
+            <label for="preview-limit-select">Rows per page:</label>
+            <select id="preview-limit-select">
+              <option value="10">10</option>
+              <option value="25" selected>25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </div>
+        </div>
+        <div id="preview-table-container" class="preview-scroll-container">
+          <div class="preview-loading">Loading records…</div>
+        </div>
+        <div class="preview-footer">
+          <button type="button" id="btn-preview-prev" class="preview-page-btn" disabled>&larr; Previous</button>
+          <span id="preview-page-info" class="preview-page-label">Page 1 of 1</span>
+          <button type="button" id="btn-preview-next" class="preview-page-btn" disabled>Next &rarr;</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- T8: Table Builder Modal (+ New Table) -->
+    <div id="table-create-modal" class="modal-backdrop hidden">
+      <div class="modal-card modal-card-medium">
+        <h3 id="table-create-dialog-title">Create New Table</h3>
+        <form id="table-create-form">
+          <div class="config-row">
+            <label for="new-table-name">Table Name</label>
+            <input type="text" id="new-table-name" required placeholder="e.g. products" pattern="^[a-zA-Z_][a-zA-Z0-9_]*$" title="Valid SQL identifier (letters, numbers, underscore)" />
+          </div>
+          <div class="config-row">
+            <div class="flex-between" style="margin-bottom: 0.35rem;">
+              <label>Columns</label>
+              <button type="button" id="btn-add-column" class="btn-sm">+ Add Column</button>
+            </div>
+            <div id="columns-builder-container" class="columns-builder-container"></div>
+          </div>
+          <div class="config-row">
+            <label>Live SQL DDL Preview</label>
+            <pre id="table-ddl-preview" class="table-ddl-preview-box"><code>-- Define columns above</code></pre>
+          </div>
+          <div id="table-create-error" class="card-dialog-error hidden"></div>
+          <div class="modal-actions">
+            <button type="button" id="table-create-cancel">Cancel</button>
+            <button type="submit" id="table-create-submit">Create Table</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- T8: Save as View Modal -->
+    <div id="view-create-modal" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <h3>Save Query as View</h3>
+        <form id="view-create-form">
+          <div class="config-row">
+            <label for="new-view-name">View Name</label>
+            <input type="text" id="new-view-name" required placeholder="e.g. v_top_sales" pattern="^[a-zA-Z_][a-zA-Z0-9_]*$" title="Valid SQL identifier" />
+          </div>
+          <div class="config-row">
+            <label for="view-sql-preview">Query SQL</label>
+            <textarea id="view-sql-preview" rows="4" required readonly></textarea>
+            <small class="hint">Views run live when queried. Saved to the database catalog.</small>
+          </div>
+          <div id="view-create-error" class="card-dialog-error hidden"></div>
+          <div class="modal-actions">
+            <button type="button" id="view-create-cancel">Cancel</button>
+            <button type="submit" id="view-create-submit">Create View</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- LLM Configuration Modal Overlay -->
+    <div id="config-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="config-modal-title">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3 id="config-modal-title">⚙ LLM Configuration</h3>
+          <button type="button" class="modal-close-btn" id="config-close-btn" title="Close configuration">✕</button>
+        </div>
+        <form id="config-form">
+          <div class="config-row">
+            <label for="config-provider">Provider</label>
+            <select id="config-provider">
+              <option value="openai">OpenAI Compatible (Ollama, LM Studio, Local, OpenRouter)</option>
+              <option value="gemini">Google Gemini API</option>
+            </select>
+          </div>
+          <div class="config-row" id="row-config-url">
+            <label for="config-url">Base URL / Endpoint</label>
+            <input type="text" id="config-url" placeholder="http://localhost:11434/v1" />
+            <small class="hint">Ollama: http://localhost:11434/v1 &middot; LM Studio: http://localhost:1234/v1</small>
+          </div>
+          <div class="config-row">
+            <label for="config-model">Model Name</label>
+            <input type="text" id="config-model" placeholder="llama3.2 or gemini-2.5-flash" />
+          </div>
+          <div class="config-row">
+            <label for="config-key" id="label-config-key">API Key <span class="optional">(optional for local Ollama/LM Studio)</span></label>
+            <input type="password" id="config-key" placeholder="AIza... or sk-..." />
+          </div>
+          <div class="config-row">
+            <label for="config-context-window">Context Window (tokens)</label>
+            <input type="number" id="config-context-window" min="1000" step="1000" placeholder="auto" />
+            <small class="hint">T2: context for interval compaction. Leave empty for auto (cloud model lookup, 128k fallback). Set explicitly for local models.</small>
+          </div>
+          <div class="modal-actions">
+            <button type="button" id="config-cancel" class="btn-secondary">Cancel</button>
+            <button type="submit" id="config-apply" class="btn-primary">Apply &amp; Reboot</button>
           </div>
         </form>
       </div>

@@ -133,7 +133,10 @@ export async function exportCartridge(sqlite3, module, db, filename = 'bobby-bra
     }
 
     // 3. Trigger download
-    await saveFile(bytes, filename);
+    const saveResult = await saveFile(bytes, filename);
+    if (saveResult?.cancelled) {
+      return { cancelled: true };
+    }
     return { success: true, bytes: bytes.length };
   } finally {
     await sqlite3.close(pMemDb);
@@ -152,7 +155,7 @@ export async function exportCartridge(sqlite3, module, db, filename = 'bobby-bra
 export async function importCartridge(sqlite3, module, db) {
   // 1. Prompt user to select a .sqlite3 file
   const fileBytes = await pickFile();
-  if (!fileBytes) throw new Error('File selection cancelled.');
+  if (!fileBytes) return { cancelled: true };
 
   // 2. Load the bytes into an in-memory DB
   const pMemDb = await openMemoryDb(sqlite3);
@@ -229,7 +232,10 @@ export async function exportSqlDump(sqlite3, db, filename = 'bobby-brain.sql') {
   lines.push('COMMIT;');
 
   const sql = lines.join('\n');
-  await saveFile(new TextEncoder().encode(sql), filename);
+  const saveResult = await saveFile(new TextEncoder().encode(sql), filename);
+  if (saveResult?.cancelled) {
+    return { cancelled: true };
+  }
   return { success: true, bytes: sql.length };
 }
 
@@ -277,10 +283,10 @@ async function saveFile(data, suggestedName) {
       const writable = await handle.createWritable();
       await writable.write(data);
       await writable.close();
-      return;
+      return { success: true };
     } catch (err) {
-      if (err.name === 'AbortError') throw err;
-      console.warn('[cartridge] showSaveFilePicker failed, falling back', err);
+      if (err.name === 'AbortError') return { cancelled: true };
+      console.warn('[cartridge] showSaveFilePicker failed, falling back to blob download', err);
     }
   }
 

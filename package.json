@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "devDependencies": {
+    "playwright": "^1.62.1",
     "vite": "^6.0.0"
   },
   "note": "Uses vendor/wa-sqlite-jspi/ — custom JSPI-enabled SQLite WASM built externally (sqlite-vec + FTS5). That .mjs carries a local JSPI async-export patch: see vendor/wa-sqlite-jspi/README.md before rebuilding or re-vendoring.",

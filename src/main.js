@@ -8,7 +8,7 @@
 
 import { bootSqliteAgent, getEventStream, beginTurn, requestStop, endTurn, isStopRequested } from './harness.js';
 import {
-  setActiveSession, createSession, listSessions, deleteSession, getSessionTokenUsage,
+  setActiveSession, createSession, renameSession, listSessions, deleteSession, getSessionTokenUsage,
   sweepCaptureTriggers, repairOrphanedToolCalls, evictChangesets, setSuppressCascade,
   setSuppressCapture, ensureCaptureTriggers, setCurrentTurnId,
   getRewindableScratchpadTurns, queryAll, quoteIdent, logDDL, execParams,
@@ -25,7 +25,10 @@ import { exportCartridge, importCartridge, exportSqlDump } from './cartridge.js'
 import { ingestCsvToSqlite } from './csv-ingestion.js';
 import * as gridUi from './grid-ui.js';
 import * as gridEngine from './grid.js';
+import * as explorerEngine from './explorer.js';
+import * as explorerUi from './explorer-ui.js';
 import { initPaneResizers } from './panes.js';
+import { SqlAutocompleteController, globalSchemaIndex, detectBangMode } from './sql-autocomplete.js';
 import { SQLITE_ROW, SQLITE_DONE } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
 import './styles.css';
 
@@ -35,6 +38,7 @@ const formEl            = document.getElementById('input-form');
 const inputEl           = document.getElementById('user-input');
 const sendBtn           = document.getElementById('send-btn');
 const statusBar         = document.getElementById('status-bar');
+const bangBadge         = document.getElementById('bang-badge');
 const configForm        = document.getElementById('config-form');
 const configProvider    = document.getElementById('config-provider');
 const rowConfigUrl      = document.getElementById('row-config-url');
@@ -43,8 +47,6 @@ const configModel       = document.getElementById('config-model');
 const configKey         = document.getElementById('config-key');
 const labelConfigKey    = document.getElementById('label-config-key');
 const configContextWindow = document.getElementById('config-context-window');
-const sessionSelect     = document.getElementById('session-select');
-const sessionActions    = document.getElementById('session-actions');
 const chatContainer     = document.getElementById('chat-container');
 const dragOverlay       = document.getElementById('drag-overlay');
 const ingestionProgress = document.getElementById('ingestion-progress');
@@ -53,6 +55,10 @@ const progressCount     = document.getElementById('progress-count');
 const progressBarFill   = document.getElementById('progress-bar-fill');
 const btnUploadCsv      = document.getElementById('btn-upload-csv');
 const csvFileInput      = document.getElementById('csv-file-input');
+const btnToggleConfig   = document.getElementById('btn-toggle-config');
+const configModal       = document.getElementById('config-modal');
+const configCancel      = document.getElementById('config-cancel');
+const configCloseBtn    = document.getElementById('config-close-btn');
 
 let agent = null;
 let isProcessing = false;
@@ -101,63 +107,195 @@ function populateConfigForm() {
   updateConfigVisibility(configProvider.value);
 }
 
-// ── Session Management ──────────────────────────────────────────────
+function openConfigModal() {
+  populateConfigForm();
+  if (configModal) configModal.classList.remove('hidden');
+  if (btnToggleConfig) btnToggleConfig.classList.add('is-active');
+  setTimeout(() => configModel?.focus(), 50);
+}
+
+function closeConfigModal() {
+  if (configModal) configModal.classList.add('hidden');
+  if (btnToggleConfig) btnToggleConfig.classList.remove('is-active');
+}
+
+if (configProvider) {
+  configProvider.addEventListener('change', (e) => {
+    updateConfigVisibility(e.target.value);
+  });
+}
+
+if (btnToggleConfig) {
+  btnToggleConfig.addEventListener('click', () => {
+    if (configModal && !configModal.classList.contains('hidden')) {
+      closeConfigModal();
+    } else {
+      openConfigModal();
+    }
+  });
+}
+
+if (configCancel) configCancel.addEventListener('click', closeConfigModal);
+if (configCloseBtn) configCloseBtn.addEventListener('click', closeConfigModal);
+
+if (configModal) {
+  configModal.addEventListener('click', (e) => {
+    if (e.target === configModal) closeConfigModal();
+  });
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && configModal && !configModal.classList.contains('hidden')) {
+    closeConfigModal();
+  }
+});
+
+if (configForm) {
+  configForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    saveConfig({
+      provider: configProvider.value,
+      url: configUrl.value.trim(),
+      model: configModel.value.trim(),
+      apiKey: configKey.value.trim(),
+      contextWindow: configContextWindow.value.trim(),
+    });
+    closeConfigModal();
+    statusBar.textContent = 'Configuration saved. Rebooting…';
+    await bootAgent();
+  });
+}
+
+// ── Session Management (Left Pane Double Accordion) ──────────────────
 
 async function populateSessionDropdown() {
   if (!agent) return;
   const sessions = await listSessions(agent.sqlite3, agent.db);
-  sessionSelect.innerHTML = '';
-  sessions.forEach(s => {
-    const opt = document.createElement('option');
-    opt.value = s.id;
-    opt.textContent = s.name;
-    if (s.id === activeSessionId) opt.selected = true;
-    sessionSelect.appendChild(opt);
+
+  const sessionListEl = document.getElementById('session-list');
+  if (sessionListEl) {
+    sessionListEl.innerHTML = '';
+    if (!sessions.length) {
+      sessionListEl.innerHTML = '<div class="explorer-empty" style="padding: 0.5rem; font-size: 0.7rem; color: var(--text-muted);">No sessions</div>';
+    } else {
+      sessions.forEach(s => {
+        const item = document.createElement('div');
+        const isActive = (s.id === activeSessionId);
+        const displayName = (s.name && s.name.trim()) ? s.name.trim() : (s.id === 'default' ? 'Default Session' : s.id);
+        item.className = `session-item ${isActive ? 'active' : ''}`;
+        item.dataset.sessionId = s.id;
+        item.dataset.sessionName = displayName;
+        item.innerHTML = `
+          <div class="session-item-main" title="${escapeHtml(displayName)} [${escapeHtml(s.id)}] (double-click to rename)">
+            <span class="session-item-icon">${isActive ? '●' : '○'}</span>
+            <span class="session-item-name">${escapeHtml(displayName)}</span>
+          </div>
+          <div class="session-item-actions">
+            <button type="button" class="btn-session-item-action btn-session-item-rename" data-session-id="${escapeHtml(s.id)}" data-session-name="${escapeHtml(displayName)}" title="Rename session">✎</button>
+            ${s.id !== 'default' ? `<button type="button" class="btn-session-item-action btn-session-item-delete" data-session-id="${escapeHtml(s.id)}" data-session-name="${escapeHtml(displayName)}" title="Delete session">✕</button>` : ''}
+          </div>
+        `;
+        sessionListEl.appendChild(item);
+      });
+    }
+  }
+}
+
+// ── Left Pane Double Accordion & Session Handlers ───────────────────
+
+document.querySelectorAll('.accordion-header').forEach(header => {
+  header.addEventListener('click', (e) => {
+    if (e.target.closest('button, input, select')) return;
+    const section = header.closest('.accordion-section');
+    if (!section) return;
+    section.classList.toggle('is-open');
   });
-  updateSessionActions();
-}
+});
 
-function updateSessionActions() {
-  // Disable delete for default session
-  const deleteBtn = document.getElementById('session-delete');
-  if (deleteBtn) deleteBtn.disabled = (activeSessionId === 'default');
-}
+document.getElementById('btn-new-session')?.addEventListener('click', async (e) => {
+  e.stopPropagation();
+  if (!agent) return;
+  const name = prompt('Session name:', 'New Session');
+  if (!name?.trim()) return;
+  const id = await createSession(agent.sqlite3, agent.db, name.trim());
+  activeSessionId = id;
+  activeStreamingBubble = null;
+  activeToolIndicator = null;
+  await setActiveSession(agent.sqlite3, agent.db, id);
+  await populateSessionDropdown();
+  await renderMessages();
+});
 
-sessionSelect.addEventListener('change', async () => {
-  activeSessionId = sessionSelect.value;
+document.getElementById('session-list')?.addEventListener('click', async (e) => {
+  // 1. Rename session action
+  const renameBtn = e.target.closest('.btn-session-item-rename');
+  if (renameBtn) {
+    e.stopPropagation();
+    const id = renameBtn.dataset.sessionId;
+    const currName = renameBtn.dataset.sessionName || '';
+    if (!id || !agent) return;
+    const newName = prompt(`Rename session:`, currName);
+    if (!newName?.trim() || newName.trim() === currName) return;
+    try {
+      await renameSession(agent.sqlite3, agent.db, id, newName.trim());
+      await populateSessionDropdown();
+    } catch (err) {
+      alert(`Failed to rename session: ${err.message}`);
+    }
+    return;
+  }
+
+  // 2. Delete session action
+  const deleteBtn = e.target.closest('.btn-session-item-delete');
+  if (deleteBtn) {
+    e.stopPropagation();
+    const id = deleteBtn.dataset.sessionId;
+    const name = deleteBtn.dataset.sessionName || id;
+    if (id === 'default' || !agent) return;
+    if (!confirm(`Delete session "${name}" and all its messages?`)) return;
+    try {
+      await deleteSession(agent.sqlite3, agent.db, id);
+      if (activeSessionId === id) {
+        activeSessionId = 'default';
+        activeStreamingBubble = null;
+        activeToolIndicator = null;
+        await setActiveSession(agent.sqlite3, agent.db, 'default');
+      }
+      await populateSessionDropdown();
+      await renderMessages();
+    } catch (err) {
+      alert(`Failed to delete session: ${err.message}`);
+    }
+    return;
+  }
+
+  // 3. Switch session action
+  const item = e.target.closest('.session-item');
+  if (!item || !agent) return;
+  const id = item.dataset.sessionId;
+  if (!id || id === activeSessionId) return;
+  activeSessionId = id;
   activeStreamingBubble = null;
   activeToolIndicator = null;
   await setActiveSession(agent.sqlite3, agent.db, activeSessionId);
+  await populateSessionDropdown();
   await renderMessages();
-  updateSessionActions();
 });
 
-sessionActions.addEventListener('click', async (e) => {
-  const action = e.target.dataset.action;
-  if (!action || !agent) return;
-
-  if (action === 'new') {
-    const name = prompt('Session name:', 'New Session');
-    if (!name?.trim()) return;
-    const id = await createSession(agent.sqlite3, agent.db, name.trim());
-    activeSessionId = id;
-    activeStreamingBubble = null;
-    activeToolIndicator = null;
-    await setActiveSession(agent.sqlite3, agent.db, id);
+// Double-click session name to rename
+document.getElementById('session-list')?.addEventListener('dblclick', async (e) => {
+  const item = e.target.closest('.session-item');
+  if (!item || !agent) return;
+  const id = item.dataset.sessionId;
+  const currName = item.dataset.sessionName || '';
+  if (!id) return;
+  const newName = prompt(`Rename session:`, currName);
+  if (!newName?.trim() || newName.trim() === currName) return;
+  try {
+    await renameSession(agent.sqlite3, agent.db, id, newName.trim());
     await populateSessionDropdown();
-    await renderMessages();
-  }
-
-  if (action === 'delete') {
-    if (activeSessionId === 'default') return;
-    if (!confirm(`Delete session "${activeSessionId}" and all its messages?`)) return;
-    await deleteSession(agent.sqlite3, agent.db, activeSessionId);
-    activeSessionId = 'default';
-    activeStreamingBubble = null;
-    activeToolIndicator = null;
-    await setActiveSession(agent.sqlite3, agent.db, 'default');
-    await populateSessionDropdown();
-    await renderMessages();
+  } catch (err) {
+    alert(`Failed to rename session: ${err.message}`);
   }
 });
 
@@ -192,7 +330,7 @@ function renderTable(columns, values) {
   return html;
 }
 
-function renderToolContent(content, toolCallId = null) {
+function renderToolContent(content, toolCallId = null, querySql = '') {
   if (content === null || content === undefined || content === '') return '<em>[empty]</em>';
   let parsed = content;
   if (typeof content === 'string') {
@@ -205,9 +343,14 @@ function renderToolContent(content, toolCallId = null) {
 
   // 1. SQL Result Table: array format from run_dynamic_sql: [{ columns: [...], values: [...] }]
   if (Array.isArray(parsed) && parsed[0]?.columns && parsed[0]?.values) {
+    const rawSql = querySql || parsed[0]?.query || '';
+    const isSelect = !rawSql || /^\s*(SELECT|WITH|EXPLAIN)\b/i.test(rawSql);
     return `
-      <div class="draggable-chat-asset" draggable="true" data-asset-type="table" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-title="Query Result">
-        <div class="drag-pin-badge" title="Drag to Dashboard to pin as card">⠿ Drag to Dashboard</div>
+      <div class="draggable-chat-asset" draggable="true" data-asset-type="table" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-sql="${escapeHtml(rawSql)}" data-title="Query Result">
+        <div class="chat-asset-actions">
+          <div class="drag-pin-badge" title="Drag to Dashboard to pin as card">⠿ Drag to Dashboard</div>
+          ${(rawSql && isSelect) ? `<button type="button" class="btn-save-view-chat" data-sql="${escapeHtml(rawSql)}" title="Save Query as View in database catalog">👁 Save as View</button>` : ''}
+        </div>
         ${renderTable(parsed[0].columns, parsed[0].values)}
       </div>
     `;
@@ -215,9 +358,14 @@ function renderToolContent(content, toolCallId = null) {
 
   // 1b. Single object table format: { columns: [...], values: [...] }
   if (parsed && parsed.columns && parsed.values) {
+    const rawSql = querySql || parsed?.query || '';
+    const isSelect = !rawSql || /^\s*(SELECT|WITH|EXPLAIN)\b/i.test(rawSql);
     return `
-      <div class="draggable-chat-asset" draggable="true" data-asset-type="table" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-title="Query Result">
-        <div class="drag-pin-badge" title="Drag to Dashboard to pin as card">⠿ Drag to Dashboard</div>
+      <div class="draggable-chat-asset" draggable="true" data-asset-type="table" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-sql="${escapeHtml(rawSql)}" data-title="Query Result">
+        <div class="chat-asset-actions">
+          <div class="drag-pin-badge" title="Drag to Dashboard to pin as card">⠿ Drag to Dashboard</div>
+          ${(rawSql && isSelect) ? `<button type="button" class="btn-save-view-chat" data-sql="${escapeHtml(rawSql)}" title="Save Query as View in database catalog">👁 Save as View</button>` : ''}
+        </div>
         ${renderTable(parsed.columns, parsed.values)}
       </div>
     `;
@@ -297,8 +445,12 @@ const SCRATCH_ROW_CAP = 200; // rows kept per result set (bounds LLM context)
 
 function renderScratchpadResult(env) {
   const privateCmd = (env.bangs || 1) >= 2;
+  const isSelect = /^\s*(SELECT|WITH|EXPLAIN)\b/i.test(env.sql || '');
   let html = `<div class="draggable-chat-asset" draggable="true" data-asset-type="table" data-sql="${escapeHtml(env.sql || '')}" data-title="${escapeHtml(env.sql?.slice(0, 40) || 'Scratchpad Query')}">` +
+    `<div class="chat-asset-actions">` +
     `<div class="drag-pin-badge" title="Drag to Dashboard to pin as card">⠿ Drag to Dashboard</div>` +
+    (isSelect ? `<button type="button" class="btn-save-view-chat" data-sql="${escapeHtml(env.sql || '')}" title="Save Query as View in database catalog">👁 Save as View</button>` : '') +
+    `</div>` +
     `<div class="scratchpad-header">` +
     `<span class="scratchpad-badge" title="${privateCmd ? 'Private — not in agent context' : 'Shared — agent sees this in context'}">${privateCmd ? '💥' : '⚡'}</span>` +
     `<code class="scratchpad-sql" title="${escapeHtml(env.sql || '')}">${escapeHtml(env.sql || '')}</code>` +
@@ -335,11 +487,31 @@ async function renderMessages() {
   const rows = [];
   for await (const stmt of agent.sqlite3.statements(
     agent.db,
-    `SELECT id, role, content, tool_call_id FROM messages WHERE session_id = ? ORDER BY id ASC`
+    `SELECT id, role, content, tool_calls, tool_call_id FROM messages WHERE session_id = ? ORDER BY id ASC`
   )) {
     agent.sqlite3.bind_collection(stmt, [activeSessionId]);
     while (await agent.sqlite3.step(stmt) === SQLITE_ROW) {
       rows.push(agent.sqlite3.row(stmt));
+    }
+  }
+
+  // Map tool_call_ids to query strings so tool result bubbles can offer "Save as View"
+  const toolCallQueries = new Map();
+  for (const [, role, , toolCallsJson] of rows) {
+    if (role === 'assistant' && toolCallsJson) {
+      try {
+        const tcs = JSON.parse(toolCallsJson);
+        if (Array.isArray(tcs)) {
+          for (const tc of tcs) {
+            if (tc?.id && tc?.function?.arguments) {
+              try {
+                const args = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments;
+                if (args?.query) toolCallQueries.set(tc.id, args.query);
+              } catch { /* parse error */ }
+            }
+          }
+        }
+      } catch { /* json parse error */ }
     }
   }
 
@@ -367,7 +539,7 @@ async function renderMessages() {
   }
 
   messagesEl.innerHTML = '';
-  rows.forEach(([id, role, content, toolCallId]) => {
+  rows.forEach(([id, role, content, , toolCallId]) => {
     if (role === 'system') return;
     const div = document.createElement('div');
     div.className = `message ${role}`;
@@ -380,8 +552,9 @@ async function renderMessages() {
       label.textContent = '🔧 Tool Output';
       div.appendChild(label);
 
+      const querySql = toolCallQueries.get(toolCallId) || '';
       const contentDiv = document.createElement('div');
-      contentDiv.innerHTML = renderToolContent(content, toolCallId);
+      contentDiv.innerHTML = renderToolContent(content, toolCallId, querySql);
       div.appendChild(contentDiv);
     } else {
       // T9: scratchpad result rows are assistant rows carrying a JSON
@@ -442,9 +615,8 @@ async function renderMessages() {
 
   scrollChatToBottom();
   await updateTokenUsage();
-  // T11: keep the left-pane table list current (cheap sqlite_master read;
-  // runs after every turn/scratchpad/ingest/import re-render).
-  gridUi.renderExplorer().catch(e => console.warn('[main] explorer render failed (non-fatal):', e));
+  // T8: keep the left-pane DB Explorer current (tables, views, row counts, DDL).
+  explorerUi.renderExplorer().catch(e => console.warn('[main] explorer render failed (non-fatal):', e));
 }
 
 async function updateTokenUsage() {
@@ -540,7 +712,7 @@ function handleAgentEvent(event) {
       div.appendChild(label);
 
       const contentDiv = document.createElement('div');
-      contentDiv.innerHTML = renderToolContent(event.result || (event.error ? { error: event.error } : {}), event.toolCallId || event.tool_call_id);
+      contentDiv.innerHTML = renderToolContent(event.result || (event.error ? { error: event.error } : {}), event.toolCallId || event.tool_call_id, event.query);
       div.appendChild(contentDiv);
 
       messagesEl.appendChild(div);
@@ -548,6 +720,13 @@ function handleAgentEvent(event) {
 
       statusBar.textContent = '● Received tool result, continuing…';
       statusBar.style.color = '#58a6ff';
+      break;
+    }
+
+    case 'data_change': {
+      if (agent?.sqlite3 && agent?.db) {
+        globalSchemaIndex.refreshFromDb(agent.sqlite3, agent.db).catch(() => {});
+      }
       break;
     }
 
@@ -626,6 +805,16 @@ function startEventStreamListener() {
       el.classList.remove('drag-target-hover', 'drag-target-invalid');
     });
   });
+
+  // T8: "Save as View" click handler on chat and scratchpad query results
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-save-view-chat');
+    if (!btn) return;
+    const sql = btn.dataset.sql;
+    if (sql) {
+      explorerUi.openCreateViewModal(sql);
+    }
+  });
 }
 
 // ── Processing State ────────────────────────────────────────────────
@@ -638,7 +827,13 @@ function setLoading(on) {
   // session_context.active_session_id at fire time, so switching sessions while
   // a turn is in flight would mis-stamp that turn's changesets. (The Stop button
   // is re-enabled separately by setSendButtonStop.)
-  if (sessionSelect) sessionSelect.disabled = on;
+  const sessionListEl = document.getElementById('session-list');
+  if (sessionListEl) {
+    sessionListEl.classList.toggle('disabled', on);
+    sessionListEl.querySelectorAll('button').forEach(btn => btn.disabled = on);
+  }
+  const newSessionBtn = document.getElementById('btn-new-session');
+  if (newSessionBtn) newSessionBtn.disabled = on;
   // T11: gate the dashboard grid while a turn is in flight — card CRUD issued
   // mid-turn would join the turn savepoint and roll back with it on a hard
   // error; data_change re-runs are deferred to the turn-end flush.
@@ -775,11 +970,71 @@ async function bootAgent() {
       console.warn('[main] T11 grid init failed (non-fatal):', e);
     }
 
+    // T8: DB Schema Inspector & Explorer
+    try {
+      window.__agent.explorer = explorerEngine;
+      window.__agent.explorerUi = explorerUi;
+      window.__agent.renderMessages = renderMessages;
+      explorerUi.initExplorerUi(agent);
+    } catch (e) {
+      console.warn('[main] T8 explorer init failed (non-fatal):', e);
+    }
+
+    // T24: SQL Autocomplete & Bang-Mode Visual Morphing
+    try {
+      await globalSchemaIndex.refreshFromDb(agent.sqlite3, agent.db);
+      if (inputEl && !mainAutocomplete) {
+        mainAutocomplete = new SqlAutocompleteController(inputEl, {
+          schemaIndex: globalSchemaIndex,
+          onBangModeChange: (bang) => updateBangModeVisuals(bang),
+        });
+      }
+      window.__agent.schemaIndex = globalSchemaIndex;
+      window.__agent.autocomplete = mainAutocomplete;
+      window.__agent.updateBangModeVisuals = updateBangModeVisuals;
+      window.__agent.runT24Probe = async () => {
+        const { runT24Probe } = await import('../docs/prototypes/ticket-24-autocomplete-probe.mjs');
+        return runT24Probe(agent);
+      };
+    } catch (e) {
+      console.warn('[main] T24 autocomplete init failed (non-fatal):', e);
+    }
+
     inputEl.focus();
   } catch (e) {
     console.error('[main] Boot failed:', e);
     statusBar.textContent = `⚠ Boot failed: ${e.message}`;
     statusBar.style.color = '#f85149';
+  }
+}
+
+// ── T24: Bang-Mode Visuals ──────────────────────────────────────────
+
+let mainAutocomplete = null;
+
+export function updateBangModeVisuals(bang) {
+  const badgeEl = document.getElementById('bang-badge');
+  if (!badgeEl || !inputEl) return;
+
+  if (bang && bang.isBang) {
+    badgeEl.classList.remove('hidden');
+    badgeEl.classList.toggle('bang-private', bang.isPrivate);
+    const icon = badgeEl.querySelector('.bang-badge-icon');
+    const text = badgeEl.querySelector('.bang-badge-text');
+    if (icon) icon.textContent = bang.isPrivate ? '🔒' : '⚡';
+    if (text) text.textContent = bang.isPrivate ? '! Private SQL' : '! Direct SQL';
+
+    inputEl.classList.add('bang-mode');
+    inputEl.classList.add('has-bang-badge');
+    inputEl.classList.toggle('bang-private', bang.isPrivate);
+    inputEl.placeholder = bang.isPrivate
+      ? 'Enter private SQL (hidden from agent context)…'
+      : 'Enter SQL to execute directly (visible to agent)…';
+  } else {
+    badgeEl.classList.add('hidden');
+    badgeEl.classList.remove('bang-private');
+    inputEl.classList.remove('bang-mode', 'has-bang-badge', 'bang-private');
+    inputEl.placeholder = 'Ask me to query your data… or run SQL: ! = agent sees it, !! = private';
   }
 }
 
@@ -794,6 +1049,7 @@ async function sendMessage(text) {
   const compactCmd = parseCompactCommand(userText);
   if (compactCmd) {
     inputEl.value = '';
+    updateBangModeVisuals({ isBang: false });
     await runManualCompaction(compactCmd.instructions);
     return;
   }
@@ -803,11 +1059,13 @@ async function sendMessage(text) {
   const scratch = parseScratchpad(userText);
   if (scratch) {
     inputEl.value = '';
+    updateBangModeVisuals({ isBang: false });
     await runScratchpad(scratch, userText);
     return;
   }
 
   inputEl.value = '';
+  updateBangModeVisuals({ isBang: false });
   setLoading(true);
   setSendButtonStop(true); // T3: morph Send → Stop while the turn is in flight
 
@@ -994,7 +1252,8 @@ async function maybeProactiveCompaction(sqlite3, db, signal) {
 
   // Session switcher guard (setLoading(true) already disabled it — belt and
   // braces, per the design: "disabled during the compaction fetch").
-  if (sessionSelect) sessionSelect.disabled = true;
+  const sList = document.getElementById('session-list');
+  if (sList) sList.querySelectorAll('button').forEach(btn => btn.disabled = true);
   statusBar.textContent = `Compacting context… (~${Math.round(est / 1000)}k / ${Math.round(window * COMPACTION_THRESHOLD / 1000)}k token threshold)`;
   statusBar.style.color = '#d29922';
   const result = await runCompaction(sqlite3, db, activeSessionId, agent.llm, { reason: 'proactive', signal });
@@ -1447,20 +1706,39 @@ document.getElementById('btn-export').addEventListener('click', async () => {
     statusBar.textContent = 'Exporting cartridge…';
     statusBar.style.color = '#d29922';
     const result = await exportCartridge(agent.sqlite3, agent.module, agent.db, `bobby-brain-${new Date().toISOString().slice(0, 10)}.sqlite3`);
+    if (result?.cancelled) {
+      updateReadyStatus();
+      return;
+    }
     statusBar.textContent = `✓ Exported ${result.bytes} bytes`;
     statusBar.style.color = '#3fb950';
     setTimeout(() => {
       updateReadyStatus();
     }, 3000);
   } catch (e) {
+    if (e.name === 'AbortError') {
+      updateReadyStatus();
+      return;
+    }
     console.error('[export]', e);
-    // Fallback to SQL dump
+    // Fallback to SQL dump only on actual engine error, never on user cancel
     try {
       statusBar.textContent = 'Binary export unavailable, trying SQL dump…';
-      await exportSqlDump(agent.sqlite3, agent.db, `bobby-brain-${new Date().toISOString().slice(0, 10)}.sql`);
+      const sqlResult = await exportSqlDump(agent.sqlite3, agent.db, `bobby-brain-${new Date().toISOString().slice(0, 10)}.sql`);
+      if (sqlResult?.cancelled) {
+        updateReadyStatus();
+        return;
+      }
       statusBar.textContent = '✓ SQL dump exported';
       statusBar.style.color = '#3fb950';
+      setTimeout(() => {
+        updateReadyStatus();
+      }, 3000);
     } catch (e2) {
+      if (e2.name === 'AbortError') {
+        updateReadyStatus();
+        return;
+      }
       console.error('[export sql]', e2);
       statusBar.textContent = `⚠ Export failed: ${e2.message}`;
       statusBar.style.color = '#f85149';
@@ -1470,13 +1748,16 @@ document.getElementById('btn-export').addEventListener('click', async () => {
 
 document.getElementById('btn-import').addEventListener('click', async () => {
   if (!agent) return;
-  if (!confirm('Importing a cartridge will REPLACE your current database. Continue?')) return;
   try {
     statusBar.textContent = 'Importing cartridge…';
     statusBar.style.color = '#d29922';
     // Same DB handle is preserved by importCartridge — UDFs, the update hook,
     // and connection-level pragmas all survive, so nothing to re-register.
-    await importCartridge(agent.sqlite3, agent.module, agent.db);
+    const result = await importCartridge(agent.sqlite3, agent.module, agent.db);
+    if (result?.cancelled) {
+      updateReadyStatus();
+      return;
+    }
 
     activeSessionId = 'default';
     await setActiveSession(agent.sqlite3, agent.db, 'default');
@@ -1491,6 +1772,10 @@ document.getElementById('btn-import').addEventListener('click', async () => {
       updateReadyStatus();
     }, 3000);
   } catch (e) {
+    if (e.name === 'AbortError') {
+      updateReadyStatus();
+      return;
+    }
     console.error('[import]', e);
     statusBar.textContent = `⚠ Import failed: ${e.message}`;
     statusBar.style.color = '#f85149';

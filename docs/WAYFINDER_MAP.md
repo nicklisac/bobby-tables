@@ -51,6 +51,7 @@ A fresh session resumes from **this map alone** — destination, philosophy, and
 * [Decision: T13 Is the Shared Materialize Function — Sequenced First](#ticket-13-tool-output-materialization-engine) — Materialization = *JSON blob in a `messages` row → named table* (json_each unpacking, T6-style type inference, T9-style DDL logging + capture-trigger sweep), exposed two ways: an **agent tool** (`materialize`, keyed off `tool_call_id`) and a **library function the T12 drag handler calls**. Drag flow: table bubble → recover the SQL → card SELECT; web-search/fetch bubble → materialize → card SELECT over the new table; plain text → not draggable (2026-08-15, user-confirmed).
 * [Decision: Reference-Integrity Semantics for Card Pointers](#ticket-22-reference-integrity-for-dashboard-cards) — **Rename** rewrites referencing cards' SQL (emulating SQLite's native view-rewrite under `ALTER TABLE … RENAME TO`); **delete** cascade-deletes referencing cards behind a confirm that lists them; **alter** dry-runs referencing cards (read-only by construction) and alerts on breakage. Built on a shared `extractReferencedObjects` + dry-run; scoped to user data tables/views, never protected tables (2026-08-15).
 * [Decision: Protected-Tables Boundary Gets Its Own Ticket](#ticket-21-protected-tables-boundary) — "Untouchable" must be a formal predicate consulted at **every** write boundary, not just the rewind/reactivity machinery. Finding: `INTERNAL_TABLES` is enforced only in `ensureCaptureTriggers`/`update_hook` — the agent's DML (with `allow_dml=1`) and the scratchpad's DML/DDL have **no** target-table guard (`!!DELETE FROM messages` works today — a live gap). DDL on protected tables: refuse outright. One HITL decision pending: DML on protected tables — default refuse + narrow allowlist (`system_config`) vs. allow-with-loud-warning (2026-08-15).
+* [Decision: Schema-Aware Autocomplete & Bang-Mode Visual Morphing (T24 locked)](#ticket-24-schema-aware-sql-autocomplete-editor--bang-mode-visuals) — Dynamic schema dictionary from `getDatabaseCatalog`, context-aware token rankings (tables boosted after FROM/JOIN, columns boosted after SELECT/WHERE/dot-qualifiers), floating popover with keyboard nav (ArrowUp/ArrowDown/Tab/Enter/Escape), and instant visual morphing for `!SQL` (`⚡ [ ! Direct SQL ]`) and `!!SQL` (`🔒 [ !! Private SQL ]`).
 
 ---
 
@@ -64,11 +65,11 @@ graph TD
     T1 --> T3[Ticket 3: Rolling Rewind, Savepoints & Stop Button - DONE]
     T1 --> T9[Ticket 9: Direct SQL Scratchpad !SQL / !!SQL - DONE]
     T3 --> T9
-    T9 --> T24[Ticket 24: Schema-Aware SQL Autocomplete & Editor]
-    T1 --> T8[Ticket 8: DB Schema Inspector & View Exporter]
+    T9 --> T24[Ticket 24: Schema-Aware SQL Autocomplete & Editor - DONE]
+    T1 --> T8[Ticket 8: DB Schema Inspector & View Exporter - DONE]
     T8 --> T24
     T1 --> T11[Ticket 11: 3-Pane Layout & Grid Engine - DONE]
-    T11 --> T12[Ticket 12: Dynamic Grid Canvas, Drag-to-Move, Resize & Chat Pinning]
+    T11 --> T12[Ticket 12: Dynamic Grid Canvas, Drag-to-Move, Resize & Chat Pinning - DONE]
     T1 --> T13[Ticket 13: Tool-Output Materialization - DONE]
     T1 --> T14
     T1 --> T15[Ticket 15: Durable Semantic Memory]
@@ -93,8 +94,8 @@ graph TD
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T2,T3,T4,T5,T6,T7,T9,T10,T11,T12,T13 done;
-    class T8,T14,T15,T16,T17,T18,T19,T20,T21,T23,T24 frontier;
+    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T24 done;
+    class T14,T15,T16,T17,T18,T19,T20,T21,T23 frontier;
     class T22 blocked;
 ```
 
@@ -196,13 +197,18 @@ graph TD
 
 ### Ticket 8: DB Schema Inspector, Table Stats & Interactive Data Explorer
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** 🎯 Next Priority (Frontier) — queued 2026-08-15
-* **User Vision & Requirements (2026-08-15):**
-  * **Interactive Explorer Pane:** Replace the static table list placeholder in `#explorer-pane` with a dynamic, rich table/view explorer.
-  * **Live Table Statistics:** Clicking any table/view expands or reveals key stats: total row count, column definitions (`PRAGMA table_info`), primary keys, indexes, and schema DDL.
-  * **Scrollable Data Preview Window / Drawer:** Interactive scrollable data inspector to view and page/scroll through sample records directly from the sidebar.
-  * **Table Creation & Schema DDL Tools:** Ability to create new tables directly from the panel (`+ New Table` UI/DDL generator).
-  * **View Exporter:** "Save Query as View" shortcut from chat query results and scratchpad blocks into the database catalog.
+* **Status:** ✅ COMPLETE (2026-08-15)
+* **Implemented Components:**
+  * `src/explorer.js`: Pure schema introspection engine (`getDatabaseCatalog`) extracting User Tables, Views, and System Tables with live row counts, columns (`PRAGMA table_info` cid, type, pk, notnull, default), indexes (`PRAGMA index_list` / `index_info`), foreign keys (`PRAGMA foreign_key_list`), and formatted DDL. Parameterized paginated data preview engine (`fetchTableData` with limit/offset, text search filtering, and column sorting), `createTableFromSchema` (DDL generation + logging + capture trigger sweep), `createViewFromQuery` (read-only verification + view DDL generation), and safe `dropDatabaseObject` (protected table safeguards).
+  * `src/explorer-ui.js`: Full left-pane `#explorer-pane` interactive tree with expandable accordions, column type tags, PK/NN badges, indexes, foreign keys, formatted DDL blocks with one-click copy, and quick actions (🔍 Preview Data, ⚡ Query in Scratchpad, 📌 Pin to Dashboard, 🗑 Drop Table/View).
+  * `index.html` & `src/styles.css`: Added `#data-preview-modal` (large paginated data viewer with live row search and column header sorting), `#table-create-modal` (visual table builder with dynamic column designer & live DDL preview), and `#view-create-modal` (Save as View dialog). Added `.btn-save-view-chat` on chat/scratchpad SQL results.
+  * **Double Accordion & Session Management**: Refactored the left sidebar into a dual collapsible accordion hosting DB Explorer on top and Sessions below (with inline renaming `✎`, double-click rename, atomic delete `✕`, and single active selection indicator). Cleaned up the center footer `#session-bar` into a minimal status bar with token usage.
+  * **Thin Collapsible Activity Rails**: Implemented sleek 38px collapsible activity rails on both side panels:
+    * Left Rail: Top half Schema/Explorer icon (`🗄`) + vertical `EXPLORER` label; Bottom half Chat Bubble icon (`💬`) + vertical `SESSIONS` label. Clicking expands the sidebar and opens the respective accordion.
+    * Right Rail: Multi-window / Bento layout icon (`⊞`) + vertical `DASHBOARD` label.
+    * Keyboard shortcuts: `Ctrl+B` (Left sidebar) and `Ctrl+J` (Right dashboard canvas).
+  * **Branding & UI Polish**: Header updated to "Bobby Tables" with distinct mono/system font badge, top-right floating configuration overlay, and smooth layout resizing with `localStorage` persistence.
+  * `docs/prototypes/ticket-8-explorer-probe.mjs`: Complete 8-step automated verification probe testing catalog introspection, pagination/filtering/sorting, visual table builder DDL + capture trigger instrumentation, view creation & query evaluation, object dropping, protection bounds, UI controller integration, and session lifecycle operations (create, rename, delete, deduplication).
 
 ---
 
@@ -364,20 +370,15 @@ graph TD
 
 ### Ticket 24: Schema-Aware SQL Autocomplete, Editor & Bang-Mode Visuals
 * **Label:** `wayfinder:task` (AFK)
-* **Status:** Open (Frontier)
+* **Status:** ✅ COMPLETE (2026-08-15)
 * **Question:** How should the chat input (for `!` / `!!` scratchpad commands), SQL scratchpad modal, and Card SQL editors integrate schema-aware autocomplete, syntax highlighting, and dynamic visual morphing?
-* **Design notes (2026-08-15):**
-  * **Stack:** CodeMirror 6 with `@codemirror/lang-sql` and `@codemirror/autocomplete` (or lightweight textarea completion).
-  * **Bang-Mode Visual Morph (Look & Feel):**
-    * When the user types a leading `!` (shared SQL) or `!!` (private SQL) into the chat input, the input field dynamically morphs into a dedicated **SQL Codeblock Editor** style:
-      * Distinct IDE dark background, syntax highlighting, monospace font, and a glowing indicator/badge (`[ ! Direct SQL ]` or `[ !! Private SQL ]`).
-      * Provides instant visual clarity that the user has switched from conversational agent chat into direct SQL execution mode.
-  * **Capabilities:**
-    * **Schema-aware completions:** Dynamic dictionary of table names and column names derived from `sqlite_master` and `PRAGMA table_info`.
-    * **SQL keyword completions:** `SELECT`, `FROM`, `WHERE`, `JOIN`, `GROUP BY`, `ORDER BY`, `CREATE TABLE`, `INSERT INTO`, `UPDATE`, `DELETE`, etc.
-    * **SQLite built-in functions:** `json_extract`, `json_each`, `COUNT`, `AVG`, `SUM`, `COALESCE`, etc.
-    * **Schema reactivity:** Automatically updates the completion schema map on database changes (`data_change` events, CSV ingestion, materializations).
-  * **Integration points:** Main chat prompt input (activates on leading `!`), Card SQL edit modals, and direct query runners.
+* **Implemented Components:**
+  * `src/sql-autocomplete.js`: Pure-vanilla schema completion indexer (`SchemaCompletionIndex`), keyword dictionary (62 SQL keywords), function dictionary (44 built-ins + UDFs), caret context analyzer (`analyzeSqlContext`), candidate ranking with table/column boost (`getCompletionCandidates`), and floating popover controller (`SqlAutocompleteController`) with keyboard navigation (`ArrowUp`/`ArrowDown`/`Tab`/`Enter`/`Escape`).
+  * `src/main.js` & `index.html`: Added `#bang-badge` and dynamic bang-mode visual morphing (`updateBangModeVisuals`). Typing `!` morphs the input into `⚡ [ ! Direct SQL ]` with IDE dark background and monospace styling; typing `!!` morphs into `🔒 [ !! Private SQL ]` with purple glow; clearing the bang smoothly reverts to standard conversational input. Hooked `globalSchemaIndex` to `'data_change'` events in the event stream for automatic schema reactivity.
+  * `src/grid-ui.js`: Attached `SqlAutocompleteController` with `alwaysSuggest: true` to `#card-sql` textarea in the Card Dialog.
+  * `src/styles.css`: Added styles for `.bang-badge`, `#user-input.bang-mode`, `.sql-autocomplete-dropdown`, and item badges (`.badge-tbl`, `.badge-view`, `.badge-col`, `.badge-kw`, `.badge-fn`, `.badge-sys`).
+  * `docs/prototypes/ticket-24-autocomplete-probe.mjs`: Complete 7-step automated verification probe testing schema indexing, bang detection, context analysis, candidate ranking, DOM visual morphing, keyboard navigation, and dynamic DDL reactivity.
+* **Verification:** 8/8 automated probe assertions passing green against the live build and SQLite database.
 
 ---
 

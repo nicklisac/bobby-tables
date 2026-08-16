@@ -270,9 +270,9 @@ CREATE TABLE IF NOT EXISTS dashboard_cards (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     title      TEXT NOT NULL,
     sql        TEXT NOT NULL,
-    row        INTEGER NOT NULL DEFAULT 0 CHECK(row >= 0 AND row <= 2),
+    row        INTEGER NOT NULL DEFAULT 0 CHECK(row >= 0),
     col        INTEGER NOT NULL DEFAULT 0 CHECK(col >= 0 AND col <= 2),
-    row_span   INTEGER NOT NULL DEFAULT 1 CHECK(row_span >= 1 AND row_span <= 3),
+    row_span   INTEGER NOT NULL DEFAULT 1 CHECK(row_span >= 1),
     col_span   INTEGER NOT NULL DEFAULT 1 CHECK(col_span >= 1 AND col_span <= 3),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -410,10 +410,13 @@ END;
  * The triggers read from session_context to know which session to operate on.
  */
 export async function setActiveSession(sqlite3, db, sessionId) {
-  // Ensure session exists
-  for await (const stmt of sqlite3.statements(db, `INSERT OR IGNORE INTO sessions (id, name) VALUES (?, ?)`)) {
-    sqlite3.bind_collection(stmt, [sessionId, sessionId]);
-    await sqlite3.step(stmt);
+  if (sessionId === 'default') {
+    for await (const stmt of sqlite3.statements(db, `
+      INSERT OR IGNORE INTO sessions (id, name, description)
+      VALUES ('default', 'Default Session', 'The primary conversation session')
+    `)) {
+      await sqlite3.step(stmt);
+    }
   }
   // Ensure session_context row exists, then update
   for await (const stmt of sqlite3.statements(db, `INSERT OR IGNORE INTO session_context (key, value) VALUES ('active_session_id', 'default')`)) {
@@ -428,49 +431,60 @@ export async function setActiveSession(sqlite3, db, sessionId) {
 /**
  * Create a new session and return its ID.
  */
-export async function createSession(sqlite3, db, name = 'Untitled') {
+export async function createSession(sqlite3, db, name = 'New Session') {
+  const cleanName = String(name || '').trim() || 'New Session';
   const id = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   for await (const stmt of sqlite3.statements(db, `INSERT INTO sessions (id, name) VALUES (?, ?)`)) {
-    sqlite3.bind_collection(stmt, [id, name || 'Untitled']);
+    sqlite3.bind_collection(stmt, [id, cleanName]);
     await sqlite3.step(stmt);
   }
   return id;
 }
 
 /**
- * List all sessions.
+ * List all sessions, strictly deduplicated by session ID.
  */
 export async function listSessions(sqlite3, db) {
   const sessions = [];
-  for await (const stmt of sqlite3.statements(db, `SELECT id, name, COALESCE(description, ''), created_at, updated_at FROM sessions ORDER BY updated_at DESC`)) {
+  const seen = new Set();
+  for await (const stmt of sqlite3.statements(db, `SELECT id, name, COALESCE(description, ''), created_at, updated_at FROM sessions ORDER BY updated_at DESC, created_at DESC`)) {
     while (await sqlite3.step(stmt) === 100 /* SQLITE_ROW */) {
       const v = sqlite3.row(stmt);
-      sessions.push({ id: v[0], name: v[1], description: v[2], created_at: v[3], updated_at: v[4] });
+      const id = v[0];
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const rawName = v[1];
+      const name = (rawName && rawName.trim()) ? rawName.trim() : (id === 'default' ? 'Default Session' : 'Untitled Session');
+      sessions.push({ id, name, description: v[2], created_at: v[3], updated_at: v[4] });
     }
   }
   return sessions;
 }
 
 /**
- * Delete a session and all its messages.
+ * Rename an existing session.
+ */
+export async function renameSession(sqlite3, db, sessionId, newName) {
+  const cleanName = String(newName || '').trim();
+  if (!cleanName) throw new Error('Session name cannot be empty');
+  for await (const stmt of sqlite3.statements(db, `UPDATE sessions SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)) {
+    sqlite3.bind_collection(stmt, [cleanName, sessionId]);
+    await sqlite3.step(stmt);
+  }
+  return { id: sessionId, name: cleanName };
+}
+
+/**
+ * Delete a session and all its messages, compactions, and logs.
  */
 export async function deleteSession(sqlite3, db, sessionId) {
   if (sessionId === 'default') throw new Error('Cannot delete default session');
-  for await (const stmt of sqlite3.statements(db, `DELETE FROM messages WHERE session_id = ?`)) {
-    sqlite3.bind_collection(stmt, [sessionId]);
-    await sqlite3.step(stmt);
+  for (const table of ['messages', 'compactions', 'turn_changesets', 'turn_ddl_log']) {
+    try {
+      await execParams(sqlite3, db, `DELETE FROM ${table} WHERE session_id = ?`, [sessionId]);
+    } catch { /* table might not exist in early migrations */ }
   }
-  // T2: compactions are per-session artifacts — delete them with the session.
-  // (compactions.session_id has ON DELETE CASCADE to sessions, but the explicit
-  // delete keeps the intent visible and works even if the FK is not enforced.)
-  for await (const stmt of sqlite3.statements(db, `DELETE FROM compactions WHERE session_id = ?`)) {
-    sqlite3.bind_collection(stmt, [sessionId]);
-    await sqlite3.step(stmt);
-  }
-  for await (const stmt of sqlite3.statements(db, `DELETE FROM sessions WHERE id = ?`)) {
-    sqlite3.bind_collection(stmt, [sessionId]);
-    await sqlite3.step(stmt);
-  }
+  await execParams(sqlite3, db, `DELETE FROM sessions WHERE id = ?`, [sessionId]);
 }
 
 /**
@@ -869,5 +883,39 @@ export async function migrateTurnTables(sqlite3, db) {
     } catch (e) {
       console.warn(`[schema] migrateTurnTables(${table}) failed (non-fatal):`, e.message);
     }
+  }
+}
+
+/**
+ * Migration: existing databases have `row <= 2` CHECK constraints on `dashboard_cards`.
+ * Migrate to unlimited row expansion so cards can be placed in lower grid zones.
+ */
+export async function migrateDashboardCardsTable(sqlite3, db) {
+  try {
+    const rows = await queryAll(sqlite3, db, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dashboard_cards'`);
+    if (!rows.length || !rows[0][0]) return;
+    const currentSql = rows[0][0];
+    if (currentSql.includes('row <= 2') || currentSql.includes('row_span <= 3')) {
+      console.warn('[schema] dashboard_cards has 3x3 CHECK constraint — migrating to expandable grid');
+      await sqlite3.exec(db, `
+        CREATE TABLE IF NOT EXISTS dashboard_cards_new (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            title      TEXT NOT NULL,
+            sql        TEXT NOT NULL,
+            row        INTEGER NOT NULL DEFAULT 0 CHECK(row >= 0),
+            col        INTEGER NOT NULL DEFAULT 0 CHECK(col >= 0 AND col <= 2),
+            row_span   INTEGER NOT NULL DEFAULT 1 CHECK(row_span >= 1),
+            col_span   INTEGER NOT NULL DEFAULT 1 CHECK(col_span >= 1 AND col_span <= 3),
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT OR IGNORE INTO dashboard_cards_new (id, title, sql, row, col, row_span, col_span, created_at, updated_at)
+          SELECT id, title, sql, row, col, row_span, col_span, created_at, updated_at FROM dashboard_cards;
+        DROP TABLE dashboard_cards;
+        ALTER TABLE dashboard_cards_new RENAME TO dashboard_cards;
+      `);
+    }
+  } catch (e) {
+    console.warn('[schema] migrateDashboardCardsTable failed (non-fatal):', e.message);
   }
 }
