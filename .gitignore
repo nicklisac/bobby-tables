@@ -3,13 +3,30 @@ node_modules/
 
 # Build output
 dist/
-.antigravitycli/
-.agents/*
 
-# Environment
+# Local agent artifacts & tooling
+.agents/
+.antigravitycli/
+skills-lock.json
+
+# Environment & local config
 .env
+.env.*
+!.env.example
 .env.local
 
-# OS
+# IDE & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

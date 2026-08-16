@@ -330,14 +330,14 @@
           <div class="config-row">
             <label for="config-provider">Provider</label>
             <select id="config-provider">
+              <option value="gemini" selected>Google Gemini API</option>
               <option value="openai">OpenAI Compatible (Ollama, LM Studio, Local, OpenRouter)</option>
-              <option value="gemini">Google Gemini API</option>
             </select>
           </div>
-          <div class="config-row" id="row-config-url">
+          <div class="config-row" id="row-config-url" style="display: none;">
             <label for="config-url">Base URL / Endpoint</label>
             <input type="text" id="config-url" placeholder="http://localhost:11434/v1" />
-            <small class="hint">Ollama: http://localhost:11434/v1 &middot; LM Studio: http://localhost:1234/v1</small>
+            <small class="hint">Ollama: http://localhost:11434/v1 &middot; LM Studio: http://localhost:1234/v1<br><em>Note: Browsers will prompt for permission to access local device services when connecting to localhost.</em></small>
           </div>
           <div class="config-row">
             <label for="config-model">Model Name</label>

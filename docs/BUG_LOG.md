@@ -34,12 +34,12 @@ This document tracks known issues, edge cases, and improvements to be addressed 
 ---
 
 ### BUG-004: Chat Input Enabled When LLM Provider Is Not Configured
-- **Status**: Open / Backlogged
+- **Status**: Resolved
 - **Reported**: User Feedback
 - **Component**: `src/main.js`, `index.html`, `src/styles.css`
-- **Description**: When an LLM provider is not set or configured, the user can still type and attempt to send chat messages, leading to failed requests or unhandled errors. Users should be directed to the provider settings/list before they try to chat.
-- **Root Cause**: Chat input and submit controls are enabled on initialization without validating whether an active LLM provider, API key, or valid endpoint has been configured in local storage / settings.
-- **Proposed Fix**: Guard the chat input on initial load: detect if a provider is unconfigured, display an onboarding banner/prompt guiding the user to open the LLM Configuration modal (`#config-modal`), and keep normal LLM chat submission disabled until a provider is configured (or direct them automatically to the provider setup).
+- **Description**: When an LLM provider is not set or configured, the user could still type and attempt to send chat messages, leading to failed requests or unhandled errors. Users should be directed to the provider settings/list before they try to chat.
+- **Root Cause**: Chat input and submit controls were enabled on initialization without validating whether an active LLM provider, API key, or valid endpoint has been configured in local storage / settings.
+- **Resolution**: Added `isProviderConfigured()` check, glowing amber animation (`.config-glow`) to the `⚙ Config` button when unconfigured, onboarding welcome card with a direct setup action in empty chat sessions, and submission guards that prompt the user to configure their LLM provider while preserving direct SQL (`!SQL` / `!!SQL`) access.
 
 ---
 

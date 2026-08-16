@@ -90,13 +90,15 @@ graph TD
     T12 --> T22[Ticket 22: Reference Integrity for Dashboard Cards]
     T13 --> T22
     T21 --> T22
+    T24 --> T26[Ticket 26: Codebase Compaction, Module Splitting & Boilerplate Reduction]
+    T25 --> T26
 
     classDef done fill:#238636,stroke:#2ea043,color:#fff;
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
     class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T21,T24 done;
-    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T25 frontier;
+    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T25,T26 frontier;
 ```
 
 ---
@@ -410,6 +412,26 @@ graph TD
     * Status bar: Sleek pulsing status LED dot with clean text hierarchy.
     * SQL code blocks & Scratchpad output: Clean IDE styling with integrated copy, execution duration badge, and row count pills.
     * Modals: High-contrast backdrop blur, crisp title headers, structured form layouts without clutter.
+
+---
+
+### Ticket 26: Codebase Compaction, Module Splitting & Boilerplate Reduction
+* **Label:** `wayfinder:task` (AFK/HITL)
+* **Status:** Open (Frontier)
+* **Question:** How should we refactor shared utilities, deduplicate boilerplate, and modularize the monolithic `src/main.js` (~1,870 lines) to make the codebase leaner, faster to navigate, and maintainable?
+* **Scope & Objectives:**
+  * **1. Shared Utility Module (`src/utils.js`):**
+    * Centralize duplicated utility functions across modules:
+      * `escapeHtml()` (currently duplicated in `main.js`, `explorer-ui.js`, `grid-ui.js`, `sql-autocomplete.js`).
+      * `quoteIdent()` & `queryAll()` / `execParams()` (standardize usage across `cartridge.js`, `schema.js`, etc.).
+      * Unified statement iteration helpers (`queryRows`, `queryValue`, `queryScalar`) to eliminate ~40 repetitive `while (await sqlite3.step(stmt) === SQLITE_ROW)` loops.
+  * **2. Modularize `src/main.js` Subsystems:**
+    * Extract **Direct SQL Scratchpad & Parser** into `src/scratchpad.js` (`classifyStatement`, `captureDropPreImage`, `execScratchSql`, `runScratchpad`, and scratchpad rewind).
+    * Extract **Chat & Tool Bubble Rendering** into `src/chat-render.js` (`renderToolContent`, `renderScratchpadResult`, markdown formatting, and welcome onboarding cards).
+  * **3. CSS Consolidation in `src/styles.css`:**
+    * Consolidate redundant selector chains, repetitive padding/margin patterns, and harmonize shared card/modal/badge utilities.
+  * **4. Comment & Scaffolding Compaction:**
+    * Streamline historical ticket scratch commentary while rigorously preserving key architectural invariants (JSPI fiber suspension, savepoint protocols, and IDB race-condition guards).
 
 ---
 

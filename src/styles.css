@@ -2599,3 +2599,103 @@ footer {
   100% { background-position: -200% 0; }
 }
 
+/* ── Unconfigured State / Config Glow & Welcome Card ── */
+
+#btn-toggle-config.config-glow {
+  border-color: #d29922;
+  color: #f0883e;
+  background: rgba(210, 153, 34, 0.12);
+  box-shadow: 0 0 8px rgba(210, 153, 34, 0.35);
+  animation: pulseConfigGlow 2s infinite ease-in-out;
+}
+
+@keyframes pulseConfigGlow {
+  0%, 100% {
+    box-shadow: 0 0 4px rgba(210, 153, 34, 0.2);
+    border-color: #d29922;
+  }
+  50% {
+    box-shadow: 0 0 12px rgba(210, 153, 34, 0.55);
+    border-color: #f0883e;
+    color: #ffd33d;
+  }
+}
+
+.welcome-card {
+  margin: 1.5rem auto;
+  max-width: 580px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 1.25rem 1.5rem;
+  color: var(--text);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+.welcome-card .welcome-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+}
+
+.welcome-card .welcome-icon {
+  font-size: 1.4rem;
+}
+
+.welcome-card h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.welcome-card p {
+  margin: 0.5rem 0;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.welcome-card .welcome-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin: 1rem 0 0.75rem 0;
+}
+
+.welcome-card .welcome-config-btn {
+  padding: 0.45rem 1rem;
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid transparent;
+  border-radius: 0.35rem;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  transition: background 0.15s;
+}
+
+.welcome-card .welcome-config-btn:hover {
+  background: #409eff;
+}
+
+.welcome-card .welcome-hint {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  padding-top: 0.65rem;
+  margin-top: 0.75rem;
+}
+
+.welcome-card .welcome-hint code {
+  background: var(--bg);
+  padding: 0.15rem 0.35rem;
+  border-radius: 0.25rem;
+  font-size: 0.72rem;
+  color: var(--accent);
+  border: 1px solid var(--border);
+}
+

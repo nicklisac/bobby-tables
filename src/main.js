@@ -80,6 +80,16 @@ function saveConfig(c) {
   localStorage.setItem('sql-agent-config', JSON.stringify(c));
 }
 
+function isProviderConfigured(cfg = loadConfig()) {
+  if (cfg && cfg.isConfigured) return true;
+  if (!cfg || !cfg.provider) return false;
+  if (cfg.provider === 'gemini') return Boolean(cfg.apiKey && cfg.apiKey.trim());
+  if (cfg.provider === 'openai') {
+    return Boolean((cfg.url && cfg.url.trim()) || (cfg.apiKey && cfg.apiKey.trim()));
+  }
+  return false;
+}
+
 function updateConfigVisibility(provider) {
   const isGemini = provider === 'gemini';
   if (rowConfigUrl) rowConfigUrl.style.display = isGemini ? 'none' : 'flex';
@@ -101,6 +111,7 @@ function updateConfigVisibility(provider) {
 function populateConfigForm() {
   const c = loadConfig();
   if (c.provider) configProvider.value = c.provider;
+  else configProvider.value = 'gemini';
   if (c.url !== undefined) configUrl.value = c.url;
   if (c.model !== undefined) configModel.value = c.model;
   if (c.apiKey !== undefined) configKey.value = c.apiKey;
@@ -112,7 +123,13 @@ function openConfigModal() {
   populateConfigForm();
   if (configModal) configModal.classList.remove('hidden');
   if (btnToggleConfig) btnToggleConfig.classList.add('is-active');
-  setTimeout(() => configModel?.focus(), 50);
+  setTimeout(() => {
+    if (configProvider.value === 'gemini' && configKey) {
+      configKey.focus();
+    } else {
+      configModel?.focus();
+    }
+  }, 50);
 }
 
 function closeConfigModal() {
@@ -160,6 +177,7 @@ if (configForm) {
       model: configModel.value.trim(),
       apiKey: configKey.value.trim(),
       contextWindow: configContextWindow.value.trim(),
+      isConfigured: true,
     });
     closeConfigModal();
     statusBar.textContent = 'Configuration saved. Rebooting…';
@@ -540,79 +558,102 @@ async function renderMessages() {
   }
 
   messagesEl.innerHTML = '';
-  rows.forEach(([id, role, content, , toolCallId]) => {
-    if (role === 'system') return;
-    const div = document.createElement('div');
-    div.className = `message ${role}`;
-    // T9: scratchpad user rows (leading bangs) render in monospace.
-    if (role === 'user' && /^!/.test(String(content))) div.classList.add('scratchpad');
+  const visibleRows = rows.filter(([id, role]) => role !== 'system');
+  if (visibleRows.length === 0) {
+    const welcomeDiv = document.createElement('div');
+    welcomeDiv.className = 'welcome-card';
+    const configured = isProviderConfigured(loadConfig());
+    welcomeDiv.innerHTML = `
+      <div class="welcome-header">
+        <span class="welcome-icon">👋</span>
+        <h3>Welcome to Bobby Tables!</h3>
+      </div>
+      <p>Bobby is an in-browser SQL data agent. ${configured ? 'Ask a question below to analyze data with AI.' : 'To start querying with AI, please configure your LLM provider:'}</p>
+      ${!configured ? `
+      <div class="welcome-actions">
+        <button type="button" class="welcome-config-btn">⚙ Configure Provider</button>
+      </div>` : ''}
+      <p class="welcome-hint">
+        <em>Tip:</em> You can also run direct SQL commands immediately without an LLM using <code>!SELECT * FROM sample_data</code>.
+      </p>
+    `;
+    welcomeDiv.querySelector('.welcome-config-btn')?.addEventListener('click', openConfigModal);
+    messagesEl.appendChild(welcomeDiv);
+  } else {
+    rows.forEach(([id, role, content, , toolCallId]) => {
+      if (role === 'system') return;
+      const div = document.createElement('div');
+      div.className = `message ${role}`;
+      // T9: scratchpad user rows (leading bangs) render in monospace.
+      if (role === 'user' && /^!/.test(String(content))) div.classList.add('scratchpad');
 
-    if (role === 'tool') {
-      const label = document.createElement('div');
-      label.className = 'message-label';
-      label.textContent = '🔧 Tool Output';
-      div.appendChild(label);
+      if (role === 'tool') {
+        const label = document.createElement('div');
+        label.className = 'message-label';
+        label.textContent = '🔧 Tool Output';
+        div.appendChild(label);
 
-      const querySql = toolCallQueries.get(toolCallId) || '';
-      const contentDiv = document.createElement('div');
-      contentDiv.innerHTML = renderToolContent(content, toolCallId, querySql);
-      div.appendChild(contentDiv);
-    } else {
-      // T9: scratchpad result rows are assistant rows carrying a JSON
-      // envelope — render the table, not the raw JSON.
-      let env = null;
-      if (role === 'assistant' && typeof content === 'string') {
-        try {
-          const p = JSON.parse(content);
-          if (p && p.scratchpad === true) env = p;
-        } catch { /* plain text */ }
-      }
-      if (env) {
-        div.classList.add('scratchpad-result');
+        const querySql = toolCallQueries.get(toolCallId) || '';
         const contentDiv = document.createElement('div');
-        contentDiv.innerHTML = renderScratchpadResult(env);
+        contentDiv.innerHTML = renderToolContent(content, toolCallId, querySql);
         div.appendChild(contentDiv);
       } else {
-        div.textContent = content || '[empty]';
+        // T9: scratchpad result rows are assistant rows carrying a JSON
+        // envelope — render the table, not the raw JSON.
+        let env = null;
+        if (role === 'assistant' && typeof content === 'string') {
+          try {
+            const p = JSON.parse(content);
+            if (p && p.scratchpad === true) env = p;
+          } catch { /* plain text */ }
+        }
+        if (env) {
+          div.classList.add('scratchpad-result');
+          const contentDiv = document.createElement('div');
+          contentDiv.innerHTML = renderScratchpadResult(env);
+          div.appendChild(contentDiv);
+        } else {
+          div.textContent = content || '[empty]';
+        }
       }
-    }
 
-    // T3: per-bubble rewind button on user messages — "rewind the database to
-    // before this message".
-    // T9: scratchpad user rows (leading bangs) get a ⟲ only while their
-    // negative turn still has recorded changes; single-bang read-only
-    // commands that changed nothing get no button.
-    if (role === 'user') {
-      const bangs = (String(content).match(/^!+/) || [''])[0].length;
-      let target = null;
-      if (bangs === 0) {
-        target = () => rewindToBefore(id);
-      } else if (rewindableScratchpad.has(-id)) {
-        target = () => rewindToBeforeScratchpad(id);
+      // T3: per-bubble rewind button on user messages — "rewind the database to
+      // before this message".
+      // T9: scratchpad user rows (leading bangs) get a ⟲ only while their
+      // negative turn still has recorded changes; single-bang read-only
+      // commands that changed nothing get no button.
+      if (role === 'user') {
+        const bangs = (String(content).match(/^!+/) || [''])[0].length;
+        let target = null;
+        if (bangs === 0) {
+          target = () => rewindToBefore(id);
+        } else if (rewindableScratchpad.has(-id)) {
+          target = () => rewindToBeforeScratchpad(id);
+        }
+        if (target) {
+          const rewindBtn = document.createElement('button');
+          rewindBtn.className = 'rewind-btn';
+          rewindBtn.title = bangs === 0
+            ? 'Rewind the database to the state before this message'
+            : 'Rewind the database to the state before this scratchpad command';
+          rewindBtn.textContent = '⟲';
+          rewindBtn.addEventListener('click', target);
+          div.appendChild(rewindBtn);
+        }
       }
-      if (target) {
-        const rewindBtn = document.createElement('button');
-        rewindBtn.className = 'rewind-btn';
-        rewindBtn.title = bangs === 0
-          ? 'Rewind the database to the state before this message'
-          : 'Rewind the database to the state before this scratchpad command';
-        rewindBtn.textContent = '⟲';
-        rewindBtn.addEventListener('click', target);
-        div.appendChild(rewindBtn);
+
+      messagesEl.appendChild(div);
+
+      // T2: compaction divider at the watermark position (the summarized prefix
+      // ends here; the visible tail starts at the next message).
+      if (compactionWatermarks.has(id)) {
+        const divider = document.createElement('div');
+        divider.className = 'compaction-divider';
+        divider.textContent = '— context compacted —';
+        messagesEl.appendChild(divider);
       }
-    }
-
-    messagesEl.appendChild(div);
-
-    // T2: compaction divider at the watermark position (the summarized prefix
-    // ends here; the visible tail starts at the next message).
-    if (compactionWatermarks.has(id)) {
-      const divider = document.createElement('div');
-      divider.className = 'compaction-divider';
-      divider.textContent = '— context compacted —';
-      messagesEl.appendChild(divider);
-    }
-  });
+    });
+  }
 
   scrollChatToBottom();
   await updateTokenUsage();
@@ -861,7 +902,23 @@ function setSendButtonStop(on) {
 
 function updateReadyStatus() {
   const cfg = loadConfig();
-  const provider = cfg.provider || 'openai';
+  const configured = isProviderConfigured(cfg);
+
+  if (btnToggleConfig) {
+    if (configured) {
+      btnToggleConfig.classList.remove('config-glow');
+    } else {
+      btnToggleConfig.classList.add('config-glow');
+    }
+  }
+
+  if (!configured) {
+    statusBar.textContent = '○ Provider not configured — click ⚙ Config to get started';
+    statusBar.style.color = '#d29922';
+    return;
+  }
+
+  const provider = cfg.provider || 'gemini';
   const url = cfg.url || (provider === 'openai' ? 'http://localhost:11434/v1' : '');
   const model = cfg.model || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2');
   const apiKey = cfg.apiKey || '';
@@ -875,7 +932,7 @@ function updateReadyStatus() {
       statusBar.style.color = '#d29922';
     }
   } else {
-    statusBar.textContent = `● Ready — OpenAI Compatible at ${url} (${model})`;
+    statusBar.textContent = `● Ready — OpenAI Compatible at ${url || 'default'} (${model})`;
     statusBar.style.color = '#3fb950';
   }
 }
@@ -884,7 +941,7 @@ function updateReadyStatus() {
 
 async function bootAgent() {
   const cfg = loadConfig();
-  const provider = cfg.provider || 'openai';
+  const provider = cfg.provider || 'gemini';
   const url = cfg.url || (provider === 'openai' ? 'http://localhost:11434/v1' : '');
   const model = cfg.model || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2');
   const apiKey = cfg.apiKey || '';
@@ -1067,6 +1124,14 @@ async function sendMessage(text) {
     inputEl.value = '';
     updateBangModeVisuals({ isBang: false });
     await runScratchpad(scratch, userText);
+    return;
+  }
+
+  // Check if LLM provider is configured before attempting AI chat turns
+  if (!isProviderConfigured(loadConfig())) {
+    openConfigModal();
+    statusBar.textContent = '○ Please configure an LLM provider in ⚙ Config before chatting';
+    statusBar.style.color = '#d29922';
     return;
   }
 
@@ -1703,25 +1768,6 @@ sendBtn.addEventListener('click', (e) => {
     e.preventDefault();
     requestStop();
   }
-});
-
-configProvider.addEventListener('change', () => {
-  updateConfigVisibility(configProvider.value);
-});
-
-configForm.addEventListener('submit', e => {
-  e.preventDefault();
-  const provider = configProvider.value;
-  const config = {
-    provider,
-    url: provider === 'openai' ? (configUrl.value.trim() || 'http://localhost:11434/v1') : '',
-    model: configModel.value.trim() || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2'),
-    apiKey: configKey.value.trim(),
-    contextWindow: configContextWindow.value.trim(), // T2: '' = auto (cloud lookup / fallback)
-  };
-  saveConfig(config);
-  document.getElementById('config-details').open = false;
-  bootAgent();
 });
 
 populateConfigForm();
