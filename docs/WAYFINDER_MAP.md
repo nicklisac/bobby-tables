@@ -93,8 +93,8 @@ graph TD
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T2,T3,T4,T5,T6,T7,T9,T10,T11,T13 done;
-    class T8,T12,T14,T15,T16,T17,T18,T19,T20,T21,T23,T24 frontier;
+    class T1,T2,T3,T4,T5,T6,T7,T9,T10,T11,T12,T13 done;
+    class T8,T14,T15,T16,T17,T18,T19,T20,T21,T23,T24 frontier;
     class T22 blocked;
 ```
 
@@ -194,10 +194,15 @@ graph TD
 
 ---
 
-### Ticket 8: DB Schema Inspector & View Exporter UI
+### Ticket 8: DB Schema Inspector, Table Stats & Interactive Data Explorer
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Open (Frontier)
-* **Question:** How should the left sidebar dynamically query `sqlite_master` to present table names, column types, row counts, and interactive preview modals, along with a "Save Query as View" button on chat bubbles?
+* **Status:** 🎯 Next Priority (Frontier) — queued 2026-08-15
+* **User Vision & Requirements (2026-08-15):**
+  * **Interactive Explorer Pane:** Replace the static table list placeholder in `#explorer-pane` with a dynamic, rich table/view explorer.
+  * **Live Table Statistics:** Clicking any table/view expands or reveals key stats: total row count, column definitions (`PRAGMA table_info`), primary keys, indexes, and schema DDL.
+  * **Scrollable Data Preview Window / Drawer:** Interactive scrollable data inspector to view and page/scroll through sample records directly from the sidebar.
+  * **Table Creation & Schema DDL Tools:** Ability to create new tables directly from the panel (`+ New Table` UI/DDL generator).
+  * **View Exporter:** "Save Query as View" shortcut from chat query results and scratchpad blocks into the database catalog.
 
 ---
 
@@ -245,11 +250,13 @@ graph TD
 
 ### Ticket 12: Dynamic Grid Canvas, Drag-to-Move, Resize & Chat Pinning
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Open (Frontier) — unblocked by T13 (T11's `.grid-cell` drop-zone anchors and T13's `materializeToolResult` are ready).
-* **Question (expanded 2026-08-15, user-confirmed):** How should the 3-pane workstation's right canvas support:
-  1. **Dynamic Expanding Canvas:** 3 fixed columns with vertically growing rows. The canvas maintains at least a 3-row blank buffer below the lowest occupied row (`max(row + row_span) + 3`), creating a smooth, slowly growing infinite canvas. Adding cards to a lower row automatically grows rows below it.
-  2. **Drag-to-Move & Drag-to-Resize with Reflow:** Card headers act as drag handles to reposition across cells; corner handles resize `col_span`/`row_span`. Overlapping cards push down (collision reflow) to avoid visual collisions. Coordinates/spans persist in SQLite `dashboard_cards (col, row, col_span, row_span)`.
-  3. **Chat-to-Grid Pinning:** HTML5 Drag-and-Drop on rendered chat assets (table bubbles recover SELECT from envelope / tool_calls; search/fetch bubbles invoke `materializeToolResult` $\rightarrow$ `addCard` with SELECT over the newly materialized table).
+* **Status:** ✅ Done — implemented & verified 2026-08-15
+* **Implemented Components:**
+  * `src/grid.js`: Dynamic row computation (`computeGridRows` guaranteeing at least 3 rows and 3 buffer rows below lowest occupied card), non-overlapping placement validation on unbounded vertical rows, push-down collision reflow engine (`computePushDownReflow`), and auto-packing.
+  * `src/grid-ui.js`: HTML5 Drag-and-Drop drop targets on all dynamic cells, card header drag handles (`type: 'move_card'`), bottom-right corner resize handles (`type: 'resize_card'`), and quick size cycling (`⛶`).
+  * `src/main.js`: Rendered chat assets (SQL tables, web searches, URL previews, materialized tables, scratchpad tables) wrapped with `.draggable-chat-asset` and draggable badges (`[ ⠿ Drag to Dashboard ]`). Search/URL drops automatically invoke `materializeToolResult` and pin a SELECT view card.
+  * `src/styles.css`: Dynamic grid scrollable canvas, drop-target hover highlight (`.grid-cell.drag-target-hover`), drag handle styling, resize handles, and chat asset pin badges.
+  * `docs/prototypes/ticket-12-grid-pinning-probe.mjs`: Verification probe testing dynamic row calculations, overlap detection, placement validation, free spot scanning, and push-down reflow.
 * **Design notes:** see Decisions So Far — "Cards Hold View Definitions" and "T13 Is the Shared Materialize Function".
 
 ---

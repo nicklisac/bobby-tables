@@ -24,9 +24,21 @@
 
 import { queryAll, execParams } from './schema.js';
 
-export const GRID_ROWS = 3;
 export const GRID_COLS = 3;
+export const MIN_GRID_ROWS = 3;
+export const BUFFER_ROWS = 3;
 export const CARD_ROW_CAP = 100; // rows kept per card render (bounds the DOM)
+
+/**
+ * Compute the total number of rows the grid should render.
+ * Always guarantees at least MIN_GRID_ROWS (3), and at least BUFFER_ROWS (3)
+ * empty rows below the lowest occupied row (infinite expanding canvas).
+ */
+export function computeGridRows(cards) {
+  if (!cards || !cards.length) return MIN_GRID_ROWS;
+  const maxOccupied = Math.max(0, ...cards.map(c => Number(c.row || 0) + Number(c.row_span || 1)));
+  return Math.max(MIN_GRID_ROWS, maxOccupied + BUFFER_ROWS);
+}
 
 // ── Read-only SQL enforcement ─────────────────────────────────────────
 
@@ -60,48 +72,150 @@ export function isReadOnlySql(sql) {
   return { ok: false, reason: `Only SELECT / WITH / EXPLAIN queries are allowed (got "${first}")` };
 }
 
-// ── Placement ─────────────────────────────────────────────────────────
+// ── Placement & Reflow ────────────────────────────────────────────────
 
 /**
- * Validate a placement against the fixed 3×3 grid and existing cards.
- * `cards` = rows shaped like { id, title, row, col, row_span, col_span }.
+ * Check if two card bounds overlap.
+ */
+export function doCardsOverlap(a, b) {
+  const aR = Number(a.row), aC = Number(a.col), aRS = Number(a.row_span || a.rowSpan || 1), aCS = Number(a.col_span || a.colSpan || 1);
+  const bR = Number(b.row), bC = Number(b.col), bRS = Number(b.row_span || b.rowSpan || 1), bCS = Number(b.col_span || b.colSpan || 1);
+  return aR < bR + bRS && bR < aR + aRS && aC < bC + bCS && bC < aC + aCS;
+}
+
+/**
+ * Validate a placement against 3 fixed columns and positive rows.
+ * `cards` = existing cards array.
  * `ignoreId` excludes one card (used when editing/moving that card itself).
+ * `allowOverlap` if true skips overlap check (e.g. when reflow will resolve it).
  * Returns { ok: true } or { ok: false, reason }.
  */
-export function validatePlacement(cards, row, col, rowSpan, colSpan, ignoreId = null) {
+export function validatePlacement(cards, row, col, rowSpan, colSpan, ignoreId = null, allowOverlap = false) {
   const r = Number(row), c = Number(col), rs = Number(rowSpan), cs = Number(colSpan);
   if (![r, c, rs, cs].every(n => Number.isInteger(n))) {
     return { ok: false, reason: 'Grid position/span must be integers' };
   }
-  if (r < 0 || r >= GRID_ROWS || c < 0 || c >= GRID_COLS) {
-    return { ok: false, reason: `Position out of bounds (grid is ${GRID_ROWS}×${GRID_COLS}, 0-based)` };
+  if (r < 0 || c < 0 || c >= GRID_COLS) {
+    return { ok: false, reason: `Column must be 0–${GRID_COLS - 1}, row must be >= 0` };
   }
-  if (rs < 1 || rs > GRID_ROWS || cs < 1 || cs > GRID_COLS) {
-    return { ok: false, reason: `Span out of bounds (1–${GRID_ROWS})` };
+  if (rs < 1 || cs < 1 || cs > GRID_COLS) {
+    return { ok: false, reason: `Column span must be 1–${GRID_COLS}, row span must be >= 1` };
   }
-  if (r + rs > GRID_ROWS) return { ok: false, reason: 'Card extends past the bottom edge' };
   if (c + cs > GRID_COLS) return { ok: false, reason: 'Card extends past the right edge' };
-  for (const card of cards) {
-    if (ignoreId != null && card.id === ignoreId) continue;
-    const overlaps =
-      r < card.row + card.row_span && card.row < r + rs &&
-      c < card.col + card.col_span && card.col < c + cs;
-    if (overlaps) return { ok: false, reason: `Overlaps card "${card.title}"` };
+  if (!allowOverlap) {
+    const target = { row: r, col: c, row_span: rs, col_span: cs };
+    for (const card of cards) {
+      if (ignoreId != null && card.id === ignoreId) continue;
+      if (doCardsOverlap(target, card)) {
+        return { ok: false, reason: `Overlaps card "${card.title}"` };
+      }
+    }
   }
   return { ok: true };
 }
 
 /**
- * Auto-pack: first free spot (scan order: row-major) that fits the span.
- * Returns { row, col } or null (grid full for that span).
+ * Compute push-down reflow when placing/moving a card.
+ * If targetCard overlaps any existing cards in `cards`, those cards are pushed
+ * down below targetCard. If those in turn overlap subsequent cards, the push-down
+ * cascades downwards until no overlaps remain.
+ *
+ * Returns a Map of cardId -> { row, col, row_span, col_span } for all displaced cards.
  */
-export function findFreeSpot(cards, rowSpan, colSpan) {
-  for (let r = 0; r + Number(rowSpan) <= GRID_ROWS; r++) {
-    for (let c = 0; c + Number(colSpan) <= GRID_COLS; c++) {
-      if (validatePlacement(cards, r, c, rowSpan, colSpan).ok) return { row: r, col: c };
+export function computePushDownReflow(cards, targetCard) {
+  const displaced = new Map();
+  // Working copy of card states
+  const workingCards = cards
+    .filter(c => targetCard.id == null || c.id !== targetCard.id)
+    .map(c => ({ ...c }));
+
+  // Queue of cards that have been placed/shifted and may displace others
+  const queue = [{
+    id: targetCard.id ?? -1,
+    row: Number(targetCard.row),
+    col: Number(targetCard.col),
+    row_span: Number(targetCard.row_span || targetCard.rowSpan || 1),
+    col_span: Number(targetCard.col_span || targetCard.colSpan || 1),
+  }];
+
+  while (queue.length > 0) {
+    const pusher = queue.shift();
+    for (const card of workingCards) {
+      if (card.id === pusher.id) continue;
+      if (doCardsOverlap(pusher, card)) {
+        const newRow = pusher.row + pusher.row_span;
+        if (card.row < newRow) {
+          card.row = newRow;
+          displaced.set(card.id, {
+            id: card.id,
+            row: card.row,
+            col: card.col,
+            row_span: card.row_span,
+            col_span: card.col_span,
+          });
+          queue.push(card);
+        }
+      }
     }
   }
-  return null;
+
+  return displaced;
+}
+
+/**
+ * Auto-heal and sanitize card layout: checks all cards for out-of-bounds
+ * coordinates or overlapping cells, and computes push-down shifts so every
+ * card is guaranteed a unique, valid non-overlapping position.
+ */
+export function sanitizeCardLayout(cards) {
+  if (!cards || !cards.length) return [];
+  const sorted = [...cards].sort((a, b) => a.row - b.row || a.col - b.col || a.id - b.id);
+  const placed = [];
+  const changes = [];
+
+  for (const card of sorted) {
+    const colSpan = Math.max(1, Math.min(GRID_COLS, Number(card.col_span || 1)));
+    const rowSpan = Math.max(1, Number(card.row_span || 1));
+    let col = Math.max(0, Math.min(Number(card.col || 0), GRID_COLS - colSpan));
+    let row = Math.max(0, Number(card.row || 0));
+
+    let overlaps = true;
+    while (overlaps) {
+      overlaps = false;
+      const target = { row, col, row_span: rowSpan, col_span: colSpan };
+      for (const p of placed) {
+        if (doCardsOverlap(target, p)) {
+          row = p.row + p.row_span;
+          overlaps = true;
+          break;
+        }
+      }
+    }
+
+    if (row !== card.row || col !== card.col || colSpan !== card.col_span || rowSpan !== card.row_span) {
+      changes.push({ id: card.id, row, col, row_span: rowSpan, col_span: colSpan });
+    }
+
+    placed.push({ ...card, row, col, row_span: rowSpan, col_span: colSpan });
+  }
+
+  return changes;
+}
+
+/**
+ * Auto-pack: first free spot (scan order: row-major) that fits the span.
+ * Returns { row, col } (always succeeds on an infinite vertical grid).
+ */
+export function findFreeSpot(cards, rowSpan, colSpan) {
+  const maxRows = computeGridRows(cards) + 10;
+  for (let r = 0; r < maxRows; r++) {
+    for (let c = 0; c + Number(colSpan) <= GRID_COLS; c++) {
+      if (validatePlacement(cards, r, c, rowSpan, colSpan, null, false).ok) {
+        return { row: r, col: c };
+      }
+    }
+  }
+  return { row: computeGridRows(cards), col: 0 };
 }
 
 // ── CRUD ──────────────────────────────────────────────────────────────
@@ -119,27 +233,41 @@ export async function listCards(sqlite3, db) {
 
 /**
  * Add a card. `row`/`col` may be omitted (or null) → auto-pack the first
- * fitting spot. Throws on validation failure (bad SQL, bounds, overlap,
- * no room). Returns the new card row.
+ * fitting spot. If reflow is true (default true when coordinates given),
+ * any overlapping cards will be pushed down.
  */
-export async function addCard(sqlite3, db, { title, sql, row = null, col = null, rowSpan = 1, colSpan = 1 }) {
+export async function addCard(sqlite3, db, { title, sql, row = null, col = null, rowSpan = 1, colSpan = 1, reflow = true }) {
   if (!title || !String(title).trim()) throw new Error('Card title is required');
   const ro = isReadOnlySql(sql);
   if (!ro.ok) throw new Error(ro.reason);
   const cards = await listCards(sqlite3, db);
+  const colSpanClamped = Math.max(1, Math.min(GRID_COLS, Number(colSpan || 1)));
+  const rowSpanClamped = Math.max(1, Number(rowSpan || 1));
   let pos;
   if (row == null || col == null) {
-    pos = findFreeSpot(cards, rowSpan, colSpan);
-    if (!pos) throw new Error(`No room for a ${rowSpan}×${colSpan} card — resize or delete a card first`);
+    pos = findFreeSpot(cards, rowSpanClamped, colSpanClamped);
   } else {
-    pos = { row: Number(row), col: Number(col) };
+    const clampedCol = Math.max(0, Math.min(Number(col), GRID_COLS - colSpanClamped));
+    const clampedRow = Math.max(0, Number(row));
+    pos = { row: clampedRow, col: clampedCol };
   }
-  const v = validatePlacement(cards, pos.row, pos.col, rowSpan, colSpan);
+  const v = validatePlacement(cards, pos.row, pos.col, rowSpanClamped, colSpanClamped, null, reflow);
   if (!v.ok) throw new Error(v.reason);
+
+  if (reflow) {
+    const targetCard = { id: null, row: pos.row, col: pos.col, row_span: rowSpanClamped, col_span: colSpanClamped };
+    const displaced = computePushDownReflow(cards, targetCard);
+    for (const [dispId, disp] of displaced.entries()) {
+      await execParams(sqlite3, db, `
+        UPDATE dashboard_cards SET row = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+      `, [disp.row, dispId]);
+    }
+  }
+
   await execParams(sqlite3, db, `
     INSERT INTO dashboard_cards (title, sql, row, col, row_span, col_span)
     VALUES (?, ?, ?, ?, ?, ?)
-  `, [String(title).trim(), String(sql).trim(), pos.row, pos.col, Number(rowSpan), Number(colSpan)]);
+  `, [String(title).trim(), String(sql).trim(), pos.row, pos.col, rowSpanClamped, colSpanClamped]);
   const rows = await queryAll(sqlite3, db, 'SELECT last_insert_rowid()');
   const id = rows[0][0];
   const all = await listCards(sqlite3, db);
@@ -147,11 +275,10 @@ export async function addCard(sqlite3, db, { title, sql, row = null, col = null,
 }
 
 /**
- * Update a card (title and/or sql and/or placement). All provided fields are
- * validated together against the other cards (self excluded). Throws on
- * validation failure. Returns the updated card row.
+ * Update a card (title and/or sql and/or placement).
+ * If reflow is true (default true), overlapping cards are shifted down.
  */
-export async function updateCard(sqlite3, db, id, patch = {}) {
+export async function updateCard(sqlite3, db, id, patch = {}, { reflow = true } = {}) {
   const cards = await listCards(sqlite3, db);
   const existing = cards.find(c => c.id === id);
   if (!existing) throw new Error(`Card ${id} not found`);
@@ -159,19 +286,36 @@ export async function updateCard(sqlite3, db, id, patch = {}) {
   // Spans accept camelCase (rowSpan) or the SQLite column name (row_span).
   const rowSpanPatch = patch.rowSpan ?? patch.row_span;
   const colSpanPatch = patch.colSpan ?? patch.col_span;
+  const targetColSpan = Math.max(1, Math.min(GRID_COLS, Number(colSpanPatch !== undefined ? colSpanPatch : existing.col_span)));
+  const targetRowSpan = Math.max(1, Number(rowSpanPatch !== undefined ? rowSpanPatch : existing.row_span));
+  const rawCol = patch.col !== undefined ? Number(patch.col) : existing.col;
+  const rawRow = patch.row !== undefined ? Number(patch.row) : existing.row;
+  const targetCol = Math.max(0, Math.min(rawCol, GRID_COLS - targetColSpan));
+  const targetRow = Math.max(0, rawRow);
+
   const next = {
     title: patch.title !== undefined ? String(patch.title).trim() : existing.title,
     sql: patch.sql !== undefined ? String(patch.sql).trim() : existing.sql,
-    row: patch.row !== undefined ? Number(patch.row) : existing.row,
-    col: patch.col !== undefined ? Number(patch.col) : existing.col,
-    row_span: rowSpanPatch !== undefined ? Number(rowSpanPatch) : existing.row_span,
-    col_span: colSpanPatch !== undefined ? Number(colSpanPatch) : existing.col_span,
+    row: targetRow,
+    col: targetCol,
+    row_span: targetRowSpan,
+    col_span: targetColSpan,
   };
   if (!next.title) throw new Error('Card title is required');
   const ro = isReadOnlySql(next.sql);
   if (!ro.ok) throw new Error(ro.reason);
-  const v = validatePlacement(cards, next.row, next.col, next.row_span, next.col_span, id);
+  const v = validatePlacement(cards, next.row, next.col, next.row_span, next.col_span, id, reflow);
   if (!v.ok) throw new Error(v.reason);
+
+  if (reflow) {
+    const targetCard = { id, row: next.row, col: next.col, row_span: next.row_span, col_span: next.col_span };
+    const displaced = computePushDownReflow(cards, targetCard);
+    for (const [dispId, disp] of displaced.entries()) {
+      await execParams(sqlite3, db, `
+        UPDATE dashboard_cards SET row = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+      `, [disp.row, dispId]);
+    }
+  }
 
   await execParams(sqlite3, db, `
     UPDATE dashboard_cards

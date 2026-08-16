@@ -264,28 +264,53 @@ body.pane-resizing .pane-divider {
   color: var(--accent);
 }
 
-/* The 3×3 grid */
+/* The Dynamic Reactive Canvas */
 
 .dashboard-grid {
   flex: 1;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  grid-template-rows: repeat(3, 1fr);
   gap: 8px;
   padding: 10px;
   min-height: 0;
+  overflow-y: auto;
+  align-content: start;
 }
 
 /* Drop-zone anchors (T12 attaches drag-and-drop handlers to these). */
 .grid-cell {
   border: 1px dashed rgba(48, 54, 61, 0.6);
   border-radius: 6px;
-  min-height: 0;
+  min-height: 180px;
+  transition: all 0.15s ease-in-out;
+}
+
+.grid-cell.drag-target-hover {
+  border-color: #58a6ff;
+  background: rgba(88, 166, 255, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.4);
+}
+
+.grid-cell.drag-target-invalid {
+  border-color: #f85149;
+  background: rgba(248, 81, 73, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(248, 81, 73, 0.4);
+}
+
+/* When dragging across grid, cards become semi-transparent to reveal the grid structure */
+.dashboard-grid.is-dragging .dash-card {
+  opacity: 0.65;
+  transition: opacity 0.15s ease-in-out;
+}
+
+.dashboard-grid.is-dragging .dash-card.is-being-dragged {
+  opacity: 0.3;
+  border: 1px dashed var(--accent);
 }
 
 .grid-empty {
   grid-column: 1 / -1;
-  grid-row: 1 / -1;
+  grid-row: 1 / span 3;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -299,15 +324,17 @@ body.pane-resizing .pane-divider {
 /* Dashboard cards */
 
 .dash-card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  min-height: 180px;
   min-width: 0;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
   animation: fadeIn 0.2s ease-out;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
 }
 
 .dash-card.card-live-flash {
@@ -328,6 +355,25 @@ body.pane-resizing .pane-divider {
   border-bottom: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.02);
   flex-shrink: 0;
+  cursor: grab;
+  user-select: none;
+}
+
+.dash-card-header:active {
+  cursor: grabbing;
+}
+
+.dash-card-drag-handle {
+  cursor: grab;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin-right: 0.25rem;
+  opacity: 0.6;
+}
+
+.dash-card-header:hover .dash-card-drag-handle {
+  opacity: 1;
+  color: var(--accent);
 }
 
 .dash-card-title {
@@ -344,6 +390,63 @@ body.pane-resizing .pane-divider {
   display: flex;
   gap: 0.15rem;
   flex-shrink: 0;
+}
+
+.card-resize-handle {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 16px;
+  height: 16px;
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.4;
+  cursor: nwse-resize;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 1px;
+  user-select: none;
+  transition: opacity 0.15s;
+}
+
+.dash-card:hover .card-resize-handle {
+  opacity: 0.9;
+  color: var(--accent);
+}
+
+/* Draggable Chat Assets (T12) */
+.draggable-chat-asset {
+  position: relative;
+  cursor: grab;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.draggable-chat-asset:active {
+  cursor: grabbing;
+}
+
+.drag-pin-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
+  margin-bottom: 0.35rem;
+  cursor: grab;
+  user-select: none;
+  transition: all 0.15s;
+}
+
+.draggable-chat-asset:hover .drag-pin-badge {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.08);
 }
 
 .card-btn {

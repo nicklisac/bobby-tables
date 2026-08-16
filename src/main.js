@@ -192,7 +192,7 @@ function renderTable(columns, values) {
   return html;
 }
 
-function renderToolContent(content) {
+function renderToolContent(content, toolCallId = null) {
   if (content === null || content === undefined || content === '') return '<em>[empty]</em>';
   let parsed = content;
   if (typeof content === 'string') {
@@ -205,18 +205,31 @@ function renderToolContent(content) {
 
   // 1. SQL Result Table: array format from run_dynamic_sql: [{ columns: [...], values: [...] }]
   if (Array.isArray(parsed) && parsed[0]?.columns && parsed[0]?.values) {
-    return renderTable(parsed[0].columns, parsed[0].values);
+    return `
+      <div class="draggable-chat-asset" draggable="true" data-asset-type="table" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-title="Query Result">
+        <div class="drag-pin-badge" title="Drag to Dashboard to pin as card">⠿ Drag to Dashboard</div>
+        ${renderTable(parsed[0].columns, parsed[0].values)}
+      </div>
+    `;
   }
 
   // 1b. Single object table format: { columns: [...], values: [...] }
   if (parsed && parsed.columns && parsed.values) {
-    return renderTable(parsed.columns, parsed.values);
+    return `
+      <div class="draggable-chat-asset" draggable="true" data-asset-type="table" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-title="Query Result">
+        <div class="drag-pin-badge" title="Drag to Dashboard to pin as card">⠿ Drag to Dashboard</div>
+        ${renderTable(parsed.columns, parsed.values)}
+      </div>
+    `;
   }
 
   // 2. Search web results: { query: '...', results: [{ title, url, snippet }] }
   if (parsed && Array.isArray(parsed.results)) {
     if (!parsed.results.length) return '<em>(no search results found)</em>';
-    let html = '<div class="search-results-list">';
+    let html = `
+      <div class="draggable-chat-asset" draggable="true" data-asset-type="search_web" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-title="Search: ${escapeHtml(parsed.query || 'Results')}">
+        <div class="drag-pin-badge" title="Drag to Dashboard to materialize & pin">⠿ Drag to Dashboard</div>
+        <div class="search-results-list">`;
     parsed.results.forEach(r => {
       html += `
         <div class="search-result-item">
@@ -225,19 +238,22 @@ function renderToolContent(content) {
         </div>
       `;
     });
-    html += '</div>';
+    html += '</div></div>';
     return html;
   }
 
   // 3. Fetch URL preview: { url, status, title, content }
   if (parsed && parsed.url && (parsed.content !== undefined || parsed.title !== undefined)) {
-    let html = '<div class="fetch-url-preview">';
+    let html = `
+      <div class="draggable-chat-asset" draggable="true" data-asset-type="fetch_url" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-title="Page: ${escapeHtml(parsed.title || parsed.url)}">
+        <div class="drag-pin-badge" title="Drag to Dashboard to materialize & pin">⠿ Drag to Dashboard</div>
+        <div class="fetch-url-preview">`;
     html += `<div class="fetch-url-title"><strong>${escapeHtml(parsed.title || 'Fetched Page')}</strong> &middot; <a href="${escapeHtml(parsed.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(parsed.url)}</a></div>`;
     if (parsed.content) {
       const preview = parsed.content.length > 600 ? parsed.content.slice(0, 600) + '…' : parsed.content;
       html += `<div class="fetch-url-body">${escapeHtml(preview)}</div>`;
     }
-    html += '</div>';
+    html += '</div></div>';
     return html;
   }
 
@@ -245,9 +261,12 @@ function renderToolContent(content) {
   if (parsed && parsed.materialized === true) {
     const colList = (parsed.columns || []).map(c => `<code>${escapeHtml(c.name)}</code> <span style="opacity: 0.7; font-size: 0.85em;">${escapeHtml(c.type)}</span>`).join(', ');
     return `
-      <div class="materialize-preview" style="padding: 4px 0;">
-        <div style="font-weight: 600; color: #58a6ff; margin-bottom: 4px;">✨ Materialized table <code>${escapeHtml(parsed.table)}</code> (${escapeHtml(String(parsed.row_count))} rows)</div>
-        <div style="font-size: 0.88em; color: #8b949e;">Columns: ${colList}</div>
+      <div class="draggable-chat-asset" draggable="true" data-asset-type="table" data-sql="SELECT * FROM &quot;${escapeHtml(parsed.table)}&quot;" data-title="${escapeHtml(parsed.table)}">
+        <div class="drag-pin-badge" title="Drag to Dashboard to pin as card">⠿ Drag to Dashboard</div>
+        <div class="materialize-preview" style="padding: 4px 0;">
+          <div style="font-weight: 600; color: #58a6ff; margin-bottom: 4px;">✨ Materialized table <code>${escapeHtml(parsed.table)}</code> (${escapeHtml(String(parsed.row_count))} rows)</div>
+          <div style="font-size: 0.88em; color: #8b949e;">Columns: ${colList}</div>
+        </div>
       </div>
     `;
   }
@@ -278,7 +297,9 @@ const SCRATCH_ROW_CAP = 200; // rows kept per result set (bounds LLM context)
 
 function renderScratchpadResult(env) {
   const privateCmd = (env.bangs || 1) >= 2;
-  let html = `<div class="scratchpad-header">` +
+  let html = `<div class="draggable-chat-asset" draggable="true" data-asset-type="table" data-sql="${escapeHtml(env.sql || '')}" data-title="${escapeHtml(env.sql?.slice(0, 40) || 'Scratchpad Query')}">` +
+    `<div class="drag-pin-badge" title="Drag to Dashboard to pin as card">⠿ Drag to Dashboard</div>` +
+    `<div class="scratchpad-header">` +
     `<span class="scratchpad-badge" title="${privateCmd ? 'Private — not in agent context' : 'Shared — agent sees this in context'}">${privateCmd ? '💥' : '⚡'}</span>` +
     `<code class="scratchpad-sql" title="${escapeHtml(env.sql || '')}">${escapeHtml(env.sql || '')}</code>` +
     `</div>`;
@@ -303,6 +324,7 @@ function renderScratchpadResult(env) {
   if (env.ms !== undefined) {
     html += `<div class="scratchpad-footer">${env.ms} ms</div>`;
   }
+  html += `</div>`;
   return html;
 }
 
@@ -359,7 +381,7 @@ async function renderMessages() {
       div.appendChild(label);
 
       const contentDiv = document.createElement('div');
-      contentDiv.innerHTML = renderToolContent(content);
+      contentDiv.innerHTML = renderToolContent(content, toolCallId);
       div.appendChild(contentDiv);
     } else {
       // T9: scratchpad result rows are assistant rows carrying a JSON
@@ -518,7 +540,7 @@ function handleAgentEvent(event) {
       div.appendChild(label);
 
       const contentDiv = document.createElement('div');
-      contentDiv.innerHTML = renderToolContent(event.result || (event.error ? { error: event.error } : {}));
+      contentDiv.innerHTML = renderToolContent(event.result || (event.error ? { error: event.error } : {}), event.toolCallId || event.tool_call_id);
       div.appendChild(contentDiv);
 
       messagesEl.appendChild(div);
@@ -580,6 +602,30 @@ function startEventStreamListener() {
       console.warn('[main] Event stream reader error:', err);
     }
   })();
+
+  // T12: HTML5 drag-and-drop chat assets to dashboard grid
+  document.addEventListener('dragstart', (e) => {
+    const asset = e.target.closest('.draggable-chat-asset');
+    if (!asset) return;
+    const assetData = {
+      type: asset.dataset.assetType,
+      title: asset.dataset.title || 'Pinned Asset',
+      sql: asset.dataset.sql || null,
+      toolCallId: asset.dataset.toolCallId || null,
+      colSpan: asset.dataset.assetType === 'table' ? 1 : 2,
+      rowSpan: 1,
+    };
+    e.dataTransfer.setData('application/json', JSON.stringify(assetData));
+    e.dataTransfer.effectAllowed = 'copyMove';
+    document.getElementById('dashboard-grid')?.classList.add('is-dragging');
+  });
+
+  document.addEventListener('dragend', () => {
+    document.getElementById('dashboard-grid')?.classList.remove('is-dragging');
+    document.querySelectorAll('.grid-cell.drag-target-hover, .grid-cell.drag-target-invalid').forEach(el => {
+      el.classList.remove('drag-target-hover', 'drag-target-invalid');
+    });
+  });
 }
 
 // ── Processing State ────────────────────────────────────────────────
