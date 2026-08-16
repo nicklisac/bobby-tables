@@ -415,22 +415,28 @@ graph TD
 
 ---
 
-### Ticket 26: Codebase Compaction, Module Splitting & Boilerplate Reduction
+### Ticket 26: Codebase Compaction, Module Splitting & SQL-Native Migration
 * **Label:** `wayfinder:task` (AFK/HITL)
 * **Status:** Open (Frontier)
-* **Question:** How should we refactor shared utilities, deduplicate boilerplate, and modularize the monolithic `src/main.js` (~1,870 lines) to make the codebase leaner, faster to navigate, and maintainable?
+* **Question:** How should we refactor shared utilities, deduplicate boilerplate, modularize `src/main.js` (~1,870 lines), and replace imperative JavaScript loops with native SQLite views and table-valued functions?
 * **Scope & Objectives:**
-  * **1. Shared Utility Module (`src/utils.js`):**
+  * **1. SQL-Native Subsystem Migrations ("Push Everything into SQLite"):**
+    * **Schema Catalog View (`v_schema_catalog`):** Replace manual JS loops over `sqlite_master` in `src/explorer.js` with SQLite's table-valued functions (`pragma_table_info`, `pragma_foreign_key_list`) and `json_group_array` to fetch full schemas, PKs, and FKs in 1 query.
+    * **Context Token & Boundary Metrics (`v_turn_boundaries`):** Replace manual imperative token walks in `src/compaction.js` with window functions (`SUM() OVER()`, `LAG()`, `LEAD()`) to identify pair-safe watermarks and cumulative token counts directly in SQL.
+    * **Tool Query Extraction View (`v_tool_call_queries`):** Replace JS `JSON.parse` loops over `tool_calls` in `src/main.js` with native SQLite `json_extract(tool_calls, '$[0].function.arguments.query')`.
+    * **Reactive Grid Matrix View (`v_grid_matrix`):** Replace 2D JS array collision & empty-slot loops in `src/grid.js` with a recursive CTE Cartesian product matrix (`rows CROSS JOIN cols LEFT JOIN dashboard_cards`).
+    * **Session Aggregations View (`v_session_summary`):** Replace async per-session message/token counting loops with a unified group-by SQL view.
+  * **2. Shared Utility Module (`src/utils.js`):**
     * Centralize duplicated utility functions across modules:
       * `escapeHtml()` (currently duplicated in `main.js`, `explorer-ui.js`, `grid-ui.js`, `sql-autocomplete.js`).
       * `quoteIdent()` & `queryAll()` / `execParams()` (standardize usage across `cartridge.js`, `schema.js`, etc.).
       * Unified statement iteration helpers (`queryRows`, `queryValue`, `queryScalar`) to eliminate ~40 repetitive `while (await sqlite3.step(stmt) === SQLITE_ROW)` loops.
-  * **2. Modularize `src/main.js` Subsystems:**
+  * **3. Modularize `src/main.js` Subsystems:**
     * Extract **Direct SQL Scratchpad & Parser** into `src/scratchpad.js` (`classifyStatement`, `captureDropPreImage`, `execScratchSql`, `runScratchpad`, and scratchpad rewind).
     * Extract **Chat & Tool Bubble Rendering** into `src/chat-render.js` (`renderToolContent`, `renderScratchpadResult`, markdown formatting, and welcome onboarding cards).
-  * **3. CSS Consolidation in `src/styles.css`:**
+  * **4. CSS Consolidation in `src/styles.css`:**
     * Consolidate redundant selector chains, repetitive padding/margin patterns, and harmonize shared card/modal/badge utilities.
-  * **4. Comment & Scaffolding Compaction:**
+  * **5. Comment & Scaffolding Compaction:**
     * Streamline historical ticket scratch commentary while rigorously preserving key architectural invariants (JSPI fiber suspension, savepoint protocols, and IDB race-condition guards).
 
 ---
