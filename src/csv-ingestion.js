@@ -7,6 +7,7 @@
  */
 
 import Papa from 'papaparse';
+import { isProtectedTable } from './schema.js';
 
 /**
  * Escape an identifier (table name or column name) for SQLite using double quotes.
@@ -217,7 +218,10 @@ export async function parseCsvWithSchema(file, sampleSize = 1000) {
 export async function ingestCsvToSqlite(sqlite3, db, file, tableName = null, onProgress = null) {
   // Step 1: Infer schema from sample rows
   const schema = await parseCsvWithSchema(file);
-  const targetTableName = tableName ? sanitizeTableName(tableName) : schema.tableName;
+  let targetTableName = tableName ? sanitizeTableName(tableName) : schema.tableName;
+  if (isProtectedTable(targetTableName)) {
+    targetTableName = `imported_${targetTableName}`;
+  }
   const { columns } = schema;
 
   if (!columns || columns.length === 0) {

@@ -582,7 +582,7 @@ export async function getSessionTokenUsage(sqlite3, db, sessionId) {
 }
 
 // =====================================================================
-// T3: Turn Changeset Capture, Rewind Support & Boot Repair
+// T3 & T21: Turn Changeset Capture, Rewind Support & Protected-Tables Boundary
 // =====================================================================
 
 const SQLITE_ROW = 100;
@@ -592,18 +592,207 @@ export function quoteIdent(name) {
   return '"' + String(name).replace(/"/g, '""') + '"';
 }
 
-/** Internal tables that are agent state / audit log / the changeset machinery
- *  itself and must NEVER be captured for rewind. Everything else in
- *  sqlite_master is a data table subject to rewind. */
-const INTERNAL_TABLES = new Set([
-  'messages', 'sessions', 'session_context', 'system_config', 'tools',
-  'turn_changesets', 'turn_ddl_log', 'compactions',
+/**
+ * Internal tables that are agent state / audit log / UI state / the changeset
+ * machinery itself and must NEVER be captured for rewind, dropped, or
+ * corrupted by unauthorized DML.
+ */
+export const INTERNAL_TABLES = new Set([
+  'messages',
+  'sessions',
+  'session_context',
+  'system_config',
+  'tools',
+  'turn_changesets',
+  'turn_ddl_log',
+  'compactions',
   'dashboard_cards', // T11: grid = UI state, not data state — no capture triggers,
                      // never rewound, and no data_change events for card CRUD
 ]);
 
+const INTERNAL_TABLES_LOWER = new Set(
+  Array.from(INTERNAL_TABLES).map(t => t.toLowerCase())
+);
+
+// Virtual table shadow table patterns (explicit fts/vec/vtab naming)
+const EXPLICIT_SHADOW_REGEX = /^(?:(?:fts\d*|vec\d*|rtree).*|.*_(?:fts\d*|vec\d*|vtab))_(?:data|idx|content|docsize|config|segments|segdir|rowids|chunks|index)$/i;
+
+/**
+ * Check if a table or view name is a protected system table, internal table,
+ * or virtual shadow table.
+ *
+ * @param {string} name - Table or view name
+ * @param {Set<string>} [virtualTableParents] - Optional set of virtual table base names
+ * @returns {boolean}
+ */
+export function isProtectedTable(name, virtualTableParents = null) {
+  if (!name || typeof name !== 'string') return false;
+  const lower = name.trim().toLowerCase();
+  if (INTERNAL_TABLES_LOWER.has(lower)) return true;
+  if (lower.startsWith('sqlite_')) return true;
+  if (EXPLICIT_SHADOW_REGEX.test(lower)) return true;
+  if (virtualTableParents && virtualTableParents.size > 0) {
+    for (const parent of virtualTableParents) {
+      if (lower.startsWith(parent.toLowerCase() + '_')) {
+        const suffix = lower.slice(parent.length + 1);
+        if (/^(data|idx|content|docsize|config|segments|segdir|rowids|chunks|index)$/i.test(suffix)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Fetch all virtual table names in the database.
+ */
+export async function getVirtualTableParents(sqlite3, db) {
+  try {
+    const rows = await queryAll(sqlite3, db, `
+      SELECT name FROM sqlite_master WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%'
+    `);
+    return new Set(rows.map(([n]) => n.toLowerCase()));
+  } catch {
+    return new Set();
+  }
+}
+
+/** Backward-compatibility alias for isProtectedTable */
 export function isInternalTable(name) {
-  return INTERNAL_TABLES.has(name) || name.startsWith('sqlite_');
+  return isProtectedTable(name);
+}
+
+/**
+ * Strip SQL comments (-- and /* * /) and string literals ('...') to make
+ * structural syntax inspection and target extraction safe.
+ *
+ * @param {string} sql - Raw SQL text
+ * @returns {string} Cleaned SQL with whitespace preserving structure
+ */
+export function stripSqlCommentsAndStrings(sql) {
+  if (!sql || typeof sql !== 'string') return '';
+  let out = '';
+  let i = 0;
+  const len = sql.length;
+  while (i < len) {
+    // Line comment
+    if (sql[i] === '-' && sql[i + 1] === '-') {
+      i += 2;
+      while (i < len && sql[i] !== '\n' && sql[i] !== '\r') i++;
+      out += ' ';
+      continue;
+    }
+    // Block comment
+    if (sql[i] === '/' && sql[i + 1] === '*') {
+      i += 2;
+      while (i < len && !(sql[i] === '*' && sql[i + 1] === '/')) i++;
+      i += 2;
+      out += ' ';
+      continue;
+    }
+    // String literal '...'
+    if (sql[i] === "'") {
+      i++;
+      while (i < len) {
+        if (sql[i] === "'" && sql[i + 1] === "'") {
+          i += 2;
+        } else if (sql[i] === "'") {
+          i++;
+          break;
+        } else {
+          i++;
+        }
+      }
+      out += " '' ";
+      continue;
+    }
+    out += sql[i];
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Unquote a SQL identifier (e.g. "my_table" -> my_table, `col` -> col, [tbl] -> tbl).
+ *
+ * @param {string} name - Identifier text
+ * @returns {string} Unquoted identifier
+ */
+export function unquoteIdentifier(name) {
+  if (!name || typeof name !== 'string') return '';
+  const s = name.trim();
+  if ((s.startsWith('"') && s.endsWith('"')) ||
+      (s.startsWith('`') && s.endsWith('`')) ||
+      (s.startsWith('[') && s.endsWith(']'))) {
+    return s.slice(1, -1).replace(/""/g, '"').replace(/``/g, '`');
+  }
+  return s;
+}
+
+/**
+ * Extract target table names and operation types from a SQL query string.
+ * Supports INSERT, REPLACE, UPDATE, DELETE, CREATE, DROP, ALTER, and WITH statements.
+ *
+ * @param {string} sql - SQL query string
+ * @returns {Array<{ name: string, operation: 'dml'|'ddl'|'other', verb: string }>}
+ */
+export function extractTargetTables(sql) {
+  const stripped = stripSqlCommentsAndStrings(sql);
+  const statements = stripped.split(';').map(s => s.trim()).filter(Boolean);
+  const targets = [];
+
+  const identPattern = '(?:"[^"]+"|\`[^\`]+\`|\\[[^\\]]+\\]|[a-zA-Z_][a-zA-Z0-9_]*)';
+  const schemaIdentPattern = `(?:${identPattern}\\.)?(${identPattern})`;
+
+  for (const stmt of statements) {
+    const s = stmt.trim();
+    if (!s) continue;
+
+    // DDL: CREATE TABLE / VIEW / INDEX
+    let m = s.match(new RegExp(`^CREATE\\s+(?:TEMP(?:ORARY)?\\s+)?(?:UNIQUE\\s+)?(?:TABLE|VIEW|INDEX)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${schemaIdentPattern}`, 'i'));
+    if (m) {
+      targets.push({ name: unquoteIdentifier(m[1]), operation: 'ddl', verb: 'CREATE' });
+      continue;
+    }
+
+    // DDL: DROP TABLE / VIEW / INDEX
+    m = s.match(new RegExp(`^DROP\\s+(?:TABLE|VIEW|INDEX)\\s+(?:IF\\s+EXISTS\\s+)?${schemaIdentPattern}`, 'i'));
+    if (m) {
+      targets.push({ name: unquoteIdentifier(m[1]), operation: 'ddl', verb: 'DROP' });
+      continue;
+    }
+
+    // DDL: ALTER TABLE
+    m = s.match(new RegExp(`^ALTER\\s+TABLE\\s+${schemaIdentPattern}`, 'i'));
+    if (m) {
+      targets.push({ name: unquoteIdentifier(m[1]), operation: 'ddl', verb: 'ALTER' });
+      continue;
+    }
+
+    // DML: INSERT / REPLACE INTO
+    m = s.match(new RegExp(`\\b(?:INSERT(?:\\s+OR\\s+(?:REPLACE|IGNORE|ROLLBACK|ABORT|FAIL))?|REPLACE)\\s+INTO\\s+${schemaIdentPattern}`, 'i'));
+    if (m) {
+      targets.push({ name: unquoteIdentifier(m[1]), operation: 'dml', verb: 'INSERT' });
+      continue;
+    }
+
+    // DML: UPDATE
+    m = s.match(new RegExp(`\\bUPDATE(?:\\s+OR\\s+(?:REPLACE|IGNORE|ROLLBACK|ABORT|FAIL))?\\s+${schemaIdentPattern}`, 'i'));
+    if (m) {
+      targets.push({ name: unquoteIdentifier(m[1]), operation: 'dml', verb: 'UPDATE' });
+      continue;
+    }
+
+    // DML: DELETE FROM
+    m = s.match(new RegExp(`\\bDELETE\\s+FROM\\s+${schemaIdentPattern}`, 'i'));
+    if (m) {
+      targets.push({ name: unquoteIdentifier(m[1]), operation: 'dml', verb: 'DELETE' });
+      continue;
+    }
+  }
+
+  return targets;
 }
 
 /** Execute a (possibly multi-statement) SQL string with optional bind params. */
@@ -633,7 +822,7 @@ export async function queryAll(sqlite3, db, sql, params = []) {
  * PRAGMA table_info so the triggers work for any table shape.
  */
 export async function ensureCaptureTriggers(sqlite3, db, tableName) {
-  if (isInternalTable(tableName)) return;
+  if (isProtectedTable(tableName)) return;
 
   const cols = [];
   for await (const stmt of sqlite3.statements(db, `PRAGMA table_info(${quoteIdent(tableName)})`)) {
@@ -689,22 +878,57 @@ export async function ensureCaptureTriggers(sqlite3, db, tableName) {
  * boot and after any table creation (CSV ingestion, agent DDL).
  */
 export async function sweepCaptureTriggers(sqlite3, db) {
+  const vParents = await getVirtualTableParents(sqlite3, db);
   const tables = await queryAll(sqlite3, db,
     `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`);
   for (const [name] of tables) {
-    if (isInternalTable(name)) {
-      // Internal tables must have NO capture triggers. Drop any stale ones —
-      // a table can become internal AFTER triggers were attached (T11
-      // dashboard_cards hit exactly this: it was created, a boot attached
-      // capture triggers before it was added to INTERNAL_TABLES, and card
-      // CRUD was being captured into turn_changesets + rewound). Sweeping the
-      // drop here keeps internal tables trigger-free on every boot.
+    if (isProtectedTable(name, vParents)) {
+      // Protected and internal tables must have NO capture triggers. Drop any stale ones.
       await execParams(sqlite3, db, `DROP TRIGGER IF EXISTS cap_${name}_ins`);
       await execParams(sqlite3, db, `DROP TRIGGER IF EXISTS cap_${name}_upd`);
       await execParams(sqlite3, db, `DROP TRIGGER IF EXISTS cap_${name}_del`);
       continue;
     }
     await ensureCaptureTriggers(sqlite3, db, name);
+  }
+}
+
+/**
+ * T21: Boot-time invariant assertion:
+ * 1. Zero capture triggers (cap_%_ins, cap_%_upd, cap_%_del) exist on ANY protected table.
+ * 2. Every non-protected user data table has the 3 required capture triggers.
+ *
+ * Throws an error on invariant violation.
+ */
+export async function assertProtectedTablesInvariant(sqlite3, db) {
+  const vParents = await getVirtualTableParents(sqlite3, db);
+
+  // 1. Check all triggers on protected tables
+  const triggerRows = await queryAll(sqlite3, db, `
+    SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'cap_%'
+  `);
+  for (const [trigName, tblName] of triggerRows) {
+    if (isProtectedTable(tblName, vParents)) {
+      throw new Error(`[invariant violation] Stale capture trigger "${trigName}" found on protected table "${tblName}".`);
+    }
+  }
+
+  // 2. Check all user data tables have capture triggers
+  const tableRows = await queryAll(sqlite3, db, `
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+  `);
+  for (const [tblName] of tableRows) {
+    if (isProtectedTable(tblName, vParents)) continue;
+    const requiredTriggers = [`cap_${tblName}_ins`, `cap_${tblName}_upd`, `cap_${tblName}_del`];
+    const existing = await queryAll(sqlite3, db, `
+      SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?
+    `, [tblName]);
+    const existingSet = new Set(existing.map(([n]) => n));
+    for (const req of requiredTriggers) {
+      if (!existingSet.has(req)) {
+        throw new Error(`[invariant violation] Missing required capture trigger "${req}" on data table "${tblName}".`);
+      }
+    }
   }
 }
 

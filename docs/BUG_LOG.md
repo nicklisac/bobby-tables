@@ -51,3 +51,24 @@ This document tracks known issues, edge cases, and improvements to be addressed 
 - **Root Cause**: The configuration UI (`#config-provider`) and HTTP transport in `src/harness.js` only implement request/response framing for generic OpenAI-compatible completions and Gemini REST APIs.
 - **Proposed Fix**: Expand the provider list and transport layer to support major LLM providers natively, including Anthropic Claude (Messages API format), OpenAI direct, Groq, Mistral, OpenRouter, and local providers with preset endpoints and default model selections.
 
+---
+
+### BUG-006: Missing Drop-Target Grid Cell Highlighting When Dragging From Chat Pane
+- **Status**: Open / Backlogged
+- **Reported**: User Feedback
+- **Component**: `src/main.js`, `src/grid-ui.js` (`updateDragHighlight`, `activeDragData`), `src/styles.css`
+- **Description**: When dragging an asset (table, web search, URL preview) from the chat pane onto the dashboard grid canvas, the target grid cells where the card will land do not highlight (`.drag-target-hover`).
+- **Root Cause**: `updateDragHighlight()` in `src/grid-ui.js` relies on an internal `activeDragData` variable to compute target cell bounds and spans. While internal card moves/resizes set this variable, the chat asset `dragstart` listener in `src/main.js` only sets `e.dataTransfer.setData()`. Because browsers disallow reading `dataTransfer.getData()` during `dragover` for security reasons, `activeDragData` remains null and `updateDragHighlight()` immediately aborts and clears cell highlights.
+- **Proposed Fix**: Expose a shared drag state helper (e.g., `gridUi.setActiveDragData(data)`) and call it from the chat asset `dragstart` / `dragend` handlers in `src/main.js` so `updateDragHighlight()` accurately renders the target cell bounding box for chat assets during dragover.
+
+---
+
+### BUG-007: Multiple Duplicate Dashboard Cards Created on Chat Asset Drop
+- **Status**: Open / Backlogged
+- **Reported**: User Feedback
+- **Component**: `src/grid-ui.js` (`renderGrid`, `onCellDrop`)
+- **Description**: Dragging and dropping an asset from the chat pane onto the dashboard canvas grid sometimes causes the card to be duplicated vertically multiple times (e.g., 2 to 4 duplicate cards created in SQLite).
+- **Root Cause**: In `renderGrid()`, `drop` event listeners are attached individually to every `.grid-cell` element AND to the parent `#dashboard-grid` container. When dropping an item, the drop event triggers concurrent `onCellDrop()` executions that each call `addCard()` / `materializeToolResult()`.
+- **Proposed Fix**: Unify the drop listener to the grid container only (or add `e.stopPropagation()` and a drop in-flight debounce lock in `onCellDrop`) to ensure `addCard()` executes strictly once per drop action.
+
+

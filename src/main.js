@@ -12,6 +12,7 @@ import {
   sweepCaptureTriggers, repairOrphanedToolCalls, evictChangesets, setSuppressCascade,
   setSuppressCapture, ensureCaptureTriggers, setCurrentTurnId,
   getRewindableScratchpadTurns, queryAll, quoteIdent, logDDL, execParams,
+  isProtectedTable, extractTargetTables, assertProtectedTablesInvariant,
 } from './schema.js';
 import {
   runCompaction, estimateActiveContextTokens, resolveContextWindow,
@@ -919,17 +920,18 @@ async function bootAgent() {
       console.warn('[main] T3 flag reset failed (non-fatal):', e);
     }
 
-    // T3: attach capture triggers to every user data table (idempotent) and
-    // repair orphaned tool_call pairs in EVERY session (a crash mid-cascade can
-    // leave an assistant row with tool_calls but no tool row → LLM 400 later).
+    // T3 & T21: attach capture triggers to every user data table (idempotent),
+    // assert the protected-tables boundary invariant, and repair orphaned tool_call
+    // pairs in EVERY session.
     try {
       await sweepCaptureTriggers(agent.sqlite3, agent.db);
+      await assertProtectedTablesInvariant(agent.sqlite3, agent.db);
       const allSessions = await listSessions(agent.sqlite3, agent.db);
       for (const s of allSessions) {
         await repairOrphanedToolCalls(agent.sqlite3, agent.db, s.id);
       }
     } catch (e) {
-      console.warn('[main] T3 boot setup failed (non-fatal):', e);
+      console.warn('[main] T3/T21 boot setup failed (non-fatal):', e);
     }
 
     // T2: persist the user's context-window override (settings field). Empty /
@@ -995,6 +997,10 @@ async function bootAgent() {
       window.__agent.runT24Probe = async () => {
         const { runT24Probe } = await import('../docs/prototypes/ticket-24-autocomplete-probe.mjs');
         return runT24Probe(agent);
+      };
+      window.__agent.runT21Probe = async () => {
+        const { runT21Probe } = await import('../docs/prototypes/ticket-21-protected-tables-probe.mjs');
+        return runT21Probe(agent);
       };
     } catch (e) {
       console.warn('[main] T24 autocomplete init failed (non-fatal):', e);
@@ -1343,8 +1349,31 @@ function classifyStatement(sql) {
   const t = sql.trim().replace(/;+\s*$/, '').trim();
   const first = (t.split(/\s+/)[0] || '').toUpperCase();
   if (['BEGIN', 'COMMIT', 'ROLLBACK', 'SAVEPOINT', 'RELEASE', 'END'].includes(first)) {
-    return { kind: 'forbidden' };
+    return { kind: 'forbidden', reason: `Transaction-control statements (${first}) cannot run inside the scratchpad savepoint.` };
   }
+
+  // T21: Protected-tables boundary check on scratchpad queries
+  const targets = extractTargetTables(sql);
+  for (const target of targets) {
+    if (isProtectedTable(target.name)) {
+      if (target.operation === 'ddl') {
+        return {
+          kind: 'forbidden',
+          reason: `Operation rejected: Cannot execute DDL (${target.verb}) on protected table "${target.name}".`,
+        };
+      }
+      if (target.operation === 'dml') {
+        // Option A: Only allow system_config modifications
+        if (target.name.toLowerCase() !== 'system_config') {
+          return {
+            kind: 'forbidden',
+            reason: `Operation rejected: Direct modification of protected system table "${target.name}" is not permitted.`,
+          };
+        }
+      }
+    }
+  }
+
   if (first === 'SELECT' || first === 'EXPLAIN') return { kind: 'read' };
   if (first === 'WITH') {
     // A data-modifying CTE (`WITH … INSERT/UPDATE/DELETE/REPLACE`) is a WRITE
@@ -1470,9 +1499,9 @@ async function execScratchSql(sqlite3, db, sql, turnId, sessionId) {
     const cls = classifyStatement(text);
     const tableName = cls.kind === 'ddl' ? extractDdlTableName(text) : null;
 
-    // Transaction control would break the scratchpad savepoint protocol.
+    // Transaction control or protected-table modifications are forbidden in scratchpad.
     if (cls.kind === 'forbidden') {
-      throw new Error(`Transaction-control statements (${text.split(/\s+/)[0]}) cannot run inside the scratchpad savepoint.`);
+      throw new Error(cls.reason || `Forbidden statement (${text.split(/\s+/)[0]}) cannot run inside scratchpad.`);
     }
 
     // Every write command confirms before executing (reads run immediately).

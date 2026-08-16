@@ -6,7 +6,7 @@
  */
 
 import {
-  queryAll, execParams, quoteIdent, isInternalTable,
+  queryAll, execParams, quoteIdent, isProtectedTable, isInternalTable,
   logDDL, sweepCaptureTriggers,
 } from './schema.js';
 
@@ -266,6 +266,9 @@ export function generateCreateTableSql({ tableName, columns }) {
  */
 export async function createTableFromSchema(sqlite3, db, { tableName, columns }) {
   const validTableName = validateIdentifier(tableName, 'Table');
+  if (isProtectedTable(validTableName)) {
+    throw new Error(`Cannot create table with reserved/protected name "${validTableName}".`);
+  }
   const ddlSql = generateCreateTableSql({ tableName: validTableName, columns });
 
   // Check collision
@@ -318,6 +321,9 @@ export async function createTableFromSchema(sqlite3, db, { tableName, columns })
  */
 export async function createViewFromQuery(sqlite3, db, { viewName, querySql }) {
   const validViewName = validateIdentifier(viewName, 'View');
+  if (isProtectedTable(validViewName)) {
+    throw new Error(`Cannot create view with reserved/protected name "${validViewName}".`);
+  }
   const cleanSql = String(querySql || '').trim().replace(/;+\s*$/, '');
   if (!cleanSql) {
     throw new Error('Query SQL cannot be empty.');

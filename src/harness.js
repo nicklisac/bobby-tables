@@ -16,7 +16,7 @@ import { Factory } from '../vendor/wa-sqlite-jspi/sqlite-api.js';
 import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_ROW, SQLITE_INSERT, SQLITE_DELETE, SQLITE_UPDATE } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
-import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, migrateDashboardCardsTable, queryAll, isInternalTable, logDDL, sweepCaptureTriggers } from './schema.js';
+import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, migrateDashboardCardsTable, queryAll, isProtectedTable, isInternalTable, logDDL, sweepCaptureTriggers, extractTargetTables } from './schema.js';
 import { runCompaction, queryActiveContextJson } from './compaction.js';
 import { materializeToolResult } from './materialize.js';
 
@@ -685,6 +685,32 @@ export async function bootSqliteAgent(config = {}) {
         const isDDL = firstWord === 'CREATE' || firstWord === 'DROP' || firstWord === 'ALTER';
 
         if (!isReadOnly) {
+          // T21: Protected-tables boundary check on write targets
+          const targets = extractTargetTables(sql);
+          for (const target of targets) {
+            if (isProtectedTable(target.name)) {
+              if (target.operation === 'ddl') {
+                const res = {
+                  error: `Operation rejected: Cannot execute DDL (${target.verb}) on protected table '${target.name}'.`,
+                };
+                agentEventStream.emit('tool_result', { tool: 'execute_sql', query: sql, error: res.error, result: res });
+                sqlite3.result_text(context, JSON.stringify(res));
+                return;
+              }
+              if (target.operation === 'dml') {
+                // Option A: Only allow system_config modifications
+                if (target.name.toLowerCase() !== 'system_config') {
+                  const res = {
+                    error: `Operation rejected: Cannot modify protected system table '${target.name}'.`,
+                  };
+                  agentEventStream.emit('tool_result', { tool: 'execute_sql', query: sql, error: res.error, result: res });
+                  sqlite3.result_text(context, JSON.stringify(res));
+                  return;
+                }
+              }
+            }
+          }
+
           // Read allow_dml from system_config (default ON '1')
           let allowDml = true;
           for await (const cfgStmt of sqlite3.statements(db, `SELECT value FROM system_config WHERE key = 'allow_dml'`)) {

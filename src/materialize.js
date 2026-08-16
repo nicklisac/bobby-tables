@@ -19,6 +19,7 @@
 
 import {
   quoteIdent,
+  isProtectedTable,
   isInternalTable,
   logDDL,
   sweepCaptureTriggers,
@@ -239,7 +240,7 @@ export function validateTableName(tableName) {
       error: `Invalid table name '${tableName}'. Table names must start with a letter or underscore and contain only letters, numbers, and underscores.`,
     };
   }
-  if (isInternalTable(trimmed) || trimmed.toLowerCase().startsWith('sqlite_')) {
+  if (isProtectedTable(trimmed)) {
     return { valid: false, error: `Table name '${tableName}' is reserved / protected.` };
   }
   return { valid: true, name: trimmed };

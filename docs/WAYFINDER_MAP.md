@@ -50,7 +50,7 @@ A fresh session resumes from **this map alone** — destination, philosophy, and
 * [Decision: Cards Hold View Definitions — the FROM Clause Is the Pointer](#ticket-12-drag-and-drop-chat-rightarrow-grid-pinning) — A grid card's `sql` is a read-only SELECT (a view definition in spirit — not a registered `sqlite_master` view); it holds layout + definition, never the substance. Substance lives in named relational objects (tables = frozen/materialized, views = live logic) and the card's FROM clause is the pointer. No T11 rework — `dashboard_cards.sql` already stores a SELECT; the delta is intent + the materialization path (2026-08-15, user-confirmed).
 * [Decision: T13 Is the Shared Materialize Function — Sequenced First](#ticket-13-tool-output-materialization-engine) — Materialization = *JSON blob in a `messages` row → named table* (json_each unpacking, T6-style type inference, T9-style DDL logging + capture-trigger sweep), exposed two ways: an **agent tool** (`materialize`, keyed off `tool_call_id`) and a **library function the T12 drag handler calls**. Drag flow: table bubble → recover the SQL → card SELECT; web-search/fetch bubble → materialize → card SELECT over the new table; plain text → not draggable (2026-08-15, user-confirmed).
 * [Decision: Reference-Integrity Semantics for Card Pointers](#ticket-22-reference-integrity-for-dashboard-cards) — **Rename** rewrites referencing cards' SQL (emulating SQLite's native view-rewrite under `ALTER TABLE … RENAME TO`); **delete** cascade-deletes referencing cards behind a confirm that lists them; **alter** dry-runs referencing cards (read-only by construction) and alerts on breakage. Built on a shared `extractReferencedObjects` + dry-run; scoped to user data tables/views, never protected tables (2026-08-15).
-* [Decision: Protected-Tables Boundary Gets Its Own Ticket](#ticket-21-protected-tables-boundary) — "Untouchable" must be a formal predicate consulted at **every** write boundary, not just the rewind/reactivity machinery. Finding: `INTERNAL_TABLES` is enforced only in `ensureCaptureTriggers`/`update_hook` — the agent's DML (with `allow_dml=1`) and the scratchpad's DML/DDL have **no** target-table guard (`!!DELETE FROM messages` works today — a live gap). DDL on protected tables: refuse outright. One HITL decision pending: DML on protected tables — default refuse + narrow allowlist (`system_config`) vs. allow-with-loud-warning (2026-08-15).
+* [Decision: Protected-Tables Boundary (T21 locked)](#ticket-21-protected-tables-boundary) — Formalized `isProtectedTable` covering `INTERNAL_TABLES`, `sqlite_*`, and virtual shadow tables (`fts5`/`vec0`). Wired write target extraction (`extractTargetTables`) across all boundaries: DDL on protected tables is refused outright; DML on internal tables is refused with a narrow allowlist for `system_config` (Option A); CSV ingestion prefixes colliding filenames (`imported_<name>`); boot-time invariant `assertProtectedTablesInvariant` guarantees zero capture triggers on protected tables and active capture on all user tables (2026-08-15).
 * [Decision: Schema-Aware Autocomplete & Bang-Mode Visual Morphing (T24 locked)](#ticket-24-schema-aware-sql-autocomplete-editor--bang-mode-visuals) — Dynamic schema dictionary from `getDatabaseCatalog`, context-aware token rankings (tables boosted after FROM/JOIN, columns boosted after SELECT/WHERE/dot-qualifiers), floating popover with keyboard nav (ArrowUp/ArrowDown/Tab/Enter/Escape), and instant visual morphing for `!SQL` (`⚡ [ ! Direct SQL ]`) and `!!SQL` (`🔒 [ !! Private SQL ]`).
 
 ---
@@ -85,7 +85,7 @@ graph TD
     T7[Ticket 7: Web Search & URL Fetch Tools - DONE]
     T10[Ticket 10: Cartridge Import / Export - DONE]
     T16[Ticket 16: In-Browser Full-Text Search FTS5]
-    T21[Ticket 21: Protected-Tables Boundary]
+    T21[Ticket 21: Protected-Tables Boundary - DONE]
     T13 --> T12
     T12 --> T22[Ticket 22: Reference Integrity for Dashboard Cards]
     T13 --> T22
@@ -95,9 +95,8 @@ graph TD
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T24 done;
-    class T14,T15,T16,T17,T18,T19,T20,T21,T23,T25 frontier;
-    class T22 blocked;
+    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T21,T24 done;
+    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T25 frontier;
 ```
 
 ---
@@ -338,17 +337,23 @@ graph TD
 
 ### Ticket 21: Protected-Tables Boundary
 * **Label:** `wayfinder:task` (HITL — one decision; the rest is mechanical)
-* **Status:** Open (Frontier) — independent of everything; also a **live safety gap** (not blocked by anything)
+* **Status:** ✅ COMPLETE (2026-08-15)
 * **Question:** How do we formalize "untouchable" as a predicate (`isProtectedTable`) consulted at **every** write boundary, with a boot-time invariant that makes the boundary self-enforcing?
-* **Findings (2026-08-15):** `INTERNAL_TABLES` (schema.js) is enforced at exactly two boundaries — `ensureCaptureTriggers`/`sweepCaptureTriggers` (no rewind capture) and the `update_hook` (no `data_change`). **No write path checks it:** with `allow_dml=1`, the agent's `execute_sql` can `DELETE FROM messages` / `UPDATE system_config` (the harness gate checks the verb, never the target table); the scratchpad's `!!DELETE FROM messages` / `!!DROP TABLE messages` run behind a plain confirm (the DROP would `captureDropPreImage` the entire `messages` table first). DDL on protected tables: **refuse outright** — no confirm is enough when the consequence is "the whole conversation history is gone".
-* **Design agenda:** (1) the predicate + the protected set (internal tables + `sqlite_%` + fts5/vec0 **shadow tables** — recognition heuristic: `sqlite_master.sql IS NULL` or the `<parent>_{data,idx,content,docsize,config}` shape; needed before T16/T20 or `sweepCaptureTriggers` will instrument index internals); (2) wire into `run_dynamic_sql` (DML target check) + the scratchpad's `classifyStatement` path (DML+DDL target check); (3) **the one HITL decision** — DML on protected tables: default refuse + narrow allowlist (`system_config` only) vs. allow-with-loud-warning ("writes a system table; not rewound-able"); (4) boot-time invariant — after schema init + sweep, assert: no capture trigger on any protected table, AND every non-protected data table has capture triggers (turns the T11 "stale triggers" bug from a one-time probe find into a boot failure); (5) reads stay always allowed (`SELECT * FROM messages` is useful and safe).
-* **Dependencies:** none — the gap is live today. Blocks T22 (reference integrity must exclude protected tables). Light dependency for T13 (materialization refuses protected target names — `isInternalTable` exists today, so T13 is not hard-blocked).
+* **Resolution (2026-08-15):** Formalized `isProtectedTable` and integrated strict write target enforcement across all execution layers:
+  * **Predicate (`src/schema.js`):** `isProtectedTable(name, virtualParents)` recognizes `INTERNAL_TABLES` (`messages`, `sessions`, `session_context`, `system_config`, `tools`, `turn_changesets`, `turn_ddl_log`, `compactions`, `dashboard_cards`), `sqlite_*` internals, and virtual table shadow tables (`fts5`, `vec0`, `rtree` via `EXPLICIT_SHADOW_REGEX` and dynamic `getVirtualTableParents`).
+  * **SQL Target Extractor (`src/schema.js`):** `extractTargetTables(sql)` safely strips comments and string literals, extracting target table identifiers from `INSERT`, `UPDATE`, `DELETE`, `REPLACE`, `CREATE`, `DROP`, `ALTER`, and CTE writes.
+  * **Agent UDF Write Boundary (`src/harness.js`):** In `run_dynamic_sql`, DDL on protected tables is refused outright; DML on internal tables is blocked (with a narrow allowlist for `system_config` runtime updates per locked Option A).
+  * **Scratchpad Boundary (`src/main.js`):** In `classifyStatement` and `execScratchSql`, DDL and unauthorized DML on protected tables are classified as forbidden and rejected with clear error messages.
+  * **Auxiliary Write Boundaries:** `createTableFromSchema`, `createViewFromQuery`, and `dropDatabaseObject` in `src/explorer.js`, `validateTableName` in `src/materialize.js`, and `ingestCsvToSqlite` in `src/csv-ingestion.js` (auto-prefixing `imported_<name>` to prevent dropping internal tables) all enforce `isProtectedTable`.
+  * **Boot-Time Invariant Assertion (`src/schema.js`):** `assertProtectedTablesInvariant(sqlite3, db)` asserts on boot that zero capture triggers exist on protected tables and that every user data table is actively instrumented with capture triggers.
+  * **Verification:** Full automated verification probe [ticket-21-protected-tables-probe.mjs](file:///C:/Users/lisac/Documents/web-sql-agent/docs/prototypes/ticket-21-protected-tables-probe.mjs) passing 6/6 test suites green.
+* **Dependencies:** None. Unblocks Ticket 22.
 
 ---
 
 ### Ticket 22: Reference Integrity for Dashboard Cards
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Open — blocked by T12, T13, T21
+* **Status:** Open (Frontier) — unblocked by T21 completion
 * **Question:** How do rename / delete / alter of named objects (materialized tables, CSV-ingested tables, T18 views) keep referencing cards correct — given that a card's `sql` is an ad-hoc string with **no native dependency tracking** in SQLite?
 * **Semantics locked (2026-08-15, user-confirmed):** **Rename** → rewrite referencing cards' SQL (emulating SQLite's native view-rewrite under `ALTER TABLE … RENAME TO`, 3.25+) + report "updated N cards". **Delete** → extract references first → confirm popup lists the N cards that will be removed → cascade-delete cards + object. **Alter** → apply in a savepoint → **dry-run** each referencing card (read-only by construction, so it's safe to run) → alert on breakage, keep or ⟲.
 * **Design agenda:** (1) the shared `extractReferencedObjects(cardSql) → [names]` primitive (table/view identifiers in FROM/JOIN; traps: substring collisions — `users` inside `user_sessions` — string literals & comments, quoted identifiers, CTE aliases; reuse T11's `isReadOnlySql` comment/string stripping; the same primitive serves T21's write-path target check); (2) token-level identifier rewrite, not string replace; (3) the dry-run backstop — a false negative in the extractor degrades to "a card shows an error", never silent corruption; (4) scope: user data tables/views only — never protected tables (T21); (5) the "source missing" card UX — a card whose object was rewound/dropped renders a hint ("re-materialize or re-pin"), not a mystery error (T11's `runCardSql` already reports errors without throwing).
