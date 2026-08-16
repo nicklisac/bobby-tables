@@ -70,6 +70,7 @@ graph TD
     T8 --> T24
     T1 --> T11[Ticket 11: 3-Pane Layout & Grid Engine - DONE]
     T11 --> T12[Ticket 12: Dynamic Grid Canvas, Drag-to-Move, Resize & Chat Pinning - DONE]
+    T11 --> T25[Ticket 25: Professional Workstation UI & Design System Overhaul]
     T1 --> T13[Ticket 13: Tool-Output Materialization - DONE]
     T1 --> T14
     T1 --> T15[Ticket 15: Durable Semantic Memory]
@@ -95,7 +96,7 @@ graph TD
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
     class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T24 done;
-    class T14,T15,T16,T17,T18,T19,T20,T21,T23 frontier;
+    class T14,T15,T16,T17,T18,T19,T20,T21,T23,T25 frontier;
     class T22 blocked;
 ```
 
@@ -379,6 +380,31 @@ graph TD
   * `src/styles.css`: Added styles for `.bang-badge`, `#user-input.bang-mode`, `.sql-autocomplete-dropdown`, and item badges (`.badge-tbl`, `.badge-view`, `.badge-col`, `.badge-kw`, `.badge-fn`, `.badge-sys`).
   * `docs/prototypes/ticket-24-autocomplete-probe.mjs`: Complete 7-step automated verification probe testing schema indexing, bang detection, context analysis, candidate ranking, DOM visual morphing, keyboard navigation, and dynamic DDL reactivity.
 * **Verification:** 8/8 automated probe assertions passing green against the live build and SQLite database.
+
+---
+
+### Ticket 25: Professional Workstation UI & Design System Overhaul (Pro IDE Aesthetics, Vector Icons & Theme Density)
+* **Label:** `wayfinder:task` (AFK/HITL)
+* **Status:** Open (Frontier)
+* **Question:** How should we systematically replace toy-like elements, emojis (`🔍`, `⚡`, `📌`, `🗑`, `👁`, `⚙`, `📋`, `💬`, `🗄`, `⊞`, `🔒`, `●`, `★`, etc.), saturated ad-hoc accents, and cluttered controls across all panes with a cohesive, pro-grade developer/analyst workstation design system?
+* **Design notes & Scope (2026-08-15):**
+  * **1. Vector Iconography (Material Symbols / Lucide SVGs):**
+    * Eliminate all raw Unicode emojis in functional UI elements.
+    * Adopt clean, crisp vector SVG icons (e.g. Google Material Symbols or Lucide icons) for:
+      * **Activity Rails:** Database explorer, sessions, dashboard layout toggles.
+      * **DB Explorer Tree:** Table icon, view icon, system settings gear, primary key keyhole, index node, foreign key link.
+      * **Quick Action Buttons:** Data preview (table/magnifier), Scratchpad query (terminal/code), Pin to grid (pin), Drop (trashcan/cross).
+      * **Chat & Input Controls:** Bang mode badges (terminal lightning / private lock), send button (arrow-up / paper-plane), stop/rewind controls (rewind/history/stop-square), token counter metrics.
+      * **Dashboard Card Actions:** Drag handle dots, SQL edit, run/refresh, remove card, resize corner.
+      * **Modals & Drawers:** Close `✕`, pagination arrows (`‹`, `›`), sorting direction chevrons (`▲`, `▼`), copy code clipboard.
+  * **2. Refined Design System & Visual Hierarchy:**
+    * **Palette & Surfaces:** Cohesive dark-mode theme utilizing calibrated slate/charcoal tones (`#0d1117`, `#161b22`, `#21262d`), subtle border definitions (`rgba(255,255,255,0.08)` / `#30363d`), and unified accent highlights (steel blue / cyan / indigo).
+    * **Information Density & Typography:** Modern system & code typefaces (`Inter`, `Geist`, `JetBrains Mono` / `SF Mono`), crisp letter-spacing, reduced vertical padding on compact data tables, sticky headers, and monospace alignment for numeric metrics/token counters.
+    * **Micro-interactions:** Subtle hover transitions, refined focus rings, smooth accordion chevron animations, and pro-grade toast/notification badges.
+  * **3. Component Upgrades:**
+    * Status bar: Sleek pulsing status LED dot with clean text hierarchy.
+    * SQL code blocks & Scratchpad output: Clean IDE styling with integrated copy, execution duration badge, and row count pills.
+    * Modals: High-contrast backdrop blur, crisp title headers, structured form layouts without clutter.
 
 ---
 
