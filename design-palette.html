@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bobby Tables — Design Palette & Workstation Aesthetic Lab</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    /* ── BASE CSS VARIABLES & RESET ─────────────────────────── */
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      /* Shared utility transitions */
+      --transition-theme: background 0.25s ease, color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+    }
+
+    /* ── GLOBAL DAY / NIGHT THEMES ───────────────────────────── */
+    html[data-theme="dark"] {
+      --global-bg: #090d12;
+      --global-surface: #0f151e;
+      --global-card: #151d28;
+      --global-border: rgba(255, 255, 255, 0.08);
+      --global-border-subtle: rgba(255, 255, 255, 0.04);
+      --global-text-primary: #f0f6fc;
+      --global-text-secondary: #c9d1d9;
+      --global-text-muted: #8b949e;
+      --global-header-bg: rgba(15, 21, 30, 0.85);
+    }
+
+    html[data-theme="light"] {
+      --global-bg: #f8f7f4;
+      --global-surface: #ffffff;
+      --global-card: #ffffff;
+      --global-border: rgba(0, 0, 0, 0.08);
+      --global-border-subtle: rgba(0, 0, 0, 0.04);
+      --global-text-primary: #1a1f24;
+      --global-text-secondary: #4a5568;
+      --global-text-muted: #718096;
+      --global-header-bg: rgba(255, 255, 255, 0.85);
+    }
+
+    body {
+      background: var(--global-bg);
+      color: var(--global-text-primary);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      line-height: 1.5;
+      padding-bottom: 5rem;
+      transition: var(--transition-theme);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── STICKY TOPBAR WITH LIVE DAY/NIGHT TOGGLE ─────────────── */
+    .lab-header {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      background: var(--global-header-bg);
+      border-bottom: 1px solid var(--global-border);
+      padding: 0.85rem 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      transition: var(--transition-theme);
+    }
+
+    .lab-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .lab-badge {
+      font-size: 0.65rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      background: rgba(13, 148, 136, 0.12);
+      color: #0d9488;
+      border: 1px solid rgba(13, 148, 136, 0.25);
+    }
+
+    .lab-controls {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .theme-toggle-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: var(--global-surface);
+      border: 1px solid var(--global-border);
+      color: var(--global-text-primary);
+      padding: 0.45rem 0.9rem;
+      border-radius: 6px;
+      font-size: 0.78rem;
+      font-weight: 500;
+      cursor: pointer;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+      transition: all 0.2s;
+    }
+
+    .theme-toggle-btn:hover {
+      border-color: #0d9488;
+      color: #0d9488;
+    }
+
+    /* ── CONTAINER & SECTION LAYOUT ──────────────────────────── */
+    .lab-container {
+      max-width: 1320px;
+      margin: 2rem auto;
+      padding: 0 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 3.5rem;
+    }
+
+    .section-intro {
+      margin-bottom: 1.5rem;
+    }
+
+    .section-intro h2 {
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 0.35rem;
+      color: var(--global-text-primary);
+    }
+
+    .section-intro p {
+      font-size: 0.85rem;
+      color: var(--global-text-muted);
+      max-width: 800px;
+    }
+
+    /* ── THEME COMPARISON MATRIX (4 PALETTES) ─────────────────── */
+    .theme-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1.5rem;
+    }
+
+    .theme-card {
+      border-radius: 12px;
+      border: 1px solid var(--global-border);
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.04);
+      transition: var(--transition-theme);
+    }
+
+    .theme-card-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.5rem;
+    }
+
+    .theme-card-title {
+      font-size: 1.05rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+
+    .theme-card-desc {
+      font-size: 0.76rem;
+      margin-top: 0.25rem;
+    }
+
+    .swatches-row {
+      display: flex;
+      gap: 0.4rem;
+      align-items: center;
+    }
+
+    .swatch {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      border: 1px solid rgba(0, 0, 0, 0.1);
+      position: relative;
+    }
+
+    /* ── INDIVIDUAL PALETTES ─────────────────────────────────── */
+
+    /* Theme 1: Portland Teal & Warm Architectural (nicholaslisac.com vibe) */
+    .palette-teal {
+      --t-accent: #0d9488;
+      --t-accent-subtle: rgba(13, 148, 136, 0.1);
+      --t-accent-hover: #0f766e;
+    }
+    html[data-theme="dark"] .palette-teal {
+      background: #090e13;
+      border-color: rgba(13, 148, 136, 0.2);
+      --t-card: #0f1720;
+      --t-text: #f0fdfa;
+      --t-muted: #64748b;
+    }
+    html[data-theme="light"] .palette-teal {
+      background: #fbfbf9;
+      border-color: rgba(13, 148, 136, 0.25);
+      --t-card: #ffffff;
+      --t-text: #134e4a;
+      --t-muted: #64748b;
+    }
+
+    /* Theme 2: Classic Computer Modern Steel / NeXT Workstation */
+    .palette-steel {
+      --t-accent: #2563eb;
+      --t-accent-subtle: rgba(37, 99, 235, 0.1);
+      --t-accent-hover: #1d4ed8;
+    }
+    html[data-theme="dark"] .palette-steel {
+      background: #0c111c;
+      border-color: rgba(37, 99, 235, 0.2);
+      --t-card: #131c2d;
+      --t-text: #f8fafc;
+      --t-muted: #64748b;
+    }
+    html[data-theme="light"] .palette-steel {
+      background: #f4f6f8;
+      border-color: rgba(37, 99, 235, 0.2);
+      --t-card: #ffffff;
+      --t-text: #0f172a;
+      --t-muted: #64748b;
+    }
+
+    /* Theme 3: Modern CLI / TUI & Warm Amber Phosphor */
+    .palette-amber {
+      --t-accent: #d97706;
+      --t-accent-subtle: rgba(217, 119, 6, 0.1);
+      --t-accent-hover: #b45309;
+    }
+    html[data-theme="dark"] .palette-amber {
+      background: #0f1115;
+      border-color: rgba(217, 119, 6, 0.25);
+      --t-card: #16181d;
+      --t-text: #fef3c7;
+      --t-muted: #78716c;
+    }
+    html[data-theme="light"] .palette-amber {
+      background: #fdfaf6;
+      border-color: rgba(217, 119, 6, 0.25);
+      --t-card: #ffffff;
+      --t-text: #451a03;
+      --t-muted: #78716c;
+    }
+
+    /* Theme 4: Industrial Precision (Zinc & Electric Indigo / Raycast Minimal) */
+    .palette-zinc {
+      --t-accent: #6366f1;
+      --t-accent-subtle: rgba(99, 102, 241, 0.1);
+      --t-accent-hover: #4f46e5;
+    }
+    html[data-theme="dark"] .palette-zinc {
+      background: #09090b;
+      border-color: rgba(99, 102, 241, 0.25);
+      --t-card: #121215;
+      --t-text: #fafafa;
+      --t-muted: #71717a;
+    }
+    html[data-theme="light"] .palette-zinc {
+      background: #fafafa;
+      border-color: rgba(0, 0, 0, 0.1);
+      --t-card: #ffffff;
+      --t-text: #18181b;
+      --t-muted: #71717a;
+    }
+
+    /* ── MINI COMPONENT MOCKUPS INSIDE THEME CARDS ───────────── */
+    .mockup-box {
+      background: var(--t-card);
+      border: 1px solid var(--global-border);
+      border-radius: 8px;
+      padding: 0.9rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .mockup-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.72rem;
+      font-weight: 600;
+      border-bottom: 1px solid var(--global-border);
+      padding-bottom: 0.4rem;
+    }
+
+    .mockup-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.68rem;
+    }
+
+    .mockup-table th, .mockup-table td {
+      padding: 0.25rem 0.4rem;
+      text-align: left;
+      border-bottom: 1px solid var(--global-border-subtle);
+    }
+
+    .mockup-table th {
+      font-weight: 600;
+      color: var(--global-text-muted);
+    }
+
+    .mockup-btn {
+      padding: 0.3rem 0.65rem;
+      font-size: 0.7rem;
+      font-weight: 500;
+      border-radius: 4px;
+      border: 1px solid var(--t-accent);
+      background: var(--t-accent-subtle);
+      color: var(--t-accent);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+
+    .mockup-btn-primary {
+      background: var(--t-accent);
+      color: #fff;
+    }
+
+    /* ── FONT STACKS COMPARISON ──────────────────────────────── */
+    .font-showcase-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1.25rem;
+    }
+
+    .font-card {
+      background: var(--global-surface);
+      border: 1px solid var(--global-border);
+      border-radius: 10px;
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.8rem;
+    }
+
+    .font-label {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #0d9488;
+    }
+
+    .font-specimen-ui {
+      font-size: 0.86rem;
+      line-height: 1.45;
+    }
+
+    .font-specimen-mono {
+      font-size: 0.78rem;
+      padding: 0.5rem 0.7rem;
+      background: var(--global-bg);
+      border: 1px solid var(--global-border);
+      border-radius: 6px;
+      color: var(--global-text-primary);
+    }
+
+    /* ── BUTTON & CONTROL EXPLORER ───────────────────────────── */
+    .controls-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 1.25rem;
+    }
+
+    .control-card {
+      background: var(--global-surface);
+      border: 1px solid var(--global-border);
+      border-radius: 10px;
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.8rem;
+    }
+
+    .control-card h4 {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--global-text-muted);
+    }
+
+    .btn-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    /* Style 1: Architectural Minimal (nicholaslisac.com style) */
+    .btn-arch {
+      padding: 0.35rem 0.75rem;
+      font-size: 0.74rem;
+      font-weight: 500;
+      border-radius: 6px;
+      border: 1px solid var(--global-border);
+      background: rgba(13, 148, 136, 0.08);
+      color: #0d9488;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-arch:hover {
+      background: #0d9488;
+      color: #fff;
+    }
+
+    /* Style 2: TUI / CLI Bracketed */
+    .btn-tui {
+      font-family: 'JetBrains Mono', monospace;
+      padding: 0.3rem 0.65rem;
+      font-size: 0.72rem;
+      font-weight: 600;
+      border-radius: 2px;
+      border: 1px solid var(--global-border);
+      background: var(--global-bg);
+      color: var(--global-text-primary);
+      cursor: pointer;
+    }
+    .btn-tui::before { content: '['; margin-right: 3px; opacity: 0.6; }
+    .btn-tui::after { content: ']'; margin-left: 3px; opacity: 0.6; }
+    .btn-tui:hover {
+      border-color: var(--global-text-primary);
+      background: var(--global-card);
+    }
+
+    /* Style 3: Clean Pill Pro */
+    .btn-pill {
+      padding: 0.35rem 0.85rem;
+      font-size: 0.74rem;
+      font-weight: 500;
+      border-radius: 20px;
+      border: 1px solid var(--global-border);
+      background: var(--global-surface);
+      color: var(--global-text-primary);
+      cursor: pointer;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+    }
+    .btn-pill:hover {
+      border-color: #0d9488;
+      color: #0d9488;
+    }
+
+    /* Style 4: High-Contrast Monospace Outline */
+    .btn-mono-outline {
+      font-family: 'JetBrains Mono', monospace;
+      padding: 0.35rem 0.75rem;
+      font-size: 0.72rem;
+      font-weight: 500;
+      border: 1px dashed var(--global-border);
+      background: transparent;
+      color: var(--global-text-secondary);
+      cursor: pointer;
+    }
+    .btn-mono-outline:hover {
+      border-style: solid;
+      border-color: #0d9488;
+      color: var(--global-text-primary);
+    }
+
+  </style>
+</head>
+<body>
+
+  <!-- STICKY HEADER WITH LIVE DAY / NIGHT TOGGLE -->
+  <header class="lab-header">
+    <div class="lab-title-wrap">
+      <h1 style="font-size: 1rem; font-weight: 700; letter-spacing: -0.01em;">Bobby Tables <span style="font-weight: 400; opacity: 0.7;">— Design Lab</span></h1>
+      <span class="lab-badge">Ticket 25 Exploratory Matrix</span>
+    </div>
+    <div class="lab-controls">
+      <button type="button" id="theme-toggle" class="theme-toggle-btn">
+        <span id="theme-icon">☀️</span>
+        <span id="theme-text">Switch to Light Mode</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="lab-container">
+
+    <!-- 1. COLOR & PALETTE MATRIX (4 THEMES) -->
+    <section>
+      <div class="section-intro">
+        <h2>1. Curated Aesthetic Palettes</h2>
+        <p>Toggle Day / Night mode above to inspect how each palette renders in both high-clarity daylight and deep focus dark mode.</p>
+      </div>
+
+      <div class="theme-grid">
+
+        <!-- Palette A: Portland Teal & Warm Architectural -->
+        <div class="theme-card palette-teal">
+          <div class="theme-card-header">
+            <div>
+              <div class="theme-card-title">A. Portland Teal & Architectural Slate</div>
+              <div class="theme-card-desc" style="color: var(--t-muted);">Inspired by nicholaslisac.com — warm off-white / dark obsidian, rich emerald teal, subtle glowing accents.</div>
+            </div>
+          </div>
+          <div class="swatches-row">
+            <div class="swatch" style="background: #0d9488;" title="Teal Accent #0d9488"></div>
+            <div class="swatch" style="background: #090e13;" title="Obsidian Dark #090e13"></div>
+            <div class="swatch" style="background: #fbfbf9;" title="Warm Paper Light #fbfbf9"></div>
+            <div class="swatch" style="background: rgba(13, 148, 136, 0.15);" title="Teal Tint"></div>
+          </div>
+          <div class="mockup-box">
+            <div class="mockup-header">
+              <span>ACTIVE SESSION // 001</span>
+              <span style="color: var(--t-accent); font-family: 'JetBrains Mono', monospace;">● 2.4k tok</span>
+            </div>
+            <table class="mockup-table">
+              <thead><tr><th>table_name</th><th>rows</th><th>engine</th></tr></thead>
+              <tbody>
+                <tr><td>users</td><td>14,200</td><td>sqlite</td></tr>
+                <tr><td>analytics</td><td>189,400</td><td>sqlite</td></tr>
+              </tbody>
+            </table>
+            <div style="display: flex; gap: 0.4rem;">
+              <button class="mockup-btn">Preview</button>
+              <button class="mockup-btn mockup-btn-primary">Query [!]</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Palette B: Classic Computer Modern Steel -->
+        <div class="theme-card palette-steel">
+          <div class="theme-card-header">
+            <div>
+              <div class="theme-card-title">B. Classic Computer Modern Steel</div>
+              <div class="theme-card-desc" style="color: var(--t-muted);">NeXT / Bloomberg pro workstation vibe — crisp cobalt/steel blue, graphite slate, high-clarity data grids.</div>
+            </div>
+          </div>
+          <div class="swatches-row">
+            <div class="swatch" style="background: #2563eb;" title="Steel Blue #2563eb"></div>
+            <div class="swatch" style="background: #0c111c;" title="Graphite Dark #0c111c"></div>
+            <div class="swatch" style="background: #f4f6f8;" title="Clean Slate Light #f4f6f8"></div>
+            <div class="swatch" style="background: rgba(37, 99, 235, 0.15);" title="Steel Tint"></div>
+          </div>
+          <div class="mockup-box">
+            <div class="mockup-header">
+              <span>WORKSTATION // DEFAULT</span>
+              <span style="color: var(--t-accent); font-family: 'JetBrains Mono', monospace;">● READY</span>
+            </div>
+            <table class="mockup-table">
+              <thead><tr><th>table_name</th><th>rows</th><th>engine</th></tr></thead>
+              <tbody>
+                <tr><td>orders</td><td>42,100</td><td>sqlite</td></tr>
+                <tr><td>v_revenue</td><td>live</td><td>view</td></tr>
+              </tbody>
+            </table>
+            <div style="display: flex; gap: 0.4rem;">
+              <button class="mockup-btn">Preview</button>
+              <button class="mockup-btn mockup-btn-primary">Query [!]</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Palette C: Modern CLI / TUI Amber Phosphor -->
+        <div class="theme-card palette-amber">
+          <div class="theme-card-header">
+            <div>
+              <div class="theme-card-title">C. Modern CLI & Amber Phosphor</div>
+              <div class="theme-card-desc" style="color: var(--t-muted);">Classic terminal meets refined business tool — warm ochre/amber highlights, dark charcoal, bracketed UI.</div>
+            </div>
+          </div>
+          <div class="swatches-row">
+            <div class="swatch" style="background: #d97706;" title="Amber #d97706"></div>
+            <div class="swatch" style="background: #0f1115;" title="Charcoal #0f1115"></div>
+            <div class="swatch" style="background: #fdfaf6;" title="Warm Light #fdfaf6"></div>
+            <div class="swatch" style="background: rgba(217, 119, 6, 0.15);" title="Amber Tint"></div>
+          </div>
+          <div class="mockup-box">
+            <div class="mockup-header">
+              <span style="font-family: 'JetBrains Mono', monospace;">[SYS: ACTIVE]</span>
+              <span style="color: var(--t-accent); font-family: 'JetBrains Mono', monospace;">[127.0.0.1]</span>
+            </div>
+            <table class="mockup-table">
+              <thead><tr><th>table</th><th>records</th><th>type</th></tr></thead>
+              <tbody>
+                <tr><td>logs</td><td>98,120</td><td>tbl</td></tr>
+                <tr><td>metrics</td><td>4,500</td><td>tbl</td></tr>
+              </tbody>
+            </table>
+            <div style="display: flex; gap: 0.4rem;">
+              <button class="mockup-btn">[view]</button>
+              <button class="mockup-btn mockup-btn-primary">[exec]</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Palette D: Industrial Precision (Zinc & Indigo) -->
+        <div class="theme-card palette-zinc">
+          <div class="theme-card-header">
+            <div>
+              <div class="theme-card-title">D. Industrial Precision (Zinc & Indigo)</div>
+              <div class="theme-card-desc" style="color: var(--t-muted);">Linear / Raycast minimalist engineering — stark monochromatic zinc, crisp hairline borders, electric indigo.</div>
+            </div>
+          </div>
+          <div class="swatches-row">
+            <div class="swatch" style="background: #6366f1;" title="Indigo #6366f1"></div>
+            <div class="swatch" style="background: #09090b;" title="Stark Zinc #09090b"></div>
+            <div class="swatch" style="background: #ffffff;" title="Crisp White #ffffff"></div>
+            <div class="swatch" style="background: rgba(99, 102, 241, 0.15);" title="Indigo Tint"></div>
+          </div>
+          <div class="mockup-box">
+            <div class="mockup-header">
+              <span>PROJECT DB</span>
+              <span style="color: var(--t-accent); font-family: 'JetBrains Mono', monospace;">v1.4.2</span>
+            </div>
+            <table class="mockup-table">
+              <thead><tr><th>table</th><th>count</th><th>status</th></tr></thead>
+              <tbody>
+                <tr><td>customers</td><td>1,240</td><td>synced</td></tr>
+                <tr><td>invoices</td><td>8,920</td><td>synced</td></tr>
+              </tbody>
+            </table>
+            <div style="display: flex; gap: 0.4rem;">
+              <button class="mockup-btn">Preview</button>
+              <button class="mockup-btn mockup-btn-primary">Query</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- 2. TYPOGRAPHY & FONT STACKS -->
+    <section>
+      <div class="section-intro">
+        <h2>2. Typography Pairings</h2>
+        <p>Comparing sans-serif structural UI typefaces with high-legibility monospace code fonts.</p>
+      </div>
+
+      <div class="font-showcase-grid">
+
+        <div class="font-card" style="font-family: 'Inter', sans-serif;">
+          <div class="font-label">Pairing 1: Inter + JetBrains Mono (Current Pro Standard)</div>
+          <div class="font-specimen-ui">
+            <strong>Bobby Tables Workstation</strong><br>
+            Autonomous in-browser SQL data agent running on SQLite WASM + JSPI.
+          </div>
+          <div class="font-specimen-mono" style="font-family: 'JetBrains Mono', monospace;">
+            SELECT count(*), avg(price) FROM products WHERE status = 'active';
+          </div>
+        </div>
+
+        <div class="font-card" style="font-family: 'Geist', sans-serif;">
+          <div class="font-label">Pairing 2: Geist + Geist Mono (Modern Engineering Sleek)</div>
+          <div class="font-specimen-ui">
+            <strong>Bobby Tables Workstation</strong><br>
+            Autonomous in-browser SQL data agent running on SQLite WASM + JSPI.
+          </div>
+          <div class="font-specimen-mono" style="font-family: 'Geist Mono', monospace;">
+            SELECT count(*), avg(price) FROM products WHERE status = 'active';
+          </div>
+        </div>
+
+        <div class="font-card" style="font-family: 'IBM Plex Sans', sans-serif;">
+          <div class="font-label">Pairing 3: IBM Plex Sans + IBM Plex Mono (Classic Technical Industrial)</div>
+          <div class="font-specimen-ui">
+            <strong>Bobby Tables Workstation</strong><br>
+            Autonomous in-browser SQL data agent running on SQLite WASM + JSPI.
+          </div>
+          <div class="font-specimen-mono" style="font-family: 'IBM Plex Mono', monospace;">
+            SELECT count(*), avg(price) FROM products WHERE status = 'active';
+          </div>
+        </div>
+
+        <div class="font-card" style="font-family: 'Space Grotesk', sans-serif;">
+          <div class="font-label">Pairing 4: Space Grotesk + JetBrains Mono (Tech-Chic Modern)</div>
+          <div class="font-specimen-ui">
+            <strong>Bobby Tables Workstation</strong><br>
+            Autonomous in-browser SQL data agent running on SQLite WASM + JSPI.
+          </div>
+          <div class="font-specimen-mono" style="font-family: 'JetBrains Mono', monospace;">
+            SELECT count(*), avg(price) FROM products WHERE status = 'active';
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- 3. BUTTON & INTERACTION STYLES -->
+    <section>
+      <div class="section-intro">
+        <h2>3. Button & Action Control Variations</h2>
+        <p>Different interaction models from architectural frosted cards to bracketed TUI controls.</p>
+      </div>
+
+      <div class="controls-grid">
+
+        <div class="control-card">
+          <h4>Style 1: Architectural Clean (nicholaslisac.com style)</h4>
+          <div class="btn-row">
+            <button class="btn-arch">Config</button>
+            <button class="btn-arch">+ New Table</button>
+            <button class="btn-arch" style="background: #0d9488; color: #fff;">Execute Query</button>
+          </div>
+        </div>
+
+        <div class="control-card">
+          <h4>Style 2: TUI / CLI Bracketed Braces</h4>
+          <div class="btn-row">
+            <button class="btn-tui">config</button>
+            <button class="btn-tui">new-table</button>
+            <button class="btn-tui" style="background: rgba(13, 148, 136, 0.2); border-color: #0d9488;">run !</button>
+          </div>
+        </div>
+
+        <div class="control-card">
+          <h4>Style 3: Minimalist Rounded Pill</h4>
+          <div class="btn-row">
+            <button class="btn-pill">Config</button>
+            <button class="btn-pill">+ Table</button>
+            <button class="btn-pill" style="background: #0d9488; color: #fff; border-color: #0d9488;">Send</button>
+          </div>
+        </div>
+
+        <div class="control-card">
+          <h4>Style 4: Monospace Dashed Technical (Your Pick)</h4>
+          <div class="btn-row">
+            <button class="btn-mono-outline">[ ⚙ config ]</button>
+            <button class="btn-mono-outline">[ + table ]</button>
+            <button class="btn-mono-outline" style="border-style: solid; color: #0d9488; border-color: #0d9488;">[ ⚡ !run ]</button>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- 4. QUESTION 2: BUTTON HIERARCHY COMPARISON -->
+    <section>
+      <div class="section-intro">
+        <h2>4. Question 2: Primary vs Secondary Hierarchy Options</h2>
+        <p>Compare how your forms and chat input will look with different primary commit styles:</p>
+      </div>
+
+      <div class="theme-grid">
+
+        <!-- Option 2A -->
+        <div class="theme-card palette-teal">
+          <div class="theme-card-title">Option 2A: Solid Teal Primary + Dashed Secondary</div>
+          <div class="theme-card-desc">Primary actions (Send message, Create table, Apply) are solid teal. Secondary actions (Cancel, Config, Export) are dashed technical outlines.</div>
+          
+          <div class="mockup-box" style="margin-top: 0.5rem;">
+            <div style="font-size: 0.76rem; font-weight: 600; margin-bottom: 0.5rem;">New Table Modal Actions</div>
+            <div style="display: flex; justify-content: flex-end; gap: 0.6rem;">
+              <button class="btn-mono-outline">[ Cancel ]</button>
+              <button style="font-family: 'Geist Mono', monospace; font-size: 0.72rem; font-weight: 600; padding: 0.35rem 0.85rem; border-radius: 4px; border: 1px solid #0d9488; background: #0d9488; color: #ffffff; cursor: pointer;">[ Create Table ]</button>
+            </div>
+          </div>
+
+          <div class="mockup-box">
+            <div style="font-size: 0.76rem; font-weight: 600; margin-bottom: 0.5rem;">Chat Input Bar Actions</div>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <input type="text" value="!SELECT * FROM sample_data" style="flex: 1; font-family: 'Geist Mono', monospace; font-size: 0.72rem; padding: 0.4rem 0.6rem; border-radius: 4px; border: 1px solid var(--global-border); background: var(--global-bg); color: var(--global-text-primary);" readonly />
+              <button style="font-family: 'Geist Mono', monospace; font-size: 0.72rem; font-weight: 600; padding: 0.4rem 0.85rem; border-radius: 4px; border: 1px solid #0d9488; background: #0d9488; color: #ffffff; cursor: pointer;">[ Send ↑ ]</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Option 2B -->
+        <div class="theme-card palette-teal">
+          <div class="theme-card-title">Option 2B: All Dashed Technical (Tinted Primary)</div>
+          <div class="theme-card-desc">Everything uses dashed borders. Primary actions have a dashed teal border with a soft teal background fill, while secondary buttons have dashed gray borders.</div>
+          
+          <div class="mockup-box" style="margin-top: 0.5rem;">
+            <div style="font-size: 0.76rem; font-weight: 600; margin-bottom: 0.5rem;">New Table Modal Actions</div>
+            <div style="display: flex; justify-content: flex-end; gap: 0.6rem;">
+              <button class="btn-mono-outline">[ Cancel ]</button>
+              <button class="btn-mono-outline" style="border-style: dashed; border-color: #0d9488; background: rgba(13, 148, 136, 0.15); color: #0d9488; font-weight: 600;">[ Create Table ]</button>
+            </div>
+          </div>
+
+          <div class="mockup-box">
+            <div style="font-size: 0.76rem; font-weight: 600; margin-bottom: 0.5rem;">Chat Input Bar Actions</div>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <input type="text" value="!SELECT * FROM sample_data" style="flex: 1; font-family: 'Geist Mono', monospace; font-size: 0.72rem; padding: 0.4rem 0.6rem; border-radius: 4px; border: 1px dashed var(--global-border); background: var(--global-bg); color: var(--global-text-primary);" readonly />
+              <button class="btn-mono-outline" style="border-style: dashed; border-color: #0d9488; background: rgba(13, 148, 136, 0.15); color: #0d9488; font-weight: 600;">[ Send ↑ ]</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <script>
+    const toggleBtn = document.getElementById('theme-toggle');
+    const themeIcon = document.getElementById('theme-icon');
+    const themeText = document.getElementById('theme-text');
+    const htmlEl = document.documentElement;
+
+    toggleBtn.addEventListener('click', () => {
+      const currentTheme = htmlEl.getAttribute('data-theme');
+      const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      htmlEl.setAttribute('data-theme', nextTheme);
+
+      if (nextTheme === 'light') {
+        themeIcon.textContent = '🌙';
+        themeText.textContent = 'Switch to Dark Mode';
+      } else {
+        themeIcon.textContent = '☀️';
+        themeText.textContent = 'Switch to Light Mode';
+      }
+    });
+  </script>
+</body>
+</html>

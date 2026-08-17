@@ -1,28 +1,78 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Web SQL Agent</title>
+  <title>Tables — Web SQL Workstation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/src/styles.css">
 </head>
 <body>
   <div id="app">
     <header>
       <div class="header-left">
-        <h1 class="app-title"><span class="title-bobby">Bobby</span> <span class="title-tables">Tables</span></h1>
+        <div class="brand-logo" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-brand">
+            <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+          </svg>
+        </div>
+        <h1 class="app-title">
+          <span class="title-tables-main">Tables</span>
+        </h1>
       </div>
       <div id="header-actions">
-        <button type="button" id="btn-toggle-config" title="Configure LLM provider &amp; settings">⚙ Config</button>
-        <button type="button" id="btn-export" title="Export database as .sqlite3 cartridge">📦 Export</button>
-        <button type="button" id="btn-import" title="Import a .sqlite3 cartridge">📥 Import</button>
-        <button type="button" id="btn-upload-csv" title="Upload and ingest a CSV file">📊 Upload CSV</button>
-        <input type="file" id="csv-file-input" accept=".csv,text/csv,text/comma-separated-values" style="display:none;" />
+        <button type="button" id="btn-toggle-config" class="btn-header" title="Configure LLM provider &amp; settings">
+          <span class="btn-bracket">[</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-header">
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+            <circle cx="12" cy="12" r="3"></circle>
+          </svg><span>config</span><span class="btn-bracket">]</span>
+        </button>
+        <button type="button" id="btn-export" class="btn-header" title="Export database as .sqlite3 cartridge">
+          <span class="btn-bracket">[</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-header">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg><span>export</span><span class="btn-bracket">]</span>
+        </button>
+        <button type="button" id="btn-import" class="btn-header" title="Import a .sqlite3 cartridge">
+          <span class="btn-bracket">[</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-header">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="3" x2="12" y2="15"></line>
+          </svg><span>import</span><span class="btn-bracket">]</span>
+        </button>
+        <button type="button" id="btn-upload-csv" class="btn-header btn-header-accent" title="Upload and ingest a CSV file">
+          <span class="btn-bracket">[</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-header">
+            <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path>
+            <path d="M14 2v4a2 2 0 0 0 2 2h4"></path>
+            <path d="M8 13h2"></path>
+            <path d="M14 13h2"></path>
+            <path d="M8 17h2"></path>
+            <path d="M14 17h2"></path>
+          </svg><span>upload csv</span><span class="btn-bracket">]</span>
+        </button>
+        <button type="button" id="btn-theme-toggle" class="btn-header" title="Toggle Day / Night Mode (OS auto-detected)">
+          <span class="btn-bracket">[</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="theme-mode-icon" id="theme-mode-icon">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg><span class="btn-bracket">]</span>
+        </button>
+        <input type="file" id="csv-file-input" accept=".csv,text/csv,text/comma-separated-values,.tsv,.txt" style="display:none;" />
       </div>
     </header>
 
-    <!-- T11: 3-pane workstation — left: DB Explorer, center: Chat & Console,
-         right: 3×3 Reactive Canvas (dashboard_cards) -->
+    <!-- 3-Pane Workstation Layout -->
     <div id="workstation">
       <aside id="explorer-pane">
         <!-- Collapsed Vertical Rail (Visible when collapsed) -->
@@ -55,18 +105,40 @@
           <div class="accordion-section is-open" id="section-db-explorer">
             <div class="accordion-header" id="header-db-explorer" title="Click to collapse / expand DB Explorer">
               <div class="accordion-title-wrap">
-                <span class="accordion-chevron">▾</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="accordion-chevron-icon">
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
                 <h2>DB Explorer</h2>
               </div>
               <div class="explorer-header-actions">
-                <button type="button" id="btn-refresh-explorer" title="Refresh catalog">⟳</button>
-                <button type="button" id="btn-new-table" title="Create a new table">+ New Table</button>
-                <button type="button" id="btn-collapse-explorer" class="btn-pane-collapse" title="Collapse Sidebar (Ctrl+B)">«</button>
+                <button type="button" id="btn-refresh-explorer" class="btn-icon" title="Refresh catalog">
+                  <span class="btn-bracket">[</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
+                  </svg><span class="btn-bracket">]</span>
+                </button>
+                <button type="button" id="btn-new-table" class="btn-sm btn-primary-subtle" title="Create a new table">
+                  <span class="btn-bracket">[</span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                  </svg><span>table</span><span class="btn-bracket">]</span>
+                </button>
+                <button type="button" id="btn-collapse-explorer" class="btn-pane-collapse" title="Collapse Sidebar (Ctrl+B)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect width="18" height="18" x="3" y="3" rx="2"></rect>
+                    <path d="M9 3v18"></path>
+                  </svg>
+                </button>
               </div>
             </div>
             <div class="accordion-content" id="content-db-explorer">
               <div class="explorer-search-bar">
-                <input type="text" id="explorer-search-input" placeholder="Filter tables &amp; views…" autocomplete="off" />
+                <div class="search-input-wrap">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="search-icon">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                  </svg>
+                  <input type="text" id="explorer-search-input" placeholder="filter tables &amp; views…" autocomplete="off" />
+                </div>
               </div>
               <div id="explorer-body">
                 <div id="table-list"></div>
@@ -78,11 +150,18 @@
           <div class="accordion-section is-open" id="section-sessions">
             <div class="accordion-header" id="header-sessions" title="Click to collapse / expand Sessions">
               <div class="accordion-title-wrap">
-                <span class="accordion-chevron">▾</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="accordion-chevron-icon">
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
                 <h2>Sessions</h2>
               </div>
               <div class="explorer-header-actions">
-                <button type="button" id="btn-new-session" title="Create a new session">+ New Session</button>
+                <button type="button" id="btn-new-session" class="btn-sm btn-subtle" title="Create a new session">
+                  <span class="btn-bracket">[</span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                  </svg><span>new</span><span class="btn-bracket">]</span>
+                </button>
               </div>
             </div>
             <div class="accordion-content" id="content-sessions">
@@ -99,9 +178,15 @@
         <main id="chat-container">
           <div id="drag-overlay" class="drag-overlay hidden">
             <div class="drag-overlay-box">
-              <div class="drag-icon">📊</div>
-              <div class="drag-title">Drop CSV to Ingest</div>
-              <div class="drag-subtitle">Auto-infers types &amp; creates queryable SQLite table</div>
+              <div class="drag-icon-wrap">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="drag-svg">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+              </div>
+              <div class="drag-title">Drop Tabular File to Ingest</div>
+              <div class="drag-subtitle">Automatically infers schemas and loads into queryable SQLite tables</div>
             </div>
           </div>
 
@@ -124,28 +209,37 @@
         </main>
 
         <footer>
-          <div class="footer-status-row">
-            <div id="status-bar">Initializing&hellip;</div>
-            <span id="token-usage" class="token-usage"></span>
-          </div>
-
           <form id="input-form">
-            <div id="input-wrapper" class="input-wrapper">
-              <div id="bang-badge" class="bang-badge hidden" title="Direct SQL Execution Mode">
-                <span class="bang-badge-icon">⚡</span>
-                <span class="bang-badge-text">! Direct SQL</span>
+            <div class="chat-input-card" id="chat-input-card">
+              <div id="input-wrapper" class="input-wrapper">
+                <div id="bang-badge" class="bang-badge hidden" title="Direct SQL Execution Mode">
+                  <span class="bang-badge-icon"></span>
+                  <span class="bang-badge-text">SQL</span>
+                </div>
+                <textarea
+                  id="user-input"
+                  rows="2"
+                  placeholder="Ask Tables to analyze data… or run SQL: ! = agent sees it, !! = private"
+                  autocomplete="off"
+                  disabled
+                ></textarea>
               </div>
-              <input
-                type="text"
-                id="user-input"
-                placeholder="Ask me to query your data… or run SQL: ! = agent sees it, !! = private"
-                autocomplete="off"
-                disabled
-              />
+
+              <div class="chat-input-toolbar">
+                <div class="status-indicator-wrap">
+                  <span id="status-led" class="status-led led-idle" aria-hidden="true"></span>
+                  <span id="status-bar">Initializing&hellip;</span>
+                </div>
+                <div class="chat-input-toolbar-right">
+                  <span id="token-usage" class="token-usage"></span>
+                  <button type="submit" id="send-btn" class="btn-primary btn-send-arrow" title="Send message (Enter, Shift+Enter for newline)" disabled>
+                    <span class="btn-bracket">[</span><span class="send-text">↑</span><span class="btn-bracket">]</span>
+                  </button>
+                </div>
+              </div>
             </div>
-            <button type="submit" id="send-btn" disabled>Send</button>
           </form>
-      </footer>
+        </footer>
       </section>
 
       <div class="pane-divider" id="divider-canvas" role="separator" aria-orientation="vertical"
@@ -169,9 +263,23 @@
           <div class="pane-header">
             <h2>Dashboard</h2>
             <div class="canvas-actions">
-              <button type="button" id="btn-refresh-all" title="Re-run every card">⟳ All</button>
-              <button type="button" id="btn-add-card" title="Add a dashboard card">+ Add card</button>
-              <button type="button" id="btn-collapse-canvas" class="btn-pane-collapse" title="Collapse Dashboard (Ctrl+J)">»</button>
+              <button type="button" id="btn-refresh-all" class="btn-sm btn-subtle" title="Re-run every card">
+                <span class="btn-bracket">[</span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
+                </svg><span>refresh</span><span class="btn-bracket">]</span>
+              </button>
+              <button type="button" id="btn-add-card" class="btn-sm btn-primary-subtle" title="Add a dashboard card">
+                <span class="btn-bracket">[</span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg><span>card</span><span class="btn-bracket">]</span>
+              </button>
+              <button type="button" id="btn-collapse-canvas" class="btn-pane-collapse" title="Collapse Dashboard (Ctrl+J)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect width="18" height="18" x="3" y="3" rx="2"></rect>
+                  <path d="M15 3v18"></path>
+                </svg>
+              </button>
             </div>
           </div>
           <div id="dashboard-grid" class="dashboard-grid" aria-label="3x3 dashboard grid"></div>
@@ -179,19 +287,27 @@
       </aside>
     </div>
 
-    <!-- T11: card add/edit dialog -->
+    <!-- Card Add/Edit Dialog -->
     <div id="card-dialog" class="modal-backdrop hidden">
       <div class="modal-card">
-        <h3 id="card-dialog-title">New dashboard card</h3>
+        <div class="modal-header">
+          <h3 id="card-dialog-title">New Dashboard Card</h3>
+          <button type="button" class="modal-close-btn" id="card-dialog-close" title="Close dialog">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
         <form id="card-form">
           <div class="config-row">
             <label for="card-title">Title</label>
-            <input type="text" id="card-title" required maxlength="80" placeholder="e.g. Total products" />
+            <input type="text" id="card-title" required maxlength="80" placeholder="e.g. Total Active Products" />
           </div>
           <div class="config-row">
-            <label for="card-sql">SQL (read-only SELECT)</label>
-            <textarea id="card-sql" rows="4" required placeholder="SELECT COUNT(*) AS n FROM sample_data"></textarea>
-            <small class="hint">Cards run live read-only queries — SELECT / WITH / EXPLAIN only, one statement.</small>
+            <label for="card-sql">SQL (read-only query)</label>
+            <textarea id="card-sql" rows="4" required placeholder="SELECT COUNT(*) AS total_count FROM sample_data"></textarea>
+            <small class="hint">Cards run live queries — SELECT / WITH / EXPLAIN only, single statement.</small>
           </div>
           <div class="config-row hidden" id="card-placement-row">
             <label>Position (top-left cell)</label>
@@ -209,7 +325,7 @@
             </div>
           </div>
           <div class="config-row">
-            <label>Size (merged cells)</label>
+            <label>Size (merged cell span)</label>
             <div class="placement-selects">
               <select id="card-row-span" title="Row span">
                 <option value="1">1 row</option>
@@ -225,14 +341,14 @@
           </div>
           <div id="card-error" class="card-dialog-error hidden"></div>
           <div class="modal-actions">
-            <button type="button" id="card-cancel">Cancel</button>
-            <button type="submit" id="card-submit">Add card</button>
+            <button type="button" id="card-cancel" class="btn-secondary">[Cancel]</button>
+            <button type="submit" id="card-submit" class="btn-primary">[Add Card]</button>
           </div>
         </form>
       </div>
     </div>
 
-    <!-- T8: Data Preview Modal / Drawer -->
+    <!-- Data Preview Modal / Drawer -->
     <div id="data-preview-modal" class="modal-backdrop hidden">
       <div class="modal-card modal-card-large">
         <div class="modal-header">
@@ -240,10 +356,19 @@
             <h3 id="preview-table-title">Table Data Preview</h3>
             <span id="preview-row-count" class="preview-count-tag">0 total rows</span>
           </div>
-          <button type="button" class="modal-close-btn" id="preview-modal-close" title="Close preview">✕</button>
+          <button type="button" class="modal-close-btn" id="preview-modal-close" title="Close preview">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
         </div>
         <div class="preview-toolbar">
           <div class="preview-search-wrap">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="preview-search-icon">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
             <input type="text" id="preview-filter-input" placeholder="Search rows in table…" autocomplete="off" />
           </div>
           <div class="preview-limit-wrap">
@@ -260,17 +385,33 @@
           <div class="preview-loading">Loading records…</div>
         </div>
         <div class="preview-footer">
-          <button type="button" id="btn-preview-prev" class="preview-page-btn" disabled>&larr; Previous</button>
+          <button type="button" id="btn-preview-prev" class="preview-page-btn" disabled>
+            <span class="btn-bracket">[</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="15 18 9 12 15 6"></polyline>
+            </svg><span>Previous</span><span class="btn-bracket">]</span>
+          </button>
           <span id="preview-page-info" class="preview-page-label">Page 1 of 1</span>
-          <button type="button" id="btn-preview-next" class="preview-page-btn" disabled>Next &rarr;</button>
+          <button type="button" id="btn-preview-next" class="preview-page-btn" disabled>
+            <span class="btn-bracket">[</span><span>Next</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="9 18 15 12 9 6"></polyline>
+            </svg><span class="btn-bracket">]</span>
+          </button>
         </div>
       </div>
     </div>
 
-    <!-- T8: Table Builder Modal (+ New Table) -->
+    <!-- Table Builder Modal (+ New Table) -->
     <div id="table-create-modal" class="modal-backdrop hidden">
       <div class="modal-card modal-card-medium">
-        <h3 id="table-create-dialog-title">Create New Table</h3>
+        <div class="modal-header">
+          <h3 id="table-create-dialog-title">Create New Table</h3>
+          <button type="button" class="modal-close-btn" id="table-create-close" title="Close dialog">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
         <form id="table-create-form">
           <div class="config-row">
             <label for="new-table-name">Table Name</label>
@@ -279,7 +420,12 @@
           <div class="config-row">
             <div class="flex-between" style="margin-bottom: 0.35rem;">
               <label>Columns</label>
-              <button type="button" id="btn-add-column" class="btn-sm">+ Add Column</button>
+              <button type="button" id="btn-add-column" class="btn-sm btn-subtle">
+                <span class="btn-bracket">[</span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg><span>column</span><span class="btn-bracket">]</span>
+              </button>
             </div>
             <div id="columns-builder-container" class="columns-builder-container"></div>
           </div>
@@ -289,17 +435,25 @@
           </div>
           <div id="table-create-error" class="card-dialog-error hidden"></div>
           <div class="modal-actions">
-            <button type="button" id="table-create-cancel">Cancel</button>
-            <button type="submit" id="table-create-submit">Create Table</button>
+            <button type="button" id="table-create-cancel" class="btn-secondary">[Cancel]</button>
+            <button type="submit" id="table-create-submit" class="btn-primary">[Create Table]</button>
           </div>
         </form>
       </div>
     </div>
 
-    <!-- T8: Save as View Modal -->
+    <!-- Save as View Modal -->
     <div id="view-create-modal" class="modal-backdrop hidden">
       <div class="modal-card">
-        <h3>Save Query as View</h3>
+        <div class="modal-header">
+          <h3>Save Query as View</h3>
+          <button type="button" class="modal-close-btn" id="view-create-close" title="Close dialog">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
         <form id="view-create-form">
           <div class="config-row">
             <label for="new-view-name">View Name</label>
@@ -308,12 +462,12 @@
           <div class="config-row">
             <label for="view-sql-preview">Query SQL</label>
             <textarea id="view-sql-preview" rows="4" required readonly></textarea>
-            <small class="hint">Views run live when queried. Saved to the database catalog.</small>
+            <small class="hint">Views evaluate live when queried and are saved into the database catalog.</small>
           </div>
           <div id="view-create-error" class="card-dialog-error hidden"></div>
           <div class="modal-actions">
-            <button type="button" id="view-create-cancel">Cancel</button>
-            <button type="submit" id="view-create-submit">Create View</button>
+            <button type="button" id="view-create-cancel" class="btn-secondary">[Cancel]</button>
+            <button type="submit" id="view-create-submit" class="btn-primary">[Create View]</button>
           </div>
         </form>
       </div>
@@ -323,8 +477,19 @@
     <div id="config-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="config-modal-title">
       <div class="modal-card">
         <div class="modal-header">
-          <h3 id="config-modal-title">⚙ LLM Configuration</h3>
-          <button type="button" class="modal-close-btn" id="config-close-btn" title="Close configuration">✕</button>
+          <div class="modal-header-title-wrap">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-modal-title">
+              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+              <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+            <h3 id="config-modal-title">LLM Provider Configuration</h3>
+          </div>
+          <button type="button" class="modal-close-btn" id="config-close-btn" title="Close configuration">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
         </div>
         <form id="config-form">
           <div class="config-row">
@@ -337,7 +502,7 @@
           <div class="config-row" id="row-config-url" style="display: none;">
             <label for="config-url">Base URL / Endpoint</label>
             <input type="text" id="config-url" placeholder="http://localhost:11434/v1" />
-            <small class="hint">Ollama: http://localhost:11434/v1 &middot; LM Studio: http://localhost:1234/v1<br><em>Note: Browsers will prompt for permission to access local device services when connecting to localhost.</em></small>
+            <small class="hint">Ollama: http://localhost:11434/v1 &middot; LM Studio: http://localhost:1234/v1<br><em>Note: Browsers may request permission to connect to local devices.</em></small>
           </div>
           <div class="config-row">
             <label for="config-model">Model Name</label>
@@ -350,11 +515,11 @@
           <div class="config-row">
             <label for="config-context-window">Context Window (tokens)</label>
             <input type="number" id="config-context-window" min="1000" step="1000" placeholder="auto" />
-            <small class="hint">T2: context for interval compaction. Leave empty for auto (cloud model lookup, 128k fallback). Set explicitly for local models.</small>
+            <small class="hint">T2: context for interval compaction. Leave empty for auto (cloud model lookup, 128k fallback).</small>
           </div>
           <div class="modal-actions">
-            <button type="button" id="config-cancel" class="btn-secondary">Cancel</button>
-            <button type="submit" id="config-apply" class="btn-primary">Apply &amp; Reboot</button>
+            <button type="button" id="config-cancel" class="btn-secondary">[Cancel]</button>
+            <button type="submit" id="config-apply" class="btn-primary">[Apply &amp; Reboot]</button>
           </div>
         </form>
       </div>

@@ -1,25 +1,9 @@
 /**
- * GRID UI — T11: right-pane 3×3 reactive canvas.
+ * GRID UI — Ticket 11, Ticket 12 & Ticket 25: 3×3 Dynamic Reactive Canvas
  *
- * Renders `dashboard_cards` onto the CSS grid, provides card CRUD (add/edit
- * dialog, per-card refresh/edit/delete, refresh-all), and implements the
- * change-triggered reactivity that is T18's groundwork:
- *
- *   update_hook (harness.js) ──▶ 'data_change' events on the event stream
- *     ──▶ noteDataChange() accumulates changed DATA tables
- *     ──▶ flush: resolve each card's base-table dependencies (grid.js
- *         resolveCardTables — views expanded to their tables) and re-run the
- *         cards whose dependencies intersect the changed tables.
- *
- * Busy-gating: while a turn / scratchpad / CSV ingest is in flight, changes
- * live inside a savepoint that may still roll back — so re-runs are deferred
- * to the committed point. main.js calls setBusy(on) from setLoading() and
- * flushCards() from each path's finally block (after RELEASE / ROLLBACK).
- * Out-of-turn changes debounce 300 ms and flush on their own.
- *
- * The 9 `.grid-cell` nodes rendered behind the cards are the drop-zone
- * anchors T12 will attach HTML5 drag-and-drop handlers to (T12 itself is not
- * implemented here).
+ * Renders `dashboard_cards` onto the CSS grid, provides card CRUD, drag-and-drop
+ * asset pinning, resizing, and change-triggered reactivity.
+ * Fully vectorized with zero emojis.
  */
 
 import { getEventStream } from './harness.js';
@@ -31,6 +15,7 @@ import {
 import { queryAll, execParams } from './schema.js';
 import { materializeToolResult } from './materialize.js';
 import { SqlAutocompleteController } from './sql-autocomplete.js';
+import { icon, ICONS } from './icons.js';
 
 let agent = null;
 let busy = false;
@@ -58,6 +43,7 @@ export function initGridUi(agentHandle) {
     refreshAllCards().catch(e => console.warn('[grid-ui] refresh-all failed:', e));
   });
   document.getElementById('card-cancel')?.addEventListener('click', closeCardDialog);
+  document.getElementById('card-dialog-close')?.addEventListener('click', closeCardDialog);
   document.getElementById('card-dialog')?.addEventListener('click', (e) => {
     if (e.target.id === 'card-dialog') closeCardDialog(); // backdrop click
   });
@@ -94,9 +80,6 @@ function attachStream() {
 
 export function setBusy(on) {
   busy = !!on;
-  // Card CRUD and refreshes are disabled mid-turn: a card INSERT issued while
-  // the turn savepoint is open would join that transaction and be rolled back
-  // with it on a hard error (UI/DB desync).
   document.getElementById('canvas-pane')?.classList.toggle('disabled', on);
 }
 
@@ -133,7 +116,6 @@ function scheduleFlush(delayMs) {
 // ── Rendering ─────────────────────────────────────────────────────────
 
 let activeDragData = null;
-
 let lastHoverKey = '';
 
 /** Clear all drag-target highlights and preview outlines */
@@ -207,8 +189,7 @@ export async function renderGrid({ forceRefresh = false } = {}) {
   }
 
   const totalRows = computeGridRows(cards);
-
-  grid.style.gridTemplateRows = `repeat(${totalRows}, minmax(180px, auto))`;
+  grid.style.gridTemplateRows = `repeat(${totalRows}, minmax(160px, auto))`;
 
   // Preserve existing rendered card DOM elements to prevent re-querying SQL on move/resize
   const existingCards = new Map();
@@ -244,7 +225,7 @@ export async function renderGrid({ forceRefresh = false } = {}) {
     }
   }
 
-  // Unified grid container dragover/drop handling (finds cell under cursor even over cards)
+  // Unified grid container dragover/drop handling
   grid.addEventListener('dragover', (e) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
@@ -275,12 +256,22 @@ export async function renderGrid({ forceRefresh = false } = {}) {
   if (!cards.length) {
     const empty = document.createElement('div');
     empty.className = 'grid-empty';
-    empty.textContent = 'No cards yet — drag a table or tool result from chat, or click “+ Add card”';
+    empty.innerHTML = `
+      <div style="display: flex; flex-direction: column; align-items: center; gap: 0.5rem;">
+        <div style="color: var(--text-muted); opacity: 0.7;">
+          ${ICONS.dashboard({ size: 32 })}
+        </div>
+        <div style="font-weight: 500; color: var(--text-primary);">Dashboard Canvas is Empty</div>
+        <div style="font-size: 0.72rem; color: var(--text-muted); max-width: 260px; line-height: 1.4;">
+          Drag query results or web searches from chat, or click <strong>[card]</strong> to pin live SQL views.
+        </div>
+      </div>
+    `;
     grid.appendChild(empty);
     return;
   }
 
-  // Append cards: reuse existing element geometry if already rendered to avoid re-running card SQL
+  // Append cards: reuse existing element geometry if already rendered
   for (const card of cards) {
     let el = existingCards.get(card.id);
     if (el) {
@@ -396,11 +387,9 @@ async function onCellDrop(e, cell) {
         reflow: true,
       });
       await renderGrid();
-      await renderExplorer();
     }
   } catch (err) {
     console.warn('[grid-ui] drop error (recovering):', err);
-    // Graceful recovery: re-render grid to safe state without modal alerts
     await renderGrid();
   } finally {
     activeDragData = null;
@@ -432,7 +421,7 @@ export async function refreshCard(id, { live = false, card: knownCard = null } =
     const cards = await listCards(agent.sqlite3, agent.db);
     card = cards.find(c => c.id === id);
   }
-  if (!card) { el.remove(); return; } // deleted out from under us
+  if (!card) { el.remove(); return; }
 
   const res = await runCardSql(agent.sqlite3, agent.db, card.sql);
   renderCardBody(el, card, res);
@@ -444,7 +433,7 @@ export async function refreshCard(id, { live = false, card: knownCard = null } =
   }
   if (live) {
     el.classList.remove('card-live-flash');
-    void el.offsetWidth; // restart the CSS animation
+    void el.offsetWidth;
     el.classList.add('card-live-flash');
   }
 }
@@ -457,18 +446,34 @@ function buildCardEl(card) {
   el.style.gridColumn = `${card.col + 1} / span ${card.col_span}`;
   el.innerHTML = `
     <header class="dash-card-header" draggable="true" title="Drag to move card">
-      <span class="dash-card-drag-handle" title="Drag to move">⠿</span>
+      <span class="dash-card-drag-handle" title="Drag to move">
+        ${ICONS.gripDots({ size: 14 })}
+      </span>
       <span class="dash-card-title"></span>
       <div class="dash-card-actions">
-        <button type="button" class="card-btn card-cycle-size" title="Cycle card size (${card.col_span}x${card.row_span})">⛶</button>
-        <button type="button" class="card-btn card-refresh" title="Refresh card">⟳</button>
-        <button type="button" class="card-btn card-edit" title="Edit card">✎</button>
-        <button type="button" class="card-btn card-delete" title="Delete card">✕</button>
+        <button type="button" class="card-btn card-cycle-size" title="Cycle card size (${card.col_span}x${card.row_span})">
+          ${ICONS.expand({ size: 12 })}
+        </button>
+        <button type="button" class="card-btn card-refresh" title="Refresh card">
+          ${ICONS.refresh({ size: 12 })}
+        </button>
+        <button type="button" class="card-btn card-edit" title="Edit card">
+          ${ICONS.edit({ size: 12 })}
+        </button>
+        <button type="button" class="card-btn card-delete" title="Delete card">
+          ${ICONS.close({ size: 12 })}
+        </button>
       </div>
     </header>
-    <div class="dash-card-body"><em class="card-loading">running…</em></div>
+    <div class="dash-card-body"><em class="card-loading" style="color: var(--text-muted); font-size: 0.72rem;">running…</em></div>
     <footer class="dash-card-footer"></footer>
-    <div class="card-resize-handle" draggable="true" title="Drag to resize card">◢</div>`;
+    <div class="card-resize-handle" draggable="true" title="Drag to resize card">
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15v6h-6"></path>
+        <path d="M21 9v2h-2"></path>
+        <path d="M9 21h2v-2"></path>
+      </svg>
+    </div>`;
 
   el.querySelector('.dash-card-title').textContent = card.title;
 
@@ -561,26 +566,33 @@ function renderCardBody(el, card, res) {
   if (res.error) {
     const err = document.createElement('div');
     err.className = 'tool-error card-error';
-    err.textContent = `⚠ ${res.error}`;
+    err.style.cssText = 'padding: 0.4rem 0.6rem; color: var(--red); display: flex; align-items: center; gap: 0.35rem; font-size: 0.72rem;';
+    err.innerHTML = `${ICONS.alertTriangle({ size: 14 })} <span>${escapeHtml(res.error)}</span>`;
     body.appendChild(err);
     return;
   }
 
   // 1×1 result → big metric; anything else → table.
   if (res.values.length === 1 && res.columns.length === 1) {
-    const metric = document.createElement('div');
-    metric.className = 'card-metric';
-    metric.textContent = String(res.values[0][0] ?? 'NULL');
+    const metricWrap = document.createElement('div');
+    metricWrap.className = 'card-metric';
+    
+    const metricVal = document.createElement('div');
+    metricVal.className = 'metric-value';
+    metricVal.textContent = String(res.values[0][0] ?? 'NULL');
+    
     const label = document.createElement('div');
-    label.className = 'card-metric-label';
+    label.className = 'metric-label';
     label.textContent = res.columns[0];
-    body.appendChild(metric);
-    body.appendChild(label);
+    
+    metricWrap.appendChild(metricVal);
+    metricWrap.appendChild(label);
+    body.appendChild(metricWrap);
     return;
   }
 
   if (!res.values.length) {
-    body.innerHTML = '<em class="card-empty">(no rows)</em>';
+    body.innerHTML = '<em class="card-empty" style="color: var(--text-muted); font-size: 0.72rem; display: block; text-align: center; padding: 1rem 0;">(no rows returned)</em>';
     return;
   }
 
@@ -597,32 +609,16 @@ function renderCardBody(el, card, res) {
   if (res.truncated) {
     const note = document.createElement('div');
     note.className = 'card-truncated';
+    note.style.cssText = 'font-size: 0.65rem; color: var(--text-muted); font-style: italic; margin-top: 0.25rem;';
     note.textContent = `… truncated at ${CARD_ROW_CAP} rows`;
     body.appendChild(note);
-  }
-}
-
-/** Left-pane DB Explorer shell (T8 fills in the full inspector). */
-export async function renderExplorer() {
-  if (!agent) return;
-  const list = document.getElementById('table-list');
-  if (!list) return;
-  const rows = await queryAll(agent.sqlite3, agent.db,
-    `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`);
-  list.innerHTML = '';
-  for (const [name] of rows) {
-    const li = document.createElement('li');
-    li.className = 'explorer-table';
-    li.textContent = name;
-    list.appendChild(li);
   }
 }
 
 // ── Card CRUD ─────────────────────────────────────────────────────────
 
 async function deleteCard(card) {
-  if (!agent || busy) return; // CSS disables the button mid-turn; this guards
-  // keyboard / programmatic paths so a DELETE can't join the turn savepoint.
+  if (!agent || busy) return;
   if (!confirm(`Delete card "${card.title}"?`)) return;
   try {
     await removeCard(agent.sqlite3, agent.db, card.id);
@@ -640,7 +636,7 @@ export function openCardDialog(mode, card = null) {
   if (!dlg) return;
 
   document.getElementById('card-dialog-title').textContent =
-    mode === 'edit' ? 'Edit dashboard card' : 'New dashboard card';
+    mode === 'edit' ? 'Edit Dashboard Card' : 'New Dashboard Card';
   document.getElementById('card-title').value = card ? card.title : '';
   document.getElementById('card-sql').value = card ? card.sql : '';
   document.getElementById('card-row').value = String(card ? card.row : 0);
@@ -649,7 +645,7 @@ export function openCardDialog(mode, card = null) {
   document.getElementById('card-col-span').value = String(card ? card.col_span : 1);
   // Position is explicit in edit mode; add mode auto-packs the first fitting spot.
   document.getElementById('card-placement-row').classList.toggle('hidden', mode !== 'edit');
-  document.getElementById('card-submit').textContent = mode === 'edit' ? 'Save card' : 'Add card';
+  document.getElementById('card-submit').textContent = mode === 'edit' ? 'Save Card' : 'Add Card';
   clearCardError();
   dlg.classList.remove('hidden');
   document.getElementById('card-title').focus();
@@ -676,9 +672,6 @@ function clearCardError() {
 
 async function onCardFormSubmit(e) {
   e.preventDefault();
-  // The dialog can be open when a turn starts, or be submitted via Enter while
-  // a turn is in flight — CSS disables clicks but not this, so guard the write
-  // (an INSERT/UPDATE mid-savepoint would roll back with the turn).
   if (!agent || busy) return;
   const title = document.getElementById('card-title').value;
   const sql = document.getElementById('card-sql').value;
@@ -689,7 +682,7 @@ async function onCardFormSubmit(e) {
 
   try {
     if (editingCardId == null) {
-      // Add: auto-pack the first fitting spot (position selects hidden).
+      // Add: auto-pack the first fitting spot
       await addCard(agent.sqlite3, agent.db, { title, sql, rowSpan, colSpan });
     } else {
       await updateCard(agent.sqlite3, agent.db, editingCardId, { title, sql, row, col, rowSpan, colSpan });

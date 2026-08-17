@@ -31,6 +31,7 @@ import * as explorerUi from './explorer-ui.js';
 import { initPaneResizers } from './panes.js';
 import { SqlAutocompleteController, globalSchemaIndex, detectBangMode } from './sql-autocomplete.js';
 import { SQLITE_ROW, SQLITE_DONE } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
+import { icon, ICONS } from './icons.js';
 import './styles.css';
 
 const messagesEl        = document.getElementById('messages');
@@ -39,6 +40,7 @@ const formEl            = document.getElementById('input-form');
 const inputEl           = document.getElementById('user-input');
 const sendBtn           = document.getElementById('send-btn');
 const statusBar         = document.getElementById('status-bar');
+const statusLed         = document.getElementById('status-led');
 const bangBadge         = document.getElementById('bang-badge');
 const configForm        = document.getElementById('config-form');
 const configProvider    = document.getElementById('config-provider');
@@ -69,6 +71,60 @@ let activeSessionId = 'default';
 let activeStreamingBubble = null;
 let activeToolIndicator = null;
 let isStreamListenerAttached = false;
+
+// ── Day / Night Theme Management ─────────────────────────────────────
+
+export function initTheme() {
+  const saved = localStorage.getItem('bobby-tables-theme');
+  const systemPrefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const theme = saved || (systemPrefersDark ? 'dark' : 'light');
+  setTheme(theme, false);
+
+  document.getElementById('btn-theme-toggle')?.addEventListener('click', () => {
+    const curr = document.documentElement.getAttribute('data-theme') || 'dark';
+    const next = curr === 'dark' ? 'light' : 'dark';
+    setTheme(next, true);
+  });
+
+  if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+      if (!localStorage.getItem('bobby-tables-theme')) {
+        setTheme(e.matches ? 'dark' : 'light', false);
+      }
+    });
+  }
+}
+
+export function setTheme(theme, save = true) {
+  document.documentElement.setAttribute('data-theme', theme);
+  if (save) {
+    localStorage.setItem('bobby-tables-theme', theme);
+  }
+  const iconSvg = document.getElementById('theme-mode-icon');
+  if (iconSvg) {
+    if (theme === 'dark') {
+      // In dark mode, show Sun icon (click to switch to light)
+      iconSvg.innerHTML = `
+        <circle cx="12" cy="12" r="5"></circle>
+        <line x1="12" y1="1" x2="12" y2="3"></line>
+        <line x1="12" y1="21" x2="12" y2="23"></line>
+        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+        <line x1="1" y1="12" x2="3" y2="12"></line>
+        <line x1="21" y1="12" x2="23" y2="12"></line>
+        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+      `;
+      document.getElementById('btn-theme-toggle')?.setAttribute('title', 'Switch to Day Mode (Light)');
+    } else {
+      // In light mode, show Moon icon (click to switch to dark)
+      iconSvg.innerHTML = `
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+      `;
+      document.getElementById('btn-theme-toggle')?.setAttribute('title', 'Switch to Night Mode (Dark)');
+    }
+  }
+}
 
 // ── Config Persistence ──────────────────────────────────────────────
 
@@ -206,12 +262,17 @@ async function populateSessionDropdown() {
         item.dataset.sessionName = displayName;
         item.innerHTML = `
           <div class="session-item-main" title="${escapeHtml(displayName)} [${escapeHtml(s.id)}] (double-click to rename)">
-            <span class="session-item-icon">${isActive ? '●' : '○'}</span>
+            <span class="session-item-icon">${ICONS.messageSquare({ size: 13 })}</span>
             <span class="session-item-name">${escapeHtml(displayName)}</span>
           </div>
           <div class="session-item-actions">
-            <button type="button" class="btn-session-item-action btn-session-item-rename" data-session-id="${escapeHtml(s.id)}" data-session-name="${escapeHtml(displayName)}" title="Rename session">✎</button>
-            ${s.id !== 'default' ? `<button type="button" class="btn-session-item-action btn-session-item-delete" data-session-id="${escapeHtml(s.id)}" data-session-name="${escapeHtml(displayName)}" title="Delete session">✕</button>` : ''}
+            <button type="button" class="btn-session-item-action btn-session-item-rename" data-session-id="${escapeHtml(s.id)}" data-session-name="${escapeHtml(displayName)}" title="Rename session">
+              ${ICONS.edit({ size: 11 })}
+            </button>
+            ${s.id !== 'default' ? `
+            <button type="button" class="btn-session-item-action btn-session-item-delete" data-session-id="${escapeHtml(s.id)}" data-session-name="${escapeHtml(displayName)}" title="Delete session">
+              ${ICONS.close({ size: 11 })}
+            </button>` : ''}
           </div>
         `;
         sessionListEl.appendChild(item);
@@ -337,7 +398,7 @@ function escapeHtml(str) {
 
 function renderTable(columns, values) {
   if (!values || !values.length) return '<em>(no rows)</em>';
-  let html = '<table class="result-table"><thead><tr>';
+  let html = '<div class="result-table-wrap"><table class="result-table"><thead><tr>';
   columns.forEach(c => html += `<th>${escapeHtml(c)}</th>`);
   html += '</tr></thead><tbody>';
   values.forEach(row => {
@@ -345,7 +406,7 @@ function renderTable(columns, values) {
     row.forEach(val => html += `<td>${escapeHtml(String(val ?? 'NULL'))}</td>`);
     html += '</tr>';
   });
-  html += '</tbody></table>';
+  html += '</tbody></table></div>';
   return html;
 }
 
@@ -367,8 +428,19 @@ function renderToolContent(content, toolCallId = null, querySql = '') {
     return `
       <div class="draggable-chat-asset" draggable="true" data-asset-type="table" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-sql="${escapeHtml(rawSql)}" data-title="Query Result">
         <div class="chat-asset-actions">
-          <div class="drag-pin-badge" title="Drag to Dashboard to pin as card">⠿ Drag to Dashboard</div>
-          ${(rawSql && isSelect) ? `<button type="button" class="btn-save-view-chat" data-sql="${escapeHtml(rawSql)}" title="Save Query as View in database catalog">👁 Save as View</button>` : ''}
+          <div class="drag-pin-badge" title="Drag to Dashboard to pin as card">
+            <span class="btn-bracket">[</span>
+            ${ICONS.gripDots({ size: 11 })}
+            <span>drag to dashboard</span>
+            <span class="btn-bracket">]</span>
+          </div>
+          ${(rawSql && isSelect) ? `
+          <button type="button" class="btn-save-view-chat" data-sql="${escapeHtml(rawSql)}" title="Save Query as View in database catalog">
+            <span class="btn-bracket">[</span>
+            ${ICONS.view({ size: 11 })}
+            <span>save as view</span>
+            <span class="btn-bracket">]</span>
+          </button>` : ''}
         </div>
         ${renderTable(parsed[0].columns, parsed[0].values)}
       </div>
@@ -382,8 +454,19 @@ function renderToolContent(content, toolCallId = null, querySql = '') {
     return `
       <div class="draggable-chat-asset" draggable="true" data-asset-type="table" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-sql="${escapeHtml(rawSql)}" data-title="Query Result">
         <div class="chat-asset-actions">
-          <div class="drag-pin-badge" title="Drag to Dashboard to pin as card">⠿ Drag to Dashboard</div>
-          ${(rawSql && isSelect) ? `<button type="button" class="btn-save-view-chat" data-sql="${escapeHtml(rawSql)}" title="Save Query as View in database catalog">👁 Save as View</button>` : ''}
+          <div class="drag-pin-badge" title="Drag to Dashboard to pin as card">
+            <span class="btn-bracket">[</span>
+            ${ICONS.gripDots({ size: 11 })}
+            <span>drag to dashboard</span>
+            <span class="btn-bracket">]</span>
+          </div>
+          ${(rawSql && isSelect) ? `
+          <button type="button" class="btn-save-view-chat" data-sql="${escapeHtml(rawSql)}" title="Save Query as View in database catalog">
+            <span class="btn-bracket">[</span>
+            ${ICONS.view({ size: 11 })}
+            <span>save as view</span>
+            <span class="btn-bracket">]</span>
+          </button>` : ''}
         </div>
         ${renderTable(parsed.columns, parsed.values)}
       </div>
@@ -395,12 +478,22 @@ function renderToolContent(content, toolCallId = null, querySql = '') {
     if (!parsed.results.length) return '<em>(no search results found)</em>';
     let html = `
       <div class="draggable-chat-asset" draggable="true" data-asset-type="search_web" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-title="Search: ${escapeHtml(parsed.query || 'Results')}">
-        <div class="drag-pin-badge" title="Drag to Dashboard to materialize & pin">⠿ Drag to Dashboard</div>
+        <div class="chat-asset-actions">
+          <div class="drag-pin-badge" title="Drag to Dashboard to materialize & pin">
+            <span class="btn-bracket">[</span>
+            ${ICONS.gripDots({ size: 11 })}
+            <span>drag to dashboard</span>
+            <span class="btn-bracket">]</span>
+          </div>
+        </div>
         <div class="search-results-list">`;
     parsed.results.forEach(r => {
       html += `
         <div class="search-result-item">
-          <a class="search-result-title" href="${escapeHtml(r.url || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.title || r.url)}</a>
+          <a class="search-result-title" href="${escapeHtml(r.url || '#')}" target="_blank" rel="noopener noreferrer">
+            <span>${escapeHtml(r.title || r.url)}</span>
+            ${ICONS.externalLink({ size: 11 })}
+          </a>
           <div class="search-result-snippet">${escapeHtml(r.snippet || '')}</div>
         </div>
       `;
@@ -413,9 +506,16 @@ function renderToolContent(content, toolCallId = null, querySql = '') {
   if (parsed && parsed.url && (parsed.content !== undefined || parsed.title !== undefined)) {
     let html = `
       <div class="draggable-chat-asset" draggable="true" data-asset-type="fetch_url" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-title="Page: ${escapeHtml(parsed.title || parsed.url)}">
-        <div class="drag-pin-badge" title="Drag to Dashboard to materialize & pin">⠿ Drag to Dashboard</div>
+        <div class="chat-asset-actions">
+          <div class="drag-pin-badge" title="Drag to Dashboard to materialize & pin">
+            <span class="btn-bracket">[</span>
+            ${ICONS.gripDots({ size: 11 })}
+            <span>drag to dashboard</span>
+            <span class="btn-bracket">]</span>
+          </div>
+        </div>
         <div class="fetch-url-preview">`;
-    html += `<div class="fetch-url-title"><strong>${escapeHtml(parsed.title || 'Fetched Page')}</strong> &middot; <a href="${escapeHtml(parsed.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(parsed.url)}</a></div>`;
+    html += `<div class="fetch-url-title"><strong>${escapeHtml(parsed.title || 'Fetched Page')}</strong> &middot; <a href="${escapeHtml(parsed.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(parsed.url)} ${ICONS.externalLink({ size: 11 })}</a></div>`;
     if (parsed.content) {
       const preview = parsed.content.length > 600 ? parsed.content.slice(0, 600) + '…' : parsed.content;
       html += `<div class="fetch-url-body">${escapeHtml(preview)}</div>`;
@@ -429,10 +529,20 @@ function renderToolContent(content, toolCallId = null, querySql = '') {
     const colList = (parsed.columns || []).map(c => `<code>${escapeHtml(c.name)}</code> <span style="opacity: 0.7; font-size: 0.85em;">${escapeHtml(c.type)}</span>`).join(', ');
     return `
       <div class="draggable-chat-asset" draggable="true" data-asset-type="table" data-sql="SELECT * FROM &quot;${escapeHtml(parsed.table)}&quot;" data-title="${escapeHtml(parsed.table)}">
-        <div class="drag-pin-badge" title="Drag to Dashboard to pin as card">⠿ Drag to Dashboard</div>
+        <div class="chat-asset-actions">
+          <div class="drag-pin-badge" title="Drag to Dashboard to pin as card">
+            <span class="btn-bracket">[</span>
+            ${ICONS.gripDots({ size: 11 })}
+            <span>drag to dashboard</span>
+            <span class="btn-bracket">]</span>
+          </div>
+        </div>
         <div class="materialize-preview" style="padding: 4px 0;">
-          <div style="font-weight: 600; color: #58a6ff; margin-bottom: 4px;">✨ Materialized table <code>${escapeHtml(parsed.table)}</code> (${escapeHtml(String(parsed.row_count))} rows)</div>
-          <div style="font-size: 0.88em; color: #8b949e;">Columns: ${colList}</div>
+          <div style="font-weight: 600; color: var(--accent); margin-bottom: 4px; display: flex; align-items: center; gap: 0.35rem;">
+            ${ICONS.sparkles({ size: 14 })}
+            <span>Materialized table <code>${escapeHtml(parsed.table)}</code> (${escapeHtml(String(parsed.row_count))} rows)</span>
+          </div>
+          <div style="font-size: 0.88em; color: var(--text-muted);">Columns: ${colList}</div>
         </div>
       </div>
     `;
@@ -440,10 +550,10 @@ function renderToolContent(content, toolCallId = null, querySql = '') {
 
   // 5. Tool error: { error: '...' }
   if (parsed && parsed.error) {
-    return `<div class="tool-error">⚠ Tool Error: ${escapeHtml(parsed.error)}</div>`;
+    return `<div class="tool-error" style="color: var(--red); display: flex; align-items: center; gap: 0.35rem;">${ICONS.alertTriangle({ size: 13 })} <span>Tool Error: ${escapeHtml(parsed.error)}</span></div>`;
   }
 
-  // 5. Generic object / array fallback
+  // 6. Generic object / array fallback
   if (typeof parsed === 'object') {
     return `<pre class="json-dump">${escapeHtml(JSON.stringify(parsed, null, 2))}</pre>`;
   }
@@ -467,19 +577,21 @@ function renderScratchpadResult(env) {
   const isSelect = /^\s*(SELECT|WITH|EXPLAIN)\b/i.test(env.sql || '');
   let html = `<div class="draggable-chat-asset" draggable="true" data-asset-type="table" data-sql="${escapeHtml(env.sql || '')}" data-title="${escapeHtml(env.sql?.slice(0, 40) || 'Scratchpad Query')}">` +
     `<div class="chat-asset-actions">` +
-    `<div class="drag-pin-badge" title="Drag to Dashboard to pin as card">⠿ Drag to Dashboard</div>` +
-    (isSelect ? `<button type="button" class="btn-save-view-chat" data-sql="${escapeHtml(env.sql || '')}" title="Save Query as View in database catalog">👁 Save as View</button>` : '') +
+    `<div class="drag-pin-badge" title="Drag to Dashboard to pin as card">` +
+    `<span class="btn-bracket">[</span>${ICONS.gripDots({ size: 11 })} <span>drag to dashboard</span><span class="btn-bracket">]</span>` +
+    `</div>` +
+    (isSelect ? `<button type="button" class="btn-save-view-chat" data-sql="${escapeHtml(env.sql || '')}" title="Save Query as View in database catalog"><span class="btn-bracket">[</span>${ICONS.view({ size: 11 })} <span>save as view</span><span class="btn-bracket">]</span></button>` : '') +
     `</div>` +
     `<div class="scratchpad-header">` +
-    `<span class="scratchpad-badge" title="${privateCmd ? 'Private — not in agent context' : 'Shared — agent sees this in context'}">${privateCmd ? '💥' : '⚡'}</span>` +
+    `<span class="scratchpad-badge ${privateCmd ? 'badge-private' : 'badge-direct'}" title="${privateCmd ? 'Private SQL — not included in agent context' : 'SQL — shared with agent in context'}">${privateCmd ? ICONS.lock({ size: 12 }) : ICONS.terminal({ size: 12 })} <span>${privateCmd ? 'Private SQL' : 'SQL'}</span></span>` +
     `<code class="scratchpad-sql" title="${escapeHtml(env.sql || '')}">${escapeHtml(env.sql || '')}</code>` +
     `</div>`;
 
   if (env.error) {
-    html += `<div class="tool-error">⚠ ${escapeHtml(env.error)}</div>`;
+    html += `<div class="tool-error" style="color: var(--red); display: flex; align-items: center; gap: 0.35rem;">${ICONS.alertTriangle({ size: 13 })} <span>${escapeHtml(env.error)}</span></div>`;
   } else {
     for (const info of env.infos || []) {
-      html += `<div class="scratchpad-info">${escapeHtml(info)}</div>`;
+      html += `<div class="scratchpad-info">${ICONS.check({ size: 12 })} <span>${escapeHtml(info)}</span></div>`;
     }
     for (const r of env.results || []) {
       html += renderTable(r.columns, r.values);
@@ -506,7 +618,7 @@ async function renderMessages() {
   const rows = [];
   for await (const stmt of agent.sqlite3.statements(
     agent.db,
-    `SELECT id, role, content, tool_calls, tool_call_id FROM messages WHERE session_id = ? ORDER BY id ASC`
+    `SELECT id, role, content, tool_calls, tool_call_id, created_at FROM messages WHERE session_id = ? ORDER BY id ASC`
   )) {
     agent.sqlite3.bind_collection(stmt, [activeSessionId]);
     while (await agent.sqlite3.step(stmt) === SQLITE_ROW) {
@@ -565,13 +677,20 @@ async function renderMessages() {
     const configured = isProviderConfigured(loadConfig());
     welcomeDiv.innerHTML = `
       <div class="welcome-header">
-        <span class="welcome-icon">👋</span>
-        <h3>Welcome to Bobby Tables!</h3>
+        <div class="welcome-icon-wrap">
+          ${ICONS.sparkles({ size: 18 })}
+        </div>
+        <h3>Welcome to Tables!</h3>
       </div>
-      <p>Bobby is an in-browser SQL data agent. ${configured ? 'Ask a question below to analyze data with AI.' : 'To start querying with AI, please configure your LLM provider:'}</p>
+      <p>Tables is an in-browser SQL data workstation. ${configured ? 'Ask a question below to analyze data with AI.' : 'To start querying with AI, please configure your LLM provider:'}</p>
       ${!configured ? `
       <div class="welcome-actions">
-        <button type="button" class="welcome-config-btn">⚙ Configure Provider</button>
+        <button type="button" class="welcome-config-btn">
+          <span class="btn-bracket">[</span>
+          ${ICONS.gear({ size: 13 })}
+          <span>configure provider</span>
+          <span class="btn-bracket">]</span>
+        </button>
       </div>` : ''}
       <p class="welcome-hint">
         <em>Tip:</em> You can also run direct SQL commands immediately without an LLM using <code>!SELECT * FROM sample_data</code>.
@@ -580,17 +699,25 @@ async function renderMessages() {
     welcomeDiv.querySelector('.welcome-config-btn')?.addEventListener('click', openConfigModal);
     messagesEl.appendChild(welcomeDiv);
   } else {
-    rows.forEach(([id, role, content, , toolCallId]) => {
+    rows.forEach(([id, role, content, , toolCallId, createdAt]) => {
       if (role === 'system') return;
       const div = document.createElement('div');
       div.className = `message ${role}`;
+      if (createdAt) {
+        try {
+          const d = new Date(createdAt.endsWith('Z') ? createdAt : createdAt + 'Z');
+          div.title = isNaN(d.getTime()) ? createdAt : d.toLocaleString();
+        } catch {
+          div.title = String(createdAt);
+        }
+      }
       // T9: scratchpad user rows (leading bangs) render in monospace.
       if (role === 'user' && /^!/.test(String(content))) div.classList.add('scratchpad');
 
       if (role === 'tool') {
         const label = document.createElement('div');
         label.className = 'message-label';
-        label.textContent = '🔧 Tool Output';
+        label.innerHTML = `${ICONS.terminal({ size: 12 })} <span>Tool Output</span>`;
         div.appendChild(label);
 
         const querySql = toolCallQueries.get(toolCallId) || '';
@@ -617,11 +744,7 @@ async function renderMessages() {
         }
       }
 
-      // T3: per-bubble rewind button on user messages — "rewind the database to
-      // before this message".
-      // T9: scratchpad user rows (leading bangs) get a ⟲ only while their
-      // negative turn still has recorded changes; single-bang read-only
-      // commands that changed nothing get no button.
+      // T3: per-bubble rewind button on user messages
       if (role === 'user') {
         const bangs = (String(content).match(/^!+/) || [''])[0].length;
         let target = null;
@@ -634,9 +757,9 @@ async function renderMessages() {
           const rewindBtn = document.createElement('button');
           rewindBtn.className = 'rewind-btn';
           rewindBtn.title = bangs === 0
-            ? 'Rewind the database to the state before this message'
-            : 'Rewind the database to the state before this scratchpad command';
-          rewindBtn.textContent = '⟲';
+            ? 'Rewind database to before this message'
+            : 'Rewind database to before this scratchpad command';
+          rewindBtn.innerHTML = `<span class="btn-bracket">[</span>${ICONS.undo({ size: 11 })}<span class="btn-bracket">]</span>`;
           rewindBtn.addEventListener('click', target);
           div.appendChild(rewindBtn);
         }
@@ -733,8 +856,8 @@ function handleAgentEvent(event) {
         scrollChatToBottom();
       }
 
-      statusBar.textContent = `● Executing tool: ${event.name || 'tool'}…`;
-      statusBar.style.color = '#d29922';
+      statusBar.textContent = `Executing tool: ${event.name || 'tool'}…`;
+      if (statusLed) statusLed.className = 'status-led led-busy';
       break;
     }
 
@@ -750,7 +873,7 @@ function handleAgentEvent(event) {
       div.className = 'message tool';
       const label = document.createElement('div');
       label.className = 'message-label';
-      label.textContent = `🔧 Tool Output: ${event.tool || 'result'}`;
+      label.innerHTML = `${ICONS.terminal({ size: 12 })} <span>Tool Output: ${escapeHtml(event.tool || 'result')}</span>`;
       div.appendChild(label);
 
       const contentDiv = document.createElement('div');
@@ -760,8 +883,8 @@ function handleAgentEvent(event) {
       messagesEl.appendChild(div);
       scrollChatToBottom();
 
-      statusBar.textContent = '● Received tool result, continuing…';
-      statusBar.style.color = '#58a6ff';
+      statusBar.textContent = 'Received tool result, continuing…';
+      if (statusLed) statusLed.className = 'status-led led-busy';
       break;
     }
 
@@ -883,20 +1006,24 @@ function setLoading(on) {
   isProcessing = on;
 }
 
-// T3: morph the Send button into a Stop button while a turn is in flight.
+// T3 & T25: morph the Send button into a Stop button while a turn is in flight.
 function setSendButtonStop(on) {
   if (!sendBtn) return;
   if (on) {
     sendBtn.dataset.mode = 'stop';
-    sendBtn.textContent = '⏹ Stop';
+    sendBtn.innerHTML = `
+      <span class="btn-bracket">[</span><span class="send-text">■</span><span class="btn-bracket">]</span>
+    `;
     sendBtn.classList.add('stop-btn');
-    // T3: the button is disabled by setLoading(true) at turn start, but Stop must
-    // stay clickable while the turn is in flight — re-enable it here.
+    sendBtn.setAttribute('title', 'Stop response (Esc)');
     sendBtn.disabled = false;
   } else {
     delete sendBtn.dataset.mode;
-    sendBtn.textContent = 'Send';
+    sendBtn.innerHTML = `
+      <span class="btn-bracket">[</span><span class="send-text">↑</span><span class="btn-bracket">]</span>
+    `;
     sendBtn.classList.remove('stop-btn');
+    sendBtn.setAttribute('title', 'Send message (Enter, Shift+Enter for newline)');
   }
 }
 
@@ -913,8 +1040,8 @@ function updateReadyStatus() {
   }
 
   if (!configured) {
-    statusBar.textContent = '○ Provider not configured — click ⚙ Config to get started';
-    statusBar.style.color = '#d29922';
+    statusBar.textContent = 'Provider not configured — configure provider to get started';
+    if (statusLed) statusLed.className = 'status-led led-unconfigured';
     return;
   }
 
@@ -925,15 +1052,15 @@ function updateReadyStatus() {
 
   if (provider === 'gemini') {
     if (apiKey) {
-      statusBar.textContent = `● Ready — Google Gemini (${model})`;
-      statusBar.style.color = '#3fb950';
+      statusBar.textContent = `Ready — Google Gemini (${model})`;
+      if (statusLed) statusLed.className = 'status-led led-ready';
     } else {
-      statusBar.textContent = `○ Ready — Google Gemini (${model}) [API key needed]`;
-      statusBar.style.color = '#d29922';
+      statusBar.textContent = `Ready — Google Gemini (${model}) [API key needed]`;
+      if (statusLed) statusLed.className = 'status-led led-unconfigured';
     }
   } else {
-    statusBar.textContent = `● Ready — OpenAI Compatible at ${url || 'default'} (${model})`;
-    statusBar.style.color = '#3fb950';
+    statusBar.textContent = `Ready — OpenAI Compatible at ${url || 'default'} (${model})`;
+    if (statusLed) statusLed.className = 'status-led led-ready';
   }
 }
 
@@ -1077,19 +1204,32 @@ let mainAutocomplete = null;
 
 export function updateBangModeVisuals(bang) {
   const badgeEl = document.getElementById('bang-badge');
+  const cardEl = document.getElementById('chat-input-card');
   if (!badgeEl || !inputEl) return;
 
   if (bang && bang.isBang) {
     badgeEl.classList.remove('hidden');
     badgeEl.classList.toggle('bang-private', bang.isPrivate);
-    const icon = badgeEl.querySelector('.bang-badge-icon');
-    const text = badgeEl.querySelector('.bang-badge-text');
-    if (icon) icon.textContent = bang.isPrivate ? '🔒' : '⚡';
-    if (text) text.textContent = bang.isPrivate ? '! Private SQL' : '! Direct SQL';
+    const iconSpan = badgeEl.querySelector('.bang-badge-icon');
+    const textSpan = badgeEl.querySelector('.bang-badge-text');
+    if (iconSpan) {
+      iconSpan.innerHTML = bang.isPrivate ? ICONS.lock({ size: 12 }) : ICONS.terminal({ size: 12 });
+    }
+    if (textSpan) {
+      textSpan.textContent = bang.isPrivate ? 'Private SQL' : 'SQL';
+    }
 
     inputEl.classList.add('bang-mode');
     inputEl.classList.add('has-bang-badge');
     inputEl.classList.toggle('bang-private', bang.isPrivate);
+    if (cardEl) {
+      cardEl.classList.toggle('bang-private', bang.isPrivate);
+    }
+    
+    // Dynamically calculate left padding so bangs and SQL text never impinge or overlap the badge
+    const badgeWidth = badgeEl.offsetWidth || (bang.isPrivate ? 95 : 55);
+    inputEl.style.paddingLeft = `${badgeWidth + 10}px`;
+
     inputEl.placeholder = bang.isPrivate
       ? 'Enter private SQL (hidden from agent context)…'
       : 'Enter SQL to execute directly (visible to agent)…';
@@ -1097,7 +1237,12 @@ export function updateBangModeVisuals(bang) {
     badgeEl.classList.add('hidden');
     badgeEl.classList.remove('bang-private');
     inputEl.classList.remove('bang-mode', 'has-bang-badge', 'bang-private');
-    inputEl.placeholder = 'Ask me to query your data… or run SQL: ! = agent sees it, !! = private';
+    if (cardEl) {
+      cardEl.classList.remove('bang-private');
+      cardEl.classList.remove('bang-mode');
+    }
+    inputEl.style.paddingLeft = '';
+    inputEl.placeholder = 'Ask Tables to analyze data… or run SQL: ! = agent sees it, !! = private';
   }
 }
 
@@ -1112,6 +1257,7 @@ async function sendMessage(text) {
   const compactCmd = parseCompactCommand(userText);
   if (compactCmd) {
     inputEl.value = '';
+    inputEl.style.height = 'auto';
     updateBangModeVisuals({ isBang: false });
     await runManualCompaction(compactCmd.instructions);
     return;
@@ -1122,6 +1268,7 @@ async function sendMessage(text) {
   const scratch = parseScratchpad(userText);
   if (scratch) {
     inputEl.value = '';
+    inputEl.style.height = 'auto';
     updateBangModeVisuals({ isBang: false });
     await runScratchpad(scratch, userText);
     return;
@@ -1136,6 +1283,7 @@ async function sendMessage(text) {
   }
 
   inputEl.value = '';
+  inputEl.style.height = 'auto';
   updateBangModeVisuals({ isBang: false });
   setLoading(true);
   setSendButtonStop(true); // T3: morph Send → Stop while the turn is in flight
@@ -1144,6 +1292,7 @@ async function sendMessage(text) {
   const userDiv = document.createElement('div');
   userDiv.className = 'message user';
   userDiv.textContent = userText;
+  userDiv.title = new Date().toLocaleString();
   messagesEl.appendChild(userDiv);
   scrollChatToBottom();
 
@@ -1759,7 +1908,26 @@ async function rewindToBeforeScratchpad(messageId) {
 
 // ── Event Listeners ─────────────────────────────────────────────────
 
-formEl.addEventListener('submit', e => { e.preventDefault(); sendMessage(inputEl.value); });
+formEl.addEventListener('submit', (e) => {
+  e.preventDefault();
+  sendMessage(inputEl.value);
+});
+
+// Support Shift+Enter for newlines vs Enter for submit on textarea
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    // If autocomplete dropdown is open, let autocomplete handle Enter
+    if (mainAutocomplete && mainAutocomplete.isOpen) return;
+    e.preventDefault();
+    sendMessage(inputEl.value);
+  }
+});
+
+// Auto-grow textarea height on multiline input
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(Math.max(inputEl.scrollHeight, 48), 180) + 'px';
+});
 
 // T3: when the Send button has morphed into Stop, a click aborts the in-flight
 // turn instead of submitting a new message.
@@ -2045,8 +2213,10 @@ window.addEventListener('drop', (e) => {
   e.preventDefault();
 });
 
-// T11 follow-up: draggable dividers between the 3 panes (pure UI state;
-// widths persist in localStorage, never in the brain DB).
+// Initialize Day/Night Theme
+initTheme();
+
+// T11 follow-up: draggable dividers between the 3 panes
 initPaneResizers();
 
 // CSV Upload button handler

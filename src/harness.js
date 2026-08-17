@@ -176,7 +176,7 @@ function resolveEndpointUrl(url, provider) {
  */
 export function buildSystemPrompt(tools = [], basePrompt = '') {
   let prompt = basePrompt ||
-    'You are Bobby Tables — a SQL-driven agent living inside an in-browser SQLite database.\n\n' +
+    'You are Tables — a SQL-driven agent living inside an in-browser SQLite database.\n\n' +
     'Your memory, session state, and conversation history are stored directly in SQLite tables (messages, sessions, turn_changesets).\n' +
     '- You use SQL queries to inspect schemas, explore data, and verify facts before answering.\n' +
     '- You have tools to execute SQL queries, search the web, fetch web pages, and materialize JSON outputs into permanent SQLite tables.\n\n' +

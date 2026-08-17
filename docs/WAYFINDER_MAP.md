@@ -70,7 +70,8 @@ graph TD
     T8 --> T24
     T1 --> T11[Ticket 11: 3-Pane Layout & Grid Engine - DONE]
     T11 --> T12[Ticket 12: Dynamic Grid Canvas, Drag-to-Move, Resize & Chat Pinning - DONE]
-    T11 --> T25[Ticket 25: Professional Workstation UI & Design System Overhaul]
+    T11 --> T25[Ticket 25: Professional Workstation UI & Design System Overhaul - DONE]
+    T25 --> T26[Ticket 26: Codebase Compaction & SQL-Native Migration]
     T1 --> T13[Ticket 13: Tool-Output Materialization - DONE]
     T1 --> T14
     T1 --> T15[Ticket 15: Durable Semantic Memory]
@@ -390,28 +391,21 @@ graph TD
 
 ---
 
-### Ticket 25: Professional Workstation UI & Design System Overhaul (Pro IDE Aesthetics, Vector Icons & Theme Density)
+### Ticket 25: Professional Workstation UI & Design System Overhaul (Portland Teal Theme, Unified Prompt Box & Clean Brackets)
 * **Label:** `wayfinder:task` (AFK/HITL)
-* **Status:** Open (Frontier)
+* **Status:** ✅ COMPLETE (2026-08-16)
 * **Question:** How should we systematically replace toy-like elements, emojis (`🔍`, `⚡`, `📌`, `🗑`, `👁`, `⚙`, `📋`, `💬`, `🗄`, `⊞`, `🔒`, `●`, `★`, etc.), saturated ad-hoc accents, and cluttered controls across all panes with a cohesive, pro-grade developer/analyst workstation design system?
-* **Design notes & Scope (2026-08-15):**
-  * **1. Vector Iconography (Material Symbols / Lucide SVGs):**
-    * Eliminate all raw Unicode emojis in functional UI elements.
-    * Adopt clean, crisp vector SVG icons (e.g. Google Material Symbols or Lucide icons) for:
-      * **Activity Rails:** Database explorer, sessions, dashboard layout toggles.
-      * **DB Explorer Tree:** Table icon, view icon, system settings gear, primary key keyhole, index node, foreign key link.
-      * **Quick Action Buttons:** Data preview (table/magnifier), Scratchpad query (terminal/code), Pin to grid (pin), Drop (trashcan/cross).
-      * **Chat & Input Controls:** Bang mode badges (terminal lightning / private lock), send button (arrow-up / paper-plane), stop/rewind controls (rewind/history/stop-square), token counter metrics.
-      * **Dashboard Card Actions:** Drag handle dots, SQL edit, run/refresh, remove card, resize corner.
-      * **Modals & Drawers:** Close `✕`, pagination arrows (`‹`, `›`), sorting direction chevrons (`▲`, `▼`), copy code clipboard.
-  * **2. Refined Design System & Visual Hierarchy:**
-    * **Palette & Surfaces:** Cohesive dark-mode theme utilizing calibrated slate/charcoal tones (`#0d1117`, `#161b22`, `#21262d`), subtle border definitions (`rgba(255,255,255,0.08)` / `#30363d`), and unified accent highlights (steel blue / cyan / indigo).
-    * **Information Density & Typography:** Modern system & code typefaces (`Inter`, `Geist`, `JetBrains Mono` / `SF Mono`), crisp letter-spacing, reduced vertical padding on compact data tables, sticky headers, and monospace alignment for numeric metrics/token counters.
-    * **Micro-interactions:** Subtle hover transitions, refined focus rings, smooth accordion chevron animations, and pro-grade toast/notification badges.
-  * **3. Component Upgrades:**
-    * Status bar: Sleek pulsing status LED dot with clean text hierarchy.
-    * SQL code blocks & Scratchpad output: Clean IDE styling with integrated copy, execution duration badge, and row count pills.
-    * Modals: High-contrast backdrop blur, crisp title headers, structured form layouts without clutter.
+* **Implemented Components:**
+  * **Branding & Rebrand:** Rebranded workspace to **Tables** with clean Geist typography and unified typography tokens.
+  * **Portland Teal Design System:** Day/Night system with OS auto-detection (`prefers-color-scheme`) and persistent header toggle (`[ ☀️ ]` in dark mode, `[ 🌙 ]` in light mode). Obsidian (`#090e13`) dark base, Warm Architectural Paper (`#fbfbf9`) light base, and calibrated `#0d9488` teal accents.
+  * **Unified Prompt Card & Bottom Toolbar:** Restructured chat input into a unified prompt card containing a 2-line auto-growing textarea, with the model info/LED status and token usage cleanly aligned along the bottom toolbar inside the box, alongside a compact bracketed send button (`[ ↑ ]` / `[ ■ ]`). Added `Shift+Enter` for newlines and `Enter` for submission.
+  * **Bounded Table Scrolling:** Wrapped all rendered SQL result tables in `.result-table-wrap` with horizontal scroll contained inside chat bubbles (`overflow-x: hidden` on `#chat-container`), preventing table columns from stretching the chat container.
+  * **Solid Hairline Borders & Zero Dashed Outlines:** Cleaned up all dashed borders across header buttons, upload CSV button, table cells, modal dialogs, and activity rails in favor of crisp solid hairlines (`border: 1px solid var(--border-default)`).
+  * **Tight Monospace Brackets & Single Pluses:** Removed inner whitespace from control brackets (`[config]`, `[export]`, `[import]`, `[upload csv]`, `[table]`, `[card]`, `[new]`, `[column]`) and eliminated redundant double `++` text prefixes.
+  * **Vector SVG Iconography (`src/icons.js`):** 30+ zero-dependency vector SVGs. Replaced lightning bolts with `>_` terminal prompt icons for SQL execution badges and query actions.
+  * **Dynamic Bang Badges & Padding:** `>_ SQL` for direct SQL (`!`) and `🔒 Private SQL` for private SQL (`!!`), with dynamic input padding and automatic focus-ring reset upon message submission.
+  * **Message Timestamps:** Added `created_at` timestamp tooltips to message bubble hover states.
+* **Verification:** Production build verified with 0 errors (`npm run build`). Live browser verification across Day/Night modes, prompt box interactions, multiline SQL input, and table horizontal scrolling.
 
 ---
 

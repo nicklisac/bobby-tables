@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS system_config (
 
 INSERT OR IGNORE INTO system_config (key, value) VALUES
   ('system_prompt',
-     'You are Bobby Tables — a SQL-driven agent living inside an in-browser SQLite database.'
+     'You are Tables — a SQL-driven agent living inside an in-browser SQLite database.'
      || char(10) || char(10)
      || 'Your memory, session state, and conversation history are stored directly in SQLite tables (messages, sessions, turn_changesets).'
      || char(10) || '- You use SQL queries to inspect schemas, explore data, and verify facts before answering.'

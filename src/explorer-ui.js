@@ -1,8 +1,9 @@
 /**
- * EXPLORER UI — Ticket 8: DB Schema Inspector, Table Stats & Interactive Data Explorer.
+ * EXPLORER UI — Ticket 8 & Ticket 25: DB Schema Inspector & Data Explorer
  *
  * Renders the interactive database schema tree in #explorer-pane, manages table/view details,
- * live stats, the Data Preview modal/drawer, the New Table builder modal, and the Save as View modal.
+ * live stats, Data Preview modal/drawer, Table Builder modal, and Save as View modal.
+ * Fully vectorized with zero emojis.
  */
 
 import {
@@ -14,6 +15,7 @@ import { quoteIdent } from './schema.js';
 import { addCard } from './grid.js';
 import { renderGrid } from './grid-ui.js';
 import { globalSchemaIndex } from './sql-autocomplete.js';
+import { icon, ICONS } from './icons.js';
 
 let agent = null;
 let currentPreviewTable = null;
@@ -47,6 +49,7 @@ export function initExplorerUi(agentHandle) {
   // 2. New Table Modal events
   document.getElementById('btn-add-column')?.addEventListener('click', () => addColumnRow());
   document.getElementById('table-create-cancel')?.addEventListener('click', closeNewTableModal);
+  document.getElementById('table-create-close')?.addEventListener('click', closeNewTableModal);
   document.getElementById('table-create-modal')?.addEventListener('click', (e) => {
     if (e.target.id === 'table-create-modal') closeNewTableModal();
   });
@@ -55,6 +58,7 @@ export function initExplorerUi(agentHandle) {
 
   // 3. Save as View Modal events
   document.getElementById('view-create-cancel')?.addEventListener('click', closeViewCreateModal);
+  document.getElementById('view-create-close')?.addEventListener('click', closeViewCreateModal);
   document.getElementById('view-create-modal')?.addEventListener('click', (e) => {
     if (e.target.id === 'view-create-modal') closeViewCreateModal();
   });
@@ -128,7 +132,12 @@ export async function renderExplorer() {
     if (currentFilterText) filterExplorerItems();
   } catch (err) {
     console.error('[explorer-ui] render error:', err);
-    container.innerHTML = `<div class="explorer-error">⚠ Error inspecting schema: ${escapeHtml(err.message)}</div>`;
+    container.innerHTML = `
+      <div class="explorer-error" style="padding: 0.5rem; font-size: 0.7rem; color: var(--red); display: flex; align-items: center; gap: 0.35rem;">
+        ${ICONS.alertTriangle({ size: 14 })}
+        <span>Error inspecting schema: ${escapeHtml(err.message)}</span>
+      </div>
+    `;
   }
 }
 
@@ -136,11 +145,15 @@ function createSectionElement(title, items, categoryType, defaultExpanded = true
   const section = document.createElement('div');
   section.className = `explorer-section section-${categoryType}`;
 
+  const catIconSvg = categoryType === 'view'
+    ? ICONS.view({ size: 14 })
+    : (categoryType === 'system' ? ICONS.shield({ size: 14 }) : ICONS.table({ size: 14 }));
+
   const header = document.createElement('div');
   header.className = 'explorer-section-header';
   header.innerHTML = `
     <div class="explorer-section-title">
-      <span class="explorer-section-icon">${categoryType === 'view' ? '👁' : (categoryType === 'system' ? '⚙' : '📋')}</span>
+      <span class="explorer-section-icon">${catIconSvg}</span>
       <span>${escapeHtml(title)}</span>
     </div>
     <span class="explorer-count-badge">${items.length}</span>
@@ -186,7 +199,7 @@ function createItemElement(item) {
   summary.className = 'explorer-item-summary';
   summary.innerHTML = `
     <div class="explorer-item-main">
-      <span class="explorer-chevron">▸</span>
+      <span class="explorer-chevron">${ICONS.chevronRight({ size: 12 })}</span>
       <span class="explorer-item-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
     </div>
     <span class="explorer-row-badge" title="Row count">${escapeHtml(rowCountText)}</span>
@@ -202,7 +215,7 @@ function createItemElement(item) {
   if (item.columns && item.columns.length) {
     detailsHtml += '<div class="explorer-subheading">Columns</div><div class="explorer-col-list">';
     item.columns.forEach(col => {
-      const pkBadge = col.pk ? '<span class="explorer-badge badge-pk" title="Primary Key">PK</span>' : '';
+      const pkBadge = col.pk ? `<span class="explorer-badge badge-pk" title="Primary Key">${ICONS.key({ size: 10 })} PK</span>` : '';
       const nnBadge = col.notnull ? '<span class="explorer-badge badge-nn" title="Not Null">NN</span>' : '';
       const dfltText = col.defaultValue !== null && col.defaultValue !== undefined
         ? `<span class="explorer-dflt" title="Default: ${escapeHtml(col.defaultValue)}">=${escapeHtml(col.defaultValue)}</span>` : '';
@@ -253,7 +266,12 @@ function createItemElement(item) {
     detailsHtml += `
       <div class="explorer-subheading flex-between">
         <span>Schema DDL</span>
-        <button type="button" class="btn-copy-ddl" title="Copy DDL to clipboard">📋 Copy</button>
+        <button type="button" class="btn-copy-ddl" title="Copy DDL to clipboard">
+          <span class="btn-bracket">[</span>
+          ${ICONS.copy({ size: 11 })}
+          <span>copy</span>
+          <span class="btn-bracket">]</span>
+        </button>
       </div>
       <pre class="explorer-ddl-block"><code>${escapeHtml(item.sql)}</code></pre>
     `;
@@ -262,10 +280,31 @@ function createItemElement(item) {
   // 5. Actions Toolbar
   detailsHtml += `
     <div class="explorer-actions-bar">
-      <button type="button" class="btn-action-preview" title="Open paginated data preview">🔍 Preview</button>
-      <button type="button" class="btn-action-query" title="Insert query into chat/scratchpad">⚡ Query</button>
-      <button type="button" class="btn-action-pin" title="Pin to Dashboard canvas">📌 Pin</button>
-      ${!item.isSystem ? `<button type="button" class="btn-action-drop" title="Drop this ${item.type}">🗑 Drop</button>` : ''}
+      <button type="button" class="btn-action-preview" title="Open paginated data preview">
+        <span class="btn-bracket">[</span>
+        ${ICONS.preview({ size: 11 })}
+        <span>preview</span>
+        <span class="btn-bracket">]</span>
+      </button>
+      <button type="button" class="btn-action-query" title="Insert query into chat/scratchpad">
+        <span class="btn-bracket">[</span>
+        ${ICONS.terminal({ size: 11 })}
+        <span>query</span>
+        <span class="btn-bracket">]</span>
+      </button>
+      <button type="button" class="btn-action-pin" title="Pin to Dashboard canvas">
+        <span class="btn-bracket">[</span>
+        ${ICONS.pin({ size: 11 })}
+        <span>pin</span>
+        <span class="btn-bracket">]</span>
+      </button>
+      ${!item.isSystem ? `
+        <button type="button" class="btn-action-drop" title="Drop this ${item.type}">
+          <span class="btn-bracket">[</span>
+          ${ICONS.trash({ size: 11 })}
+          <span>drop</span>
+          <span class="btn-bracket">]</span>
+        </button>` : ''}
     </div>
   `;
 
@@ -277,18 +316,20 @@ function createItemElement(item) {
     const isClosed = details.classList.contains('hidden');
     details.classList.toggle('hidden', !isClosed);
     el.classList.toggle('expanded', isClosed);
-    summary.querySelector('.explorer-chevron').textContent = isClosed ? '▾' : '▸';
   });
 
   // Action: Copy DDL
   details.querySelector('.btn-copy-ddl')?.addEventListener('click', async (e) => {
     e.stopPropagation();
+    const btn = e.currentTarget;
     try {
       await navigator.clipboard.writeText(item.sql);
-      e.target.textContent = '✓ Copied';
-      setTimeout(() => { e.target.textContent = '📋 Copy'; }, 2000);
+      btn.innerHTML = `${ICONS.check({ size: 11 })} <span>Copied</span>`;
+      setTimeout(() => {
+        btn.innerHTML = `${ICONS.copy({ size: 11 })} <span>Copy</span>`;
+      }, 2000);
     } catch {
-      e.target.textContent = 'Failed';
+      btn.textContent = 'Failed';
     }
   });
 
@@ -304,6 +345,7 @@ function createItemElement(item) {
     const input = document.getElementById('user-input');
     if (input) {
       input.value = `!SELECT * FROM ${quoteIdent(item.name)} LIMIT 50;`;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
       input.focus();
     }
   });
@@ -312,6 +354,7 @@ function createItemElement(item) {
   details.querySelector('.btn-action-pin')?.addEventListener('click', async (e) => {
     e.stopPropagation();
     if (!agent) return;
+    const btn = e.currentTarget;
     try {
       await addCard(agent.sqlite3, agent.db, {
         title: item.name,
@@ -320,9 +363,10 @@ function createItemElement(item) {
         rowSpan: 1,
       });
       await renderGrid();
-      const btn = e.target;
-      btn.textContent = '✓ Pinned';
-      setTimeout(() => { btn.textContent = '📌 Pin'; }, 2000);
+      btn.innerHTML = `${ICONS.check({ size: 12 })} <span>Pinned</span>`;
+      setTimeout(() => {
+        btn.innerHTML = `${ICONS.pin({ size: 12 })} <span>Pin</span>`;
+      }, 2000);
     } catch (err) {
       alert(`Pin failed: ${err.message}`);
     }
@@ -391,7 +435,7 @@ async function loadPreviewData() {
   const prevBtn = document.getElementById('btn-preview-prev');
   const nextBtn = document.getElementById('btn-preview-next');
 
-  if (container) container.innerHTML = '<div class="preview-loading">Loading records…</div>';
+  if (container) container.innerHTML = '<div class="preview-loading" style="padding: 1rem; color: var(--text-muted); font-size: 0.75rem;">Loading records…</div>';
 
   try {
     const data = await fetchTableData(agent.sqlite3, agent.db, currentPreviewTable, {
@@ -410,7 +454,7 @@ async function loadPreviewData() {
 
     if (!data.rows.length) {
       if (container) {
-        container.innerHTML = `<div class="preview-empty">No records found ${currentPreviewFilter ? 'matching filter' : 'in table'}.</div>`;
+        container.innerHTML = `<div class="preview-empty" style="padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.75rem;">No records found ${currentPreviewFilter ? 'matching filter' : 'in table'}.</div>`;
       }
       return;
     }
@@ -419,15 +463,19 @@ async function loadPreviewData() {
     let tableHtml = '<table class="preview-grid"><thead><tr>';
     data.columns.forEach((col, idx) => {
       const isSorted = currentPreviewSortBy === col;
-      const sortIcon = isSorted ? (currentPreviewSortDir === 'ASC' ? ' ▲' : ' ▼') : '';
+      const sortIconSvg = isSorted
+        ? (currentPreviewSortDir === 'ASC'
+            ? `<span style="color: var(--accent); display: inline-flex; align-items: center; margin-left: 2px;">${ICONS.chevronDown({ size: 12, className: 'sort-asc', extraAttrs: 'style="transform: rotate(180deg);"' })}</span>`
+            : `<span style="color: var(--accent); display: inline-flex; align-items: center; margin-left: 2px;">${ICONS.chevronDown({ size: 12, className: 'sort-desc' })}</span>`)
+        : '';
       const colDetail = data.columnDetails[idx];
       const typeStr = colDetail ? colDetail.type : '';
       tableHtml += `
         <th class="preview-th sortable" data-col="${escapeHtml(col)}">
-          <div class="th-content">
+          <div class="th-content" style="display: flex; align-items: center; gap: 0.35rem;">
             <span class="th-name">${escapeHtml(col)}</span>
-            <span class="th-type">${escapeHtml(typeStr)}</span>
-            <span class="th-sort">${sortIcon}</span>
+            <span class="th-type" style="font-size: 0.6rem; color: var(--text-muted); font-weight: 400;">${escapeHtml(typeStr)}</span>
+            ${sortIconSvg}
           </div>
         </th>
       `;
@@ -474,7 +522,7 @@ async function loadPreviewData() {
   } catch (err) {
     console.error('[explorer-ui] load preview error:', err);
     if (container) {
-      container.innerHTML = `<div class="preview-error">⚠ Error fetching data: ${escapeHtml(err.message)}</div>`;
+      container.innerHTML = `<div class="preview-error" style="padding: 1rem; color: var(--red); font-size: 0.75rem;">Error fetching data: ${escapeHtml(err.message)}</div>`;
     }
   }
 }
@@ -523,6 +571,7 @@ export function addColumnRow(preset = {}) {
 
   const row = document.createElement('div');
   row.className = 'column-builder-row';
+  row.style.cssText = 'display: flex; align-items: center; gap: 0.35rem;';
   row.innerHTML = `
     <input type="text" class="col-input-name" placeholder="column_name" value="${escapeHtml(preset.name || '')}" required />
     <select class="col-select-type">
@@ -538,7 +587,9 @@ export function addColumnRow(preset = {}) {
       <input type="checkbox" class="col-check-nn" ${preset.notnull ? 'checked' : ''} /> NN
     </label>
     <input type="text" class="col-input-dflt" placeholder="default" value="${escapeHtml(preset.defaultValue || '')}" />
-    <button type="button" class="btn-remove-col" title="Remove column">✕</button>
+    <button type="button" class="btn-remove-col btn-icon" title="Remove column">
+      ${ICONS.close({ size: 12 })}
+    </button>
   `;
 
   row.querySelector('.btn-remove-col')?.addEventListener('click', () => {
