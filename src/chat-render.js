@@ -387,24 +387,25 @@ async function renderMessages() {
     }
   }
 
-  // Map tool_call_ids to query strings so tool result bubbles can offer "Save as View"
+  // Map tool_call_ids to query strings so tool result bubbles can offer
+  // "Save as View" — from v_tool_call_queries (T26.5): the view's json_each
+  // expansion + double-extract COALESCE yields exactly the old JSON.parse
+  // loop's (tool_call_id, args.query) pairs. The filters mirror the old
+  // guards: `tool_call_id IS NOT NULL` (the old `tc?.id` check) and
+  // `query_sql IS NOT NULL AND query_sql <> ''` (the old `if (args?.query)`
+  // truthiness guard for the string-valued query).
   const toolCallQueries = new Map();
-  for (const [, role, , toolCallsJson] of rows) {
-    if (role === 'assistant' && toolCallsJson) {
-      try {
-        const tcs = JSON.parse(toolCallsJson);
-        if (Array.isArray(tcs)) {
-          for (const tc of tcs) {
-            if (tc?.id && tc?.function?.arguments) {
-              try {
-                const args = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments;
-                if (args?.query) toolCallQueries.set(tc.id, args.query);
-              } catch { /* parse error */ }
-            }
-          }
-        }
-      } catch { /* json parse error */ }
+  try {
+    for (const [tcId, q] of await queryAll(agent.sqlite3, agent.db,
+      `SELECT tool_call_id, query_sql FROM v_tool_call_queries
+       WHERE session_id = ?
+         AND tool_call_id IS NOT NULL
+         AND query_sql IS NOT NULL AND query_sql <> ''
+       ORDER BY message_id ASC, call_index ASC`, [sessionId])) {
+      toolCallQueries.set(tcId, q);
     }
+  } catch (e) {
+    console.warn('[chat-render] tool-call-queries view failed (non-fatal):', e);
   }
 
   // T9: which scratchpad turns (negative ids) still have rewound-able

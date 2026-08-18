@@ -441,29 +441,41 @@ FROM visible;
 -- query_sql is the extracted query argument for ANY tool (the SQL for
 -- execute_sql, the search query for search_web) — NULL when the tool's
 -- arguments carry no query key (e.g. fetch_url's url).
-DROP VIEW IF EXISTS v_tool_call_queries;
-CREATE VIEW v_tool_call_queries AS
-SELECT
-    m.id AS message_id,
-    m.session_id,
-    m.created_at,
-    tc.key AS call_index,
-    json_extract(tc.value, '$.id') AS tool_call_id,
-    json_extract(tc.value, '$.function.name') AS tool_name,
-    COALESCE(
-        json_extract(tc.value, '$.function.arguments.query'),
-        json_extract(json_extract(tc.value, '$.function.arguments'), '$.query')
-    ) AS query_sql,
-    json_extract(tc.value, '$.function.arguments') AS arguments
-FROM messages m
+--
+-- Two json_valid guards (T26.5 sub4): (1) on the json_each INPUT so a
+-- malformed tool_calls array expands to zero rows, and (2) on the inner
+-- arguments extraction so a malformed arguments STRING (only possible via
+-- manual corruption — machine-generated tool calls are always well-formed)
+-- yields query_sql NULL instead of erroring the whole view. Guard (2) makes
+-- the view a faithful drop-in for the old JS loop, which skipped just that
+-- one call on an inner JSON.parse failure rather than failing the query.
+ DROP VIEW IF EXISTS v_tool_call_queries;
+ CREATE VIEW v_tool_call_queries AS
+ SELECT
+     m.id AS message_id,
+     m.session_id,
+     m.created_at,
+     tc.key AS call_index,
+     json_extract(tc.value, '$.id') AS tool_call_id,
+     json_extract(tc.value, '$.function.name') AS tool_name,
+     COALESCE(
+         json_extract(tc.value, '$.function.arguments.query'),
+         CASE
+             WHEN json_valid(COALESCE(json_extract(tc.value, '$.function.arguments'), ''))
+             THEN json_extract(json_extract(tc.value, '$.function.arguments'), '$.query')
+             ELSE NULL
+         END
+     ) AS query_sql,
+     json_extract(tc.value, '$.function.arguments') AS arguments
+ FROM messages m
 -- The guard lives on the json_each INPUT (the FROM clause evaluates before
 -- any WHERE): NULL or malformed tool_calls (e.g. a hand-edited imported
 -- cartridge) expand to zero rows instead of erroring the whole view — this
 -- is a read surface, not the cascade path.
-CROSS JOIN json_each(CASE WHEN json_valid(m.tool_calls) THEN m.tool_calls ELSE '[]' END) tc
-WHERE m.role = 'assistant'
-  AND m.tool_calls IS NOT NULL
-  AND json_type(m.tool_calls) = 'array';
+ CROSS JOIN json_each(CASE WHEN json_valid(m.tool_calls) THEN m.tool_calls ELSE '[]' END) tc
+ WHERE m.role = 'assistant'
+   AND m.tool_calls IS NOT NULL
+   AND json_type(m.tool_calls) = 'array';
 
 -- v_grid_matrix: the grid's cell matrix — 3 cols × N rows (N self-sizes
 -- exactly like grid.js computeGridRows: at least 3, plus 3 buffer rows
