@@ -16,6 +16,8 @@ import { addCard } from './grid.js';
 import { renderGrid } from './grid-ui.js';
 import { globalSchemaIndex } from './sql-autocomplete.js';
 import { icon, ICONS } from './icons.js';
+// T26.3: escapeHtml now lives in src/utils.js.
+import { escapeHtml } from './utils.js';
 
 let agent = null;
 let currentPreviewTable = null;
@@ -726,12 +728,4 @@ async function onViewCreateSubmit(e) {
   }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────
 
-function escapeHtml(str) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}

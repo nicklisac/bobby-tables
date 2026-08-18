@@ -7,6 +7,8 @@
  */
 
 import { getDatabaseCatalog } from './explorer.js';
+// T26.3: escapeHtml now lives in src/utils.js.
+import { escapeHtml } from './utils.js';
 
 // ── SQL Keyword & Function Dictionaries ──────────────────────────────
 
@@ -615,12 +617,4 @@ export class SqlAutocompleteController {
   }
 }
 
-// ── Helper ────────────────────────────────────────────────────────────
 
-function escapeHtml(str) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}

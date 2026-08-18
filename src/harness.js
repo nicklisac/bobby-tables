@@ -13,7 +13,9 @@
 
 import ModuleFactory from '../vendor/wa-sqlite-jspi/wa-sqlite-jspi.mjs';
 import { Factory } from '../vendor/wa-sqlite-jspi/sqlite-api.js';
-import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_ROW, SQLITE_INSERT, SQLITE_DELETE, SQLITE_UPDATE } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
+import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_INSERT, SQLITE_DELETE, SQLITE_UPDATE } from '../vendor/wa-sqlite-jspi/sqlite-constants.js';
+// T26.3: SQLITE_ROW now lives in src/utils.js (single import home for shared result codes).
+import { SQLITE_ROW } from './utils.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
 import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, migrateDashboardCardsTable, queryAll, isProtectedTable, isInternalTable, logDDL, sweepCaptureTriggers, extractTargetTables } from './schema.js';

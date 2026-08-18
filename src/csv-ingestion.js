@@ -7,7 +7,9 @@
  */
 
 import Papa from 'papaparse';
-import { isProtectedTable } from './schema.js';
+import { isProtectedTable, ensureCaptureTriggers } from './schema.js';
+import { renderMessages } from './chat-render.js';
+import { flushCards } from './grid-ui.js';
 
 /**
  * Escape an identifier (table name or column name) for SQLite using double quotes.
@@ -371,4 +373,235 @@ export async function ingestCsvToSqlite(sqlite3, db, file, tableName = null, onP
     columnCount: columns.length,
     columns,
   };
+}
+
+// ── CSV Ingestion & Drag-and-Drop UI ────────────────────────────────
+//
+// [T26.3: moved verbatim from main.js. main.js passes its mutable state and
+// cross-module callbacks via initCsvUi() — no behavior change.]
+
+let csvCtx = null;
+let dragCounter = 0;
+
+const chatContainer     = document.getElementById('chat-container');
+const dragOverlay       = document.getElementById('drag-overlay');
+const ingestionProgress = document.getElementById('ingestion-progress');
+const progressTitle     = document.getElementById('progress-title');
+const progressCount     = document.getElementById('progress-count');
+const progressBarFill   = document.getElementById('progress-bar-fill');
+const btnUploadCsv      = document.getElementById('btn-upload-csv');
+const csvFileInput      = document.getElementById('csv-file-input');
+const inputEl           = document.getElementById('user-input');
+const sendBtn           = document.getElementById('send-btn');
+const statusBar         = document.getElementById('status-bar');
+
+/**
+ * @param {object} context
+ * @param {() => object} context.getAgent - live agent handle (null pre-boot)
+ * @param {() => string} context.getSessionId - active session id
+ * @param {() => boolean} context.isBusy - true while a turn is in flight (chat-render.js)
+ * @param {(on: boolean) => void} context.setLoading - processing-state setter (chat-render.js)
+ */
+export function initCsvUi(context) {
+  csvCtx = context;
+
+  function showDragOverlay() {
+    if (dragOverlay) dragOverlay.classList.remove('hidden');
+  }
+
+  function hideDragOverlay() {
+    if (dragOverlay) dragOverlay.classList.add('hidden');
+  }
+
+  function showIngestionProgress(fileName) {
+    if (!ingestionProgress) return;
+    ingestionProgress.classList.remove('hidden');
+    if (progressTitle) progressTitle.textContent = `Ingesting ${fileName}…`;
+    if (progressCount) progressCount.textContent = 'Parsing schema…';
+    if (progressBarFill) {
+      progressBarFill.className = 'progress-bar-fill indeterminate';
+      progressBarFill.style.width = '100%';
+    }
+  }
+
+  function hideIngestionProgress() {
+    if (!ingestionProgress) return;
+    ingestionProgress.classList.add('hidden');
+    if (progressBarFill) {
+      progressBarFill.className = 'progress-bar-fill';
+      progressBarFill.style.width = '0%';
+    }
+  }
+
+  async function handleCsvUpload(file) {
+    if (!file) return;
+    if (csvCtx.isBusy()) {
+      alert('Please wait for the current turn to finish before uploading a CSV.');
+      return;
+    }
+    const agent = csvCtx.getAgent();
+    if (!agent) {
+      alert('Agent is still initializing. Please wait a moment.');
+      return;
+    }
+
+    const isCsv = file.name.toLowerCase().endsWith('.csv') ||
+                  file.name.toLowerCase().endsWith('.tsv') ||
+                  file.name.toLowerCase().endsWith('.txt') ||
+                  file.type === 'text/csv' ||
+                  file.type === 'text/plain';
+
+    if (!isCsv) {
+      alert('Please select a valid CSV or tabular data file.');
+      return;
+    }
+
+    showIngestionProgress(file.name);
+    csvCtx.setLoading(true);
+    statusBar.textContent = `Ingesting ${file.name}…`;
+    statusBar.style.color = '#d29922';
+
+    try {
+      const result = await ingestCsvToSqlite(
+        agent.sqlite3,
+        agent.db,
+        file,
+        null,
+        (progress) => {
+          if (progress.phase === 'schema_inferred') {
+            if (progressTitle) progressTitle.textContent = `Ingesting "${progress.tableName}"…`;
+            if (progressCount) progressCount.textContent = `Inferred ${progress.columns?.length || 0} cols`;
+          } else if (progress.phase === 'inserting') {
+            if (progressTitle) progressTitle.textContent = `Ingesting "${progress.tableName}"…`;
+            if (progressCount) progressCount.textContent = `${progress.rowsIngested.toLocaleString()} rows`;
+          } else if (progress.phase === 'complete') {
+            if (progressTitle) progressTitle.textContent = `✓ Ingested "${progress.tableName}"`;
+            if (progressCount) progressCount.textContent = `${progress.rowsIngested.toLocaleString()} rows`;
+            if (progressBarFill) {
+              progressBarFill.className = 'progress-bar-fill';
+              progressBarFill.style.width = '100%';
+            }
+          }
+        }
+      );
+
+      // T3: attach row-image capture triggers to the new table so its changes
+      // are rewound-able.
+      try {
+        await ensureCaptureTriggers(agent.sqlite3, agent.db, result.tableName);
+      } catch (e) {
+        console.warn('[csv-ingestion] Failed to attach capture triggers:', e);
+      }
+
+      setTimeout(() => {
+        hideIngestionProgress();
+      }, 1500);
+
+      statusBar.textContent = `✓ Ingested table "${result.tableName}" (${result.rowCount.toLocaleString()} rows, ${result.columnCount} cols)`;
+      statusBar.style.color = '#3fb950';
+
+      // Insert confirmation assistant message into SQLite messages table for the active session
+      const colList = result.columns.map(c => `• \`${c.name}\` (${c.type})`).join('\n');
+      const notification = `📊 **Table Ingested: \`${result.tableName}\`**\n\n` +
+        `- **Rows:** ${result.rowCount.toLocaleString()}\n` +
+        `- **Columns (${result.columnCount}):**\n${colList}\n\n` +
+        `The table is now queryable via SQL. Try asking:\n` +
+        `• *"Show me the first 5 rows of ${result.tableName}"*\n` +
+        `• *"What are the summary statistics for ${result.tableName}?"*`;
+
+      for await (const stmt of agent.sqlite3.statements(
+        agent.db,
+        `INSERT INTO messages (session_id, role, content) VALUES (?, 'assistant', ?)`
+      )) {
+        agent.sqlite3.bind_collection(stmt, [csvCtx.getSessionId(), notification]);
+        await agent.sqlite3.step(stmt);
+      }
+
+      await renderMessages();
+    } catch (err) {
+      console.error('[csv-ingestion] Ingestion failed:', err);
+      hideIngestionProgress();
+      statusBar.textContent = `⚠ Ingestion failed: ${err.message}`;
+      statusBar.style.color = '#f85149';
+
+      const errorNotification = `⚠ **Failed to ingest CSV "${file.name}"**\n\nError: ${err.message}`;
+      for await (const stmt of agent.sqlite3.statements(
+        agent.db,
+        `INSERT INTO messages (session_id, role, content) VALUES (?, 'assistant', ?)`
+      )) {
+        agent.sqlite3.bind_collection(stmt, [csvCtx.getSessionId(), errorNotification]);
+        await agent.sqlite3.step(stmt);
+      }
+      await renderMessages();
+    } finally {
+      csvCtx.setLoading(false);
+      // T11: re-run dashboard cards whose data tables changed (new/updated table).
+      try { await flushCards(); } catch (e) { console.warn('[main] card flush failed (non-fatal):', e); }
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  }
+
+  // Drag and drop event listeners
+  if (chatContainer) {
+    chatContainer.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      dragCounter++;
+      if (e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files')) {
+        showDragOverlay();
+      }
+    });
+
+    chatContainer.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = 'copy';
+      }
+    });
+
+    chatContainer.addEventListener('dragleave', (e) => {
+      e.preventDefault();
+      dragCounter--;
+      if (dragCounter <= 0) {
+        dragCounter = 0;
+        hideDragOverlay();
+      }
+    });
+
+    chatContainer.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      dragCounter = 0;
+      hideDragOverlay();
+
+      const files = e.dataTransfer?.files;
+      if (files && files.length > 0) {
+        await handleCsvUpload(files[0]);
+      }
+    });
+  }
+
+  // Window level drag prevention so browser doesn't open dropped file in tab
+  window.addEventListener('dragover', (e) => {
+    e.preventDefault();
+  });
+
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+  });
+
+  // CSV Upload button handler
+  if (btnUploadCsv && csvFileInput) {
+    btnUploadCsv.addEventListener('click', () => {
+      csvFileInput.click();
+    });
+
+    csvFileInput.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (file) {
+        await handleCsvUpload(file);
+        csvFileInput.value = '';
+      }
+    });
+  }
 }

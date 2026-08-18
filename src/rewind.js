@@ -311,3 +311,50 @@ export async function rewindToBeforeScratchpadTurn(sqlite3, db, sessionId, turnI
     await setSuppressCapture(sqlite3, db, false);
   }
 }
+
+// ── T3: Rewind UI glue (per-bubble ⟲ on real turns) ─────────────────
+//
+// [T26.3: moved verbatim from main.js. main.js passes its mutable state and
+// cross-module callbacks via initRewindUi() — no behavior change.]
+
+let uiCtx = null;
+const statusBar = document.getElementById('status-bar');
+
+/**
+ * @param {object} context
+ * @param {() => object} context.getAgent - live agent handle (null pre-boot)
+ * @param {() => string} context.getSessionId - active session id
+ * @param {() => boolean} context.isBusy - true while a turn is in flight (chat-render.js)
+ * @param {() => Promise<void>} context.renderMessages - full chat re-render (chat-render.js)
+ * @param {() => void} context.updateReadyStatus - status-bar/LED refresh (chat-render.js)
+ */
+export function initRewindUi(context) {
+  uiCtx = context;
+}
+
+export async function rewindToBefore(messageId) {
+  const agent = uiCtx.getAgent();
+  if (!agent || uiCtx.isBusy()) return;
+  const { sqlite3, db } = agent;
+  try {
+    const summary = await getChangesetSummary(sqlite3, db, uiCtx.getSessionId(), messageId);
+    const ok = confirm(
+      `Rewind the database to the state before this message?\n\n` +
+      `This undoes:\n${summary}\n\n` +
+      `The conversation history is preserved (data-only rewind).`
+    );
+    if (!ok) return;
+
+    statusBar.textContent = '⟲ Rewinding…';
+    statusBar.style.color = '#d29922';
+    const n = await rewindToBeforeTurn(sqlite3, db, uiCtx.getSessionId(), messageId);
+    statusBar.textContent = `✓ Rewound ${n} turn${n === 1 ? '' : 's'}`;
+    statusBar.style.color = '#3fb950';
+    await uiCtx.renderMessages();
+    setTimeout(uiCtx.updateReadyStatus, 3000);
+  } catch (e) {
+    console.error('[rewind]', e);
+    statusBar.textContent = `⚠ Rewind failed: ${e.message}`;
+    statusBar.style.color = '#f85149';
+  }
+}

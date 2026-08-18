@@ -33,9 +33,14 @@
  * (verified against the sqlite3_bind_int64 wrapper).
  */
 
+// T26.3: shared result codes + query/ident helpers now live in src/utils.js.
+import { SQLITE_ROW, SQLITE_DONE, queryAll, quoteIdent } from './utils.js';
+import { setActiveSession } from './schema.js';
+import { populateSessionDropdown } from './sessions-ui.js';
+import { renderMessages } from './chat-render.js';
+import { rebuildGrid } from './grid-ui.js';
+
 const SQLITE_OK = 0;
-const SQLITE_DONE = 101;
-const SQLITE_ROW = 100;
 const SQLITE_SERIALIZE_NORMAL = 0;
 const SQLITE_DESERIALIZE_DEFAULT = 0;
 const OPEN_READWRITE = 0x00000002;
@@ -239,21 +244,6 @@ export async function exportSqlDump(sqlite3, db, filename = 'bobby-brain.sql') {
   return { success: true, bytes: sql.length };
 }
 
-/** Run a query and return all rows as arrays (column order preserved). */
-async function queryAll(sqlite3, db, sql) {
-  const rows = [];
-  for await (const stmt of sqlite3.statements(db, sql)) {
-    while (await sqlite3.step(stmt) === SQLITE_ROW) {
-      rows.push(sqlite3.row(stmt));
-    }
-  }
-  return rows;
-}
-
-function quoteIdent(name) {
-  return '"' + String(name).replace(/"/g, '""') + '"';
-}
-
 /** Render a JS value as a SQL literal (NULL / number / blob / quoted text). */
 function sqlLiteral(v) {
   if (v === null || v === undefined) return 'NULL';
@@ -335,5 +325,107 @@ async function pickFile() {
       }
     };
     input.click();
+  });
+}
+
+// ── Cartridge UI glue (header [export] / [import] buttons) ──────────
+//
+// [T26.3: moved verbatim from main.js. main.js passes its mutable state and
+// cross-module callbacks via initCartridgeUi() — no behavior change.]
+
+let cartridgeCtx = null;
+const cartridgeStatusBar = document.getElementById('status-bar');
+
+/**
+ * @param {object} context
+ * @param {() => object} context.getAgent - live agent handle (null pre-boot)
+ * @param {(id: string) => void} context.setSessionId - set the active session id (main.js state)
+ * @param {() => void} context.updateReadyStatus - status-bar/LED refresh (chat-render.js)
+ */
+export function initCartridgeUi(context) {
+  cartridgeCtx = context;
+
+  document.getElementById('btn-export').addEventListener('click', async () => {
+    const agent = cartridgeCtx.getAgent();
+    if (!agent) return;
+    try {
+      cartridgeStatusBar.textContent = 'Exporting cartridge…';
+      cartridgeStatusBar.style.color = '#d29922';
+      const result = await exportCartridge(agent.sqlite3, agent.module, agent.db, `bobby-brain-${new Date().toISOString().slice(0, 10)}.sqlite3`);
+      if (result?.cancelled) {
+        cartridgeCtx.updateReadyStatus();
+        return;
+      }
+      cartridgeStatusBar.textContent = `✓ Exported ${result.bytes} bytes`;
+      cartridgeStatusBar.style.color = '#3fb950';
+      setTimeout(() => {
+        cartridgeCtx.updateReadyStatus();
+      }, 3000);
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        cartridgeCtx.updateReadyStatus();
+        return;
+      }
+      console.error('[export]', e);
+      // Fallback to SQL dump only on actual engine error, never on user cancel
+      try {
+        cartridgeStatusBar.textContent = 'Binary export unavailable, trying SQL dump…';
+        const sqlResult = await exportSqlDump(agent.sqlite3, agent.db, `bobby-brain-${new Date().toISOString().slice(0, 10)}.sql`);
+        if (sqlResult?.cancelled) {
+          cartridgeCtx.updateReadyStatus();
+          return;
+        }
+        cartridgeStatusBar.textContent = '✓ SQL dump exported';
+        cartridgeStatusBar.style.color = '#3fb950';
+        setTimeout(() => {
+          cartridgeCtx.updateReadyStatus();
+        }, 3000);
+      } catch (e2) {
+        if (e2.name === 'AbortError') {
+          cartridgeCtx.updateReadyStatus();
+          return;
+        }
+        console.error('[export sql]', e2);
+        cartridgeStatusBar.textContent = `⚠ Export failed: ${e2.message}`;
+        cartridgeStatusBar.style.color = '#f85149';
+      }
+    }
+  });
+
+  document.getElementById('btn-import').addEventListener('click', async () => {
+    const agent = cartridgeCtx.getAgent();
+    if (!agent) return;
+    try {
+      cartridgeStatusBar.textContent = 'Importing cartridge…';
+      cartridgeStatusBar.style.color = '#d29922';
+      // Same DB handle is preserved by importCartridge — UDFs, the update hook,
+      // and connection-level pragmas all survive, so nothing to re-register.
+      const result = await importCartridge(agent.sqlite3, agent.module, agent.db);
+      if (result?.cancelled) {
+        cartridgeCtx.updateReadyStatus();
+        return;
+      }
+
+      cartridgeCtx.setSessionId('default');
+      await setActiveSession(agent.sqlite3, agent.db, 'default');
+      await populateSessionDropdown();
+      await renderMessages();
+      // T11: the whole DB was replaced — rebuild the dashboard grid + explorer
+      // from the imported brain (cards referencing dropped tables show errors).
+      try { await rebuildGrid(); } catch (e) { console.warn('[main] grid rebuild failed (non-fatal):', e); }
+      cartridgeStatusBar.textContent = '✓ Cartridge imported';
+      cartridgeStatusBar.style.color = '#3fb950';
+      setTimeout(() => {
+        cartridgeCtx.updateReadyStatus();
+      }, 3000);
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        cartridgeCtx.updateReadyStatus();
+        return;
+      }
+      console.error('[import]', e);
+      cartridgeStatusBar.textContent = `⚠ Import failed: ${e.message}`;
+      cartridgeStatusBar.style.color = '#f85149';
+    }
   });
 }

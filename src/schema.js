@@ -12,6 +12,27 @@
  * Requires wa-sqlite JSPI build for async UDFs in triggers.
  */
 
+// T26.3: shared helpers now live in src/utils.js. Imported for internal use
+// and re-exported below for back-compat (existing importers keep working).
+import {
+  SQLITE_ROW,
+  quoteIdent,
+  unquoteIdent as unquoteIdentifier,
+  stripSqlLiterals as stripSqlCommentsAndStrings,
+  execParams,
+  queryAll,
+} from './utils.js';
+
+export {
+  quoteIdent,
+  unquoteIdent,
+  unquoteIdentifier,
+  stripSqlLiterals,
+  stripSqlCommentsAndStrings,
+  execParams,
+  queryAll,
+} from './utils.js';
+
 export const SCHEMA_SQL = `
 -- Enable foreign keys
 PRAGMA foreign_keys = ON;
@@ -614,13 +635,6 @@ export async function getSessionTokenUsage(sqlite3, db, sessionId) {
 // T3 & T21: Turn Changeset Capture, Rewind Support & Protected-Tables Boundary
 // =====================================================================
 
-const SQLITE_ROW = 100;
-
-/** Quote a SQL identifier (table/column name) safely. */
-export function quoteIdent(name) {
-  return '"' + String(name).replace(/"/g, '""') + '"';
-}
-
 /**
  * Internal tables that are agent state / audit log / UI state / the changeset
  * machinery itself and must NEVER be captured for rewind, dropped, or
@@ -693,73 +707,6 @@ export function isInternalTable(name) {
 }
 
 /**
- * Strip SQL comments (-- and /* * /) and string literals ('...') to make
- * structural syntax inspection and target extraction safe.
- *
- * @param {string} sql - Raw SQL text
- * @returns {string} Cleaned SQL with whitespace preserving structure
- */
-export function stripSqlCommentsAndStrings(sql) {
-  if (!sql || typeof sql !== 'string') return '';
-  let out = '';
-  let i = 0;
-  const len = sql.length;
-  while (i < len) {
-    // Line comment
-    if (sql[i] === '-' && sql[i + 1] === '-') {
-      i += 2;
-      while (i < len && sql[i] !== '\n' && sql[i] !== '\r') i++;
-      out += ' ';
-      continue;
-    }
-    // Block comment
-    if (sql[i] === '/' && sql[i + 1] === '*') {
-      i += 2;
-      while (i < len && !(sql[i] === '*' && sql[i + 1] === '/')) i++;
-      i += 2;
-      out += ' ';
-      continue;
-    }
-    // String literal '...'
-    if (sql[i] === "'") {
-      i++;
-      while (i < len) {
-        if (sql[i] === "'" && sql[i + 1] === "'") {
-          i += 2;
-        } else if (sql[i] === "'") {
-          i++;
-          break;
-        } else {
-          i++;
-        }
-      }
-      out += " '' ";
-      continue;
-    }
-    out += sql[i];
-    i++;
-  }
-  return out;
-}
-
-/**
- * Unquote a SQL identifier (e.g. "my_table" -> my_table, `col` -> col, [tbl] -> tbl).
- *
- * @param {string} name - Identifier text
- * @returns {string} Unquoted identifier
- */
-export function unquoteIdentifier(name) {
-  if (!name || typeof name !== 'string') return '';
-  const s = name.trim();
-  if ((s.startsWith('"') && s.endsWith('"')) ||
-      (s.startsWith('`') && s.endsWith('`')) ||
-      (s.startsWith('[') && s.endsWith(']'))) {
-    return s.slice(1, -1).replace(/""/g, '"').replace(/``/g, '`');
-  }
-  return s;
-}
-
-/**
  * Extract target table names and operation types from a SQL query string.
  * Supports INSERT, REPLACE, UPDATE, DELETE, CREATE, DROP, ALTER, and WITH statements.
  *
@@ -822,26 +769,6 @@ export function extractTargetTables(sql) {
   }
 
   return targets;
-}
-
-/** Execute a (possibly multi-statement) SQL string with optional bind params. */
-export async function execParams(sqlite3, db, sql, params = []) {
-  for await (const stmt of sqlite3.statements(db, sql)) {
-    if (params.length) sqlite3.bind_collection(stmt, params);
-    await sqlite3.step(stmt);
-  }
-}
-
-/** Run a query and return all rows as arrays. */
-export async function queryAll(sqlite3, db, sql, params = []) {
-  const rows = [];
-  for await (const stmt of sqlite3.statements(db, sql)) {
-    if (params.length) sqlite3.bind_collection(stmt, params);
-    while (await sqlite3.step(stmt) === SQLITE_ROW) {
-      rows.push(sqlite3.row(stmt));
-    }
-  }
-  return rows;
 }
 
 /**

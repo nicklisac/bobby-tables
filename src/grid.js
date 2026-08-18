@@ -23,6 +23,8 @@
  */
 
 import { queryAll, execParams } from './schema.js';
+// T26.3: stripSqlLiterals + result codes now live in src/utils.js.
+import { stripSqlLiterals, SQLITE_ROW } from './utils.js';
 
 export const GRID_COLS = 3;
 export const MIN_GRID_ROWS = 3;
@@ -352,7 +354,7 @@ export async function runCardSql(sqlite3, db, sql) {
       const cols = sqlite3.column_names(stmt);
       if (!cols.length) continue; // non-row-returning statement (unexpected for read-only)
       columns.push(...cols);
-      while (await sqlite3.step(stmt) === 100 /* SQLITE_ROW */) {
+      while (await sqlite3.step(stmt) === SQLITE_ROW) {
         values.push(sqlite3.row(stmt));
         if (values.length >= CARD_ROW_CAP) { truncated = true; break; }
       }
@@ -364,21 +366,6 @@ export async function runCardSql(sqlite3, db, sql) {
 }
 
 // ── Dependency resolution (T18 groundwork) ────────────────────────────
-
-/**
- * Strip string literals and comments from SQL so identifier scanning doesn't
- * match table names inside quotes. 'x' → '', "x" stays (quoted identifier —
- * it IS an identifier), -- and /* … *\/ comments removed.
- */
-function stripSqlLiterals(sql) {
-  return String(sql)
-    // single-quoted string literals ('' is an escaped quote inside)
-    .replace(/'(?:[^']|'')*'/g, "''")
-    // line comments
-    .replace(/--[^\n]*/g, ' ')
-    // block comments (non-greedy)
-    .replace(/\/\*[\s\S]*?\*\//g, ' ');
-}
 
 /**
  * Extract table/view references (FROM / JOIN targets) from a SQL statement.
