@@ -6,56 +6,51 @@
  */
 
 import {
-  queryAll, execParams, quoteIdent, isProtectedTable, isInternalTable,
+  queryAll, execParams, quoteIdent, isProtectedTable, isInternalTable, isSystemView,
   logDDL, sweepCaptureTriggers,
 } from './schema.js';
 
 /**
- * Fetch complete database catalog partitioned into User Tables, Views, and System Tables.
- * Gathers row counts, columns (PRAGMA table_info), indexes, foreign keys, and DDL.
+ * Fetch complete database catalog partitioned into User Tables, Views,
+ * System Views, and System Tables.
+ *
+ * Schema introspection is ONE query over v_schema_catalog (T26.5: the
+ * per-object PRAGMA table_info / index_list / index_info / foreign_key_list
+ * JS loop is gone — the view computes the identical data in SQL). Row
+ * counts stay per-object: SQL cannot COUNT(*) a table referenced by name
+ * dynamically, so that is inherently N queries.
+ *
+ * Views are partitioned by SYSTEM_VIEWS: the app's own views are system
+ * objects — no user-view treatment (no drop action, outside T22
+ * reference-integrity scope).
  */
 export async function getDatabaseCatalog(sqlite3, db) {
   const masterRows = await queryAll(sqlite3, db, `
-    SELECT type, name, tbl_name, sql
-    FROM sqlite_master
-    WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'
-    ORDER BY name ASC
+    SELECT table_name, object_type, create_sql, columns, indexes, foreign_keys
+    FROM v_schema_catalog
   `);
 
   const userTables = [];
   const views = [];
+  const systemViews = [];
   const systemTables = [];
 
-  for (const [type, name, , sql] of masterRows) {
-    const isSys = isInternalTable(name);
+  for (const [name, type, sql, columnsJson, indexesJson, foreignKeysJson] of masterRows) {
+    const isSys = type === 'view' ? isSystemView(name) : isInternalTable(name);
     const item = {
       name,
       type, // 'table' | 'view'
       isSystem: isSys,
       sql: sql || '',
       rowCount: null,
-      columns: [],
-      indexes: [],
-      foreignKeys: [],
+      columns: decodeCatalogColumns(columnsJson),
+      // Indexes & Foreign Keys are surfaced for user tables only (unchanged).
+      indexes: type === 'table' && !isSys ? decodeCatalogIndexes(indexesJson) : [],
+      foreignKeys: type === 'table' && !isSys ? decodeCatalogForeignKeys(foreignKeysJson) : [],
       error: null,
     };
 
-    // 1. Column Metadata via PRAGMA table_info
-    try {
-      const colRows = await queryAll(sqlite3, db, `PRAGMA table_info(${quoteIdent(name)})`);
-      item.columns = colRows.map(([cid, colName, colType, notnull, dfltValue, pk]) => ({
-        cid: Number(cid),
-        name: colName,
-        type: (colType || 'TEXT').toUpperCase(),
-        notnull: Number(notnull) === 1,
-        defaultValue: dfltValue,
-        pk: Number(pk),
-      }));
-    } catch (e) {
-      console.warn(`[explorer] PRAGMA table_info failed for ${name}:`, e);
-    }
-
-    // 2. Row Count
+    // Row Count (per-object — see doc comment)
     try {
       const countRows = await queryAll(sqlite3, db, `SELECT COUNT(*) FROM ${quoteIdent(name)}`);
       if (countRows.length && countRows[0].length) {
@@ -67,45 +62,8 @@ export async function getDatabaseCatalog(sqlite3, db) {
       item.error = e.message;
     }
 
-    // 3. Indexes & Foreign Keys (for user tables only)
-    if (type === 'table' && !isSys) {
-      try {
-        const idxRows = await queryAll(sqlite3, db, `PRAGMA index_list(${quoteIdent(name)})`);
-        for (const [, idxName, unique, origin, partial] of idxRows) {
-          const infoRows = await queryAll(sqlite3, db, `PRAGMA index_info(${quoteIdent(idxName)})`);
-          const indexedCols = infoRows.map(([, , cName]) => cName);
-          item.indexes.push({
-            name: idxName,
-            unique: Number(unique) === 1,
-            origin,
-            partial: Number(partial) === 1,
-            columns: indexedCols,
-          });
-        }
-      } catch (e) {
-        console.warn(`[explorer] PRAGMA index_list failed for ${name}:`, e);
-      }
-
-      // 4. Foreign Keys
-      try {
-        const fkRows = await queryAll(sqlite3, db, `PRAGMA foreign_key_list(${quoteIdent(name)})`);
-        item.foreignKeys = fkRows.map(([id, seq, toTable, fromCol, toCol, onUpdate, onDelete, match]) => ({
-          id: Number(id),
-          seq: Number(seq),
-          toTable,
-          fromCol,
-          toCol,
-          onUpdate,
-          onDelete,
-          match,
-        }));
-      } catch (e) {
-        console.warn(`[explorer] PRAGMA foreign_key_list failed for ${name}:`, e);
-      }
-    }
-
     if (type === 'view') {
-      views.push(item);
+      (isSys ? systemViews : views).push(item);
     } else if (isSys) {
       systemTables.push(item);
     } else {
@@ -116,12 +74,54 @@ export async function getDatabaseCatalog(sqlite3, db) {
   return {
     userTables,
     views,
+    systemViews,
     systemTables,
     totalCount: masterRows.length,
     userTableCount: userTables.length,
     viewCount: views.length,
+    systemViewCount: systemViews.length,
     systemTableCount: systemTables.length,
   };
+}
+
+/**
+ * Decode the v_schema_catalog JSON payloads into catalog item shapes —
+ * field-for-field identical to the pre-T26.5 PRAGMA loop output. A decode
+ * failure throws (surfaces in the caller's error path) rather than
+ * fabricating an empty catalog.
+ */
+function decodeCatalogColumns(columnsJson) {
+  return JSON.parse(columnsJson).map((c) => ({
+    cid: Number(c.cid),
+    name: c.name,
+    type: (c.type || 'TEXT').toUpperCase(),
+    notnull: Number(c.notnull) === 1,
+    defaultValue: c.dflt_value,
+    pk: Number(c.pk),
+  }));
+}
+
+function decodeCatalogIndexes(indexesJson) {
+  return JSON.parse(indexesJson).map((i) => ({
+    name: i.name,
+    unique: Number(i.unique) === 1,
+    origin: i.origin,
+    partial: Number(i.partial) === 1,
+    columns: i.columns,
+  }));
+}
+
+function decodeCatalogForeignKeys(foreignKeysJson) {
+  return JSON.parse(foreignKeysJson).map((f) => ({
+    id: Number(f.id),
+    seq: Number(f.seq),
+    toTable: f.table,
+    fromCol: f.from,
+    toCol: f.to,
+    onUpdate: f.on_update,
+    onDelete: f.on_delete,
+    match: f.match,
+  }));
 }
 
 /**

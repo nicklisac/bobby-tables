@@ -122,11 +122,15 @@ export async function renderExplorer() {
     const userSection = createSectionElement('User Tables', catalog.userTables, 'table', true);
     container.appendChild(userSection);
 
-    // Section 2: SQL Views
+    // Section 2: SQL Views (user views)
     const viewsSection = createSectionElement('Views', catalog.views, 'view', true);
     container.appendChild(viewsSection);
 
-    // Section 3: System / Internal Tables
+    // Section 3: System Views (the app's own views — no user-view treatment)
+    const systemViewsSection = createSectionElement('System Views', catalog.systemViews || [], 'system-view', false);
+    container.appendChild(systemViewsSection);
+
+    // Section 4: System / Internal Tables
     const systemSection = createSectionElement('Internal System Tables', catalog.systemTables, 'system', false);
     container.appendChild(systemSection);
 
@@ -147,7 +151,7 @@ function createSectionElement(title, items, categoryType, defaultExpanded = true
   const section = document.createElement('div');
   section.className = `explorer-section section-${categoryType}`;
 
-  const catIconSvg = categoryType === 'view'
+  const catIconSvg = (categoryType === 'view' || categoryType === 'system-view')
     ? ICONS.view({ size: 14 })
     : (categoryType === 'system' ? ICONS.shield({ size: 14 }) : ICONS.table({ size: 14 }));
 
@@ -163,7 +167,7 @@ function createSectionElement(title, items, categoryType, defaultExpanded = true
 
   const list = document.createElement('div');
   list.className = 'explorer-item-list';
-  if (!defaultExpanded && categoryType === 'system') {
+  if (!defaultExpanded && (categoryType === 'system' || categoryType === 'system-view')) {
     list.classList.add('collapsed');
     header.classList.add('collapsed');
   }

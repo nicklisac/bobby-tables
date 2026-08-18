@@ -756,7 +756,8 @@ header h1.app-title {
   align-items: center;
 }
 
-.section-view .explorer-section-icon { color: var(--purple); }
+.section-view .explorer-section-icon,
+.section-system-view .explorer-section-icon { color: var(--purple); }
 .section-system .explorer-section-icon { color: var(--yellow); }
 
 .explorer-count-badge {

@@ -329,10 +329,17 @@ CREATE TABLE IF NOT EXISTS dashboard_cards (
 -- =====================================================================
 
 -- v_schema_catalog: the full schema (columns, types, defaults, PKs,
--- indexes, FKs) in one query. Correlates the table-valued PRAGMA
--- functions with sqlite_master via json_group_array. Views' columns are
--- their output columns (pragma_table_info works on views); their
--- indexes/foreign_keys are normally empty.
+-- indexes incl. their columns, FKs) in one query. Correlates the
+-- table-valued PRAGMA functions with sqlite_master via json_group_array.
+-- Views' columns are their output columns (pragma_table_info works on
+-- views); their indexes/foreign_keys are normally empty.
+--
+-- T26.5: the JSON payloads carry the FULL pragma fields so the explorer's
+-- catalog is a pure decode of this view — field-for-field what the old
+-- per-object PRAGMA table_info / index_list / index_info / foreign_key_list
+-- JS loop gathered. Row order is the pragmas' natural order (table_info by
+-- cid, index_list by seq, foreign_key_list by id/seq, index_info by seq) —
+-- the same order the old loop consumed.
 DROP VIEW IF EXISTS v_schema_catalog;
 CREATE VIEW v_schema_catalog AS
 SELECT
@@ -345,11 +352,18 @@ SELECT
         FROM pragma_table_info(m.name) p
     ), '[]') AS columns,
     COALESCE((
-        SELECT json_group_array(json_object('seq', i.seq, 'name', i.name, 'unique', i."unique", 'partial', i.partial))
+        SELECT json_group_array(json_object(
+            'seq', i.seq, 'name', i.name, 'unique', i."unique", 'origin', i.origin, 'partial', i.partial,
+            'columns', COALESCE((
+                SELECT json_group_array(c.name)
+                FROM pragma_index_info(i.name) c
+            ), '[]')))
         FROM pragma_index_list(m.name) i
     ), '[]') AS indexes,
     COALESCE((
-        SELECT json_group_array(json_object('id', f.id, 'table', f."table", 'from', f."from", 'to', f."to"))
+        SELECT json_group_array(json_object(
+            'id', f.id, 'seq', f.seq, 'table', f."table", 'from', f."from", 'to', f."to",
+            'on_update', f.on_update, 'on_delete', f.on_delete, 'match', f.match))
         FROM pragma_foreign_key_list(m.name) f
     ), '[]') AS foreign_keys
 FROM sqlite_master m
@@ -858,6 +872,31 @@ export const INTERNAL_TABLES = new Set([
 const INTERNAL_TABLES_LOWER = new Set(
   Array.from(INTERNAL_TABLES).map(t => t.toLowerCase())
 );
+
+/**
+ * The app's own SQL views (DROP VIEW + CREATE VIEW pairs in SCHEMA_SQL).
+ * They are system objects, not user views: no user-view treatment (no
+ * explorer drop action, outside T22 reference-integrity scope). Kept in
+ * sync with the view definitions above — add a view there, add it here.
+ */
+export const SYSTEM_VIEWS = new Set([
+  'v_active_context',
+  'v_schema_catalog',
+  'v_turn_boundaries',
+  'v_tool_call_queries',
+  'v_grid_matrix',
+  'v_session_summary',
+]);
+
+const SYSTEM_VIEWS_LOWER = new Set(
+  Array.from(SYSTEM_VIEWS).map(v => v.toLowerCase())
+);
+
+/** True if the name is one of the app's own (system) views. */
+export function isSystemView(name) {
+  if (!name || typeof name !== 'string') return false;
+  return SYSTEM_VIEWS_LOWER.has(name.trim().toLowerCase());
+}
 
 // Virtual table shadow table patterns (explicit fts/vec/vtab naming)
 const EXPLICIT_SHADOW_REGEX = /^(?:(?:fts\d*|vec\d*|rtree).*|.*_(?:fts\d*|vec\d*|vtab))_(?:data|idx|content|docsize|config|segments|segdir|rowids|chunks|index)$/i;

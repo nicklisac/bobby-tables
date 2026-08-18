@@ -33,11 +33,13 @@ export async function runT8Probe() {
     const userNames = catalog.userTables.map(t => t.name);
     const sysNames = catalog.systemTables.map(t => t.name);
     const viewNames = catalog.views.map(v => v.name);
+    const sysViewNames = (catalog.systemViews || []).map(v => v.name);
 
     const hasSampleData = userNames.includes('sample_data');
     const hasMessages = sysNames.includes('messages');
     const hasCards = sysNames.includes('dashboard_cards');
-    const hasActiveContext = viewNames.includes('v_active_context');
+    // T26.5: app views are system objects, partitioned into systemViews.
+    const hasActiveContext = sysViewNames.includes('v_active_context');
 
     const sampleTable = catalog.userTables.find(t => t.name === 'sample_data');
     const hasCols = sampleTable && sampleTable.columns.length > 0;
@@ -48,6 +50,7 @@ export async function runT8Probe() {
       ok,
       userTablesCount: catalog.userTables.length,
       viewsCount: catalog.views.length,
+      systemViewsCount: catalog.systemViews ? catalog.systemViews.length : 0,
       systemTablesCount: catalog.systemTables.length,
       sampleDataStats: sampleTable ? { rows: sampleTable.rowCount, cols: sampleTable.columns.length } : null,
     };

@@ -72,6 +72,7 @@ export class SchemaCompletionIndex {
     const allSources = [
       ...(catalog.userTables || []).map(t => ({ ...t, kind: 'table' })),
       ...(catalog.views || []).map(v => ({ ...v, kind: 'view' })),
+      ...(catalog.systemViews || []).map(v => ({ ...v, kind: 'system' })),
       ...(catalog.systemTables || []).map(s => ({ ...s, kind: 'system' })),
     ];
 
