@@ -437,9 +437,9 @@ graph TD
 
 ### Ticket 26.1: Guardrails — Persistence, VFS-Contract & Boot-Idempotency Test Harness
 * **Label:** `wayfinder:task` (AFK)
- * **Status:** ✅ COMPLETE (resolved 2026-08-18, merged to `main` @ `e3fad7b`)
- * **Depends on:** nothing (first in the sequence)
- * **Resolution (2026-08-18):** All 6 next-steps shipped. The harness is green on `main` (7/7: boot-idempotency, persistence incl. tool-call turn, vfs-contract) and wired as `npm test`. Building it surfaced **BUG-008** (silent data loss + JSPI re-entrancy hang) — root-caused and fixed; the decisive fix is the **re-entrant query-serialization gate** in `src/harness.js` (see Decision below + `docs/archive/BUG-008_INVESTIGATION.md`). Acceptance met: `npm test` green on clean `main`; boot idempotency survives a mid-migration reload with zero data loss; the persistence test is the regression guard for the no-op-commit bug class.
+* **Status:** ✅ COMPLETE (resolved 2026-08-18, merged to `main` @ `e3fad7b`)
+* **Depends on:** nothing (first in the sequence)
+* **Resolution (2026-08-18):** All 6 next-steps shipped. The harness is green on `main` (7/7: boot-idempotency, persistence incl. tool-call turn, vfs-contract) and wired as `npm test`. Building it surfaced **BUG-008** (silent data loss + JSPI re-entrancy hang) — root-caused and fixed; the decisive fix is the **re-entrant query-serialization gate** in `src/harness.js` (see Decision below + `docs/archive/BUG-008_INVESTIGATION.md`). Acceptance met: `npm test` green on clean `main`; boot idempotency survives a mid-migration reload with zero data loss; the persistence test is the regression guard for the no-op-commit bug class.
 * **Question:** What is the minimal test harness that would have caught the entire BUG-010/011/012 bug class — silent data loss on refresh — before any refactor code is allowed to merge?
 * **Vision / Approach:**
   * **Persistence regression test (Playwright):** boot the app → create a session via the UI (the name-confirmation path) → `page.reload()` → assert the session is present **both** in the dropdown **and** in a direct `SELECT id FROM sessions WHERE id = ?`. This single test catches the no-op commit. Extend: create a session + send a (fake-LLM) message → reload → assert present + no duplicate id.
@@ -459,7 +459,8 @@ graph TD
 * **Label:** `wayfinder:task` (AFK)
 * **Status:** ⬜ NOT STARTED
 * **Depends on:** 26.1 (needs the harness to verify the safety net)
-* **Question:** How do we make the BUG-012 lessons durable — so neither this re-plan nor any future ticket re-introduces a transaction pattern that skips the write-transaction transition — and get the real WASM/VFS bugs fixed at the source?
+* **Context (2026-08-18, post-26.1):** 26.1 surfaced and **fixed BUG-008** — the "JSPI table-read hang" this ticket originally hypothesized as a WASM/VFS defect is now root-caused as an **app-layer re-entrancy** issue (two independent queries re-entering wasm concurrently clobber the Pager/B-tree C state; the first never reaches `jUnlock(NONE)`, so the second's exclusive `access` Web Lock queues behind it forever → hang). It is **not** a vendor defect — it's fixed by the 26.1 re-entrant serialization gate in `src/harness.js`. This changes the upstream-report scope below: **item (b) is dropped**, and **item (a) needs re-verification** before filing.
+* **Question:** How do we make the BUG-012 *and* BUG-008 lessons durable — so neither this re-plan nor any future ticket re-introduces a transaction pattern that skips the write-transaction transition, or re-enters wasm concurrently on the single connection — and (only where a *genuine* vendor defect remains) get it fixed at the source?
 * **Vision / Approach:**
   * **In-repo rules doc** (`docs/TRANSACTION_RULES.md`), enforced by review + AGY sign-off:
     1. **Single statement → autocommit.** Never wrap a single INSERT/UPDATE in a savepoint (it is already atomic; the wrapper only changes the transaction pattern — and that change is what triggered BUG-012).
@@ -467,14 +468,18 @@ graph TD
     3. **Dev-mode read-back assertion** after every session write: `SELECT 1 FROM sessions WHERE id = ?` → throw in dev if missing (a no-op commit becomes a loud failure, not silent data loss).
     4. **Vendor VFS policy:** no behavioral change to `vendor/wa-sqlite-jspi/*` without a 26.1 contract test written first (red → green).
     5. **Boot-migration discipline:** any schema migration is one-time, gated (PK check / `PRAGMA user_version`), atomic, and has a recovery path — never a per-boot `DROP`+`RENAME` of a user table (BUG-010).
-  * **Add the dev read-back assertion** to the session-write path (`createSession`, `renameSession`, `deleteSession`, `forkSession`) — a small, safe, real code change.
-  * **File the upstream report** (wa-sqlite maintainer): (a) the **no-op commit** (a savepoint-wrapped INSERT whose step performs zero VFS I/O and whose RELEASE commits zero dirty pages — the pager never transitions to a write transaction), and (b) the **JSPI table-read hang** (a table read suspends and never resumes; Web Locks / IDB / VFS file state all ruled out). Attach the unified `__b12uni` VFS event trace (the format was built for this). Record the issue/PR link here.
+    6. **JSPI re-entrancy (BUG-008):** independent queries must not re-enter wasm concurrently on the single `sqlite3*` handle — the C core is not re-entrant (no pthreads ⇒ internal mutexes are no-ops), so two independent in-flight queries clobber the Pager/B-tree/page-cache C state → hang. Nested (UDF) queries are fine; independent queries are serialized. Enforced automatically by the 26.1 gate in `src/harness.js` (`udfDepth`-classified `entryQueue`). Do not bypass/remove the gate without a 26.1 regression test proving the alternative is safe.
+   * **Add the dev read-back assertion** to the session-write path (`createSession`, `renameSession`, `deleteSession`, `forkSession`) — a small, safe, real code change.
+   * **File the upstream report — conditionally, after re-verification (wa-sqlite maintainer):**
+     * (a) the **no-op commit** (a savepoint-wrapped INSERT whose step performs zero VFS I/O and whose RELEASE commits zero dirty pages — the pager never transitions to a write transaction): **re-verify first** whether this is a genuine pager/VFS defect or an *app* transaction-pattern issue (wrapping a single already-atomic autocommit statement in a savepoint). If it's the latter, rule 1 above already covers it and it is **not** a vendor bug — record that finding instead of filing. If it's a real vendor defect, file with the unified `__b12uni` VFS event trace (the format was built for this).
+     * (b) the **JSPI table-read hang**: **drop from the report.** Root-caused in 26.1 as the BUG-008 app-layer re-entrancy hang (fixed by the serialization gate), not a vendor defect. The durable lesson is a *usage constraint* (rule 6), enforced by the gate — document it, don't file it upstream.
+     * Record the outcome on this ticket: either "filed + issue/PR link" or "not a vendor defect — see finding."
 * **Acceptance:**
-  * `docs/TRANSACTION_RULES.md` committed; the 5 rules are explicit and testable.
-  * Read-back assertion present in the session-write path (dev-mode throw).
-  * Upstream report filed with the trace; link recorded on this ticket.
-  * 26.1 persistence test still green; no change to committed data-path behavior.
-* **Rationale:** codify "learn from the bug" so the refactor tickets (and all future work) cannot re-trigger it, and push the two genuine WASM/VFS defects to where they can actually be fixed.
+   * `docs/TRANSACTION_RULES.md` committed; the 6 rules are explicit and testable (incl. the JSPI re-entrancy constraint).
+   * Read-back assertion present in the session-write path (dev-mode throw).
+   * Upstream report resolved: either filed with the trace + issue/PR link, or a recorded finding that it's not a vendor defect (per the re-verification in the Vision).
+   * 26.1 persistence test still green; no change to committed data-path behavior.
+* **Rationale:** codify "learn from the bug" so the refactor tickets (and all future work) cannot re-trigger it — including the JSPI re-entrancy constraint (BUG-008) that 26.1 just surfaced — and push any *genuine* vendor defect (the no-op commit, if re-verification confirms it) to where it can actually be fixed, without misattributing app-layer issues to the vendor.
 
 ---
 
@@ -482,7 +487,7 @@ graph TD
 * **Label:** `wayfinder:task` (AFK)
 * **Status:** ⬜ NOT STARTED
 * **Depends on:** 26.1 (persistence test green)
-* **Question:** How do we deduplicate the shared string/SQL/DB helpers and slim `main.js` (~1,870 lines) **with zero behavior change**, so the diff is moves-only and trivially reviewable?
+* **Question:** How do we deduplicate the shared string/SQL/DB helpers and slim `main.js` (~2,250 lines) **with zero behavior change**, so the diff is moves-only and trivially reviewable?
 * **Vision / Approach:**
   * **`src/utils.js`:** the single home for `escapeHtml`, `quoteIdent`, `unquoteIdent`, `stripSqlLiterals` (+ `stripSqlCommentsAndStrings` alias), `execParams`, `execSqlRaw`, `queryAll`, `queryRows`, `queryRow`, `queryValue`, and the `SQLITE_ROW`/`SQLITE_DONE` constants. Re-export from `schema.js` for back-compat where needed.
   * **Module split:** extract `src/scratchpad.js` (bang grammar, statement classification, write-confirmation gates, protected-table invariants, DDL pre-image capture, per-bubble ⟲) and `src/chat-render.js` (message rendering, table formatting, draggable chat assets, scratchpad result envelopes) out of `main.js`, targeting `main.js` ≤ ~700 lines.
