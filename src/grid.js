@@ -42,6 +42,19 @@ export function computeGridRows(cards) {
   return Math.max(MIN_GRID_ROWS, maxOccupied + BUFFER_ROWS);
 }
 
+/**
+ * The grid's self-sizing row count, from v_grid_matrix (T26.5): the view's
+ * `params.n_rows` is the SQL expression of computeGridRows (at least 3, plus
+ * 3 buffer rows below the lowest occupied row), and the matrix materializes
+ * rows 0..n_rows-1 — so MAX(row) + 1 is n_rows. The DB-backed render path
+ * (renderGrid) reads this; the pure engine (findFreeSpot's what-if scan)
+ * keeps using computeGridRows over its in-memory cards array.
+ */
+export async function queryGridRows(sqlite3, db) {
+  const rows = await queryAll(sqlite3, db, `SELECT MAX(row) + 1 FROM v_grid_matrix`);
+  return rows[0][0];
+}
+
 // ── Read-only SQL enforcement ─────────────────────────────────────────
 
 /**

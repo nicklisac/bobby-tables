@@ -10,7 +10,7 @@ import { getEventStream } from './harness.js';
 import {
   listCards, addCard, updateCard, removeCard,
   runCardSql, affectedCards,
-  computeGridRows, sanitizeCardLayout, GRID_COLS, CARD_ROW_CAP,
+  queryGridRows, sanitizeCardLayout, GRID_COLS, CARD_ROW_CAP,
 } from './grid.js';
 import { queryAll, execParams } from './schema.js';
 import { materializeToolResult } from './materialize.js';
@@ -190,7 +190,10 @@ export async function renderGrid({ forceRefresh = false } = {}) {
     cards = await listCards(agent.sqlite3, agent.db);
   }
 
-  const totalRows = computeGridRows(cards);
+  // Self-sizing row count from v_grid_matrix (T26.5): the view's n_rows is
+  // the SQL expression of the old computeGridRows(cards) over the same
+  // dashboard_cards state `cards` was just read from.
+  const totalRows = await queryGridRows(agent.sqlite3, agent.db);
   grid.style.gridTemplateRows = `repeat(${totalRows}, minmax(160px, auto))`;
 
   // Preserve existing rendered card DOM elements to prevent re-querying SQL on move/resize
