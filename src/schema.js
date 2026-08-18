@@ -638,7 +638,7 @@ export function isProtectedTable(name, virtualTableParents = null) {
   if (!name || typeof name !== 'string') return false;
   const lower = name.trim().toLowerCase();
   if (INTERNAL_TABLES_LOWER.has(lower)) return true;
-  if (lower.startsWith('sqlite_')) return true;
+  if (lower.startsWith('sqlite_') || lower.startsWith('_') || lower.endsWith('_clean')) return true;
   if (EXPLICIT_SHADOW_REGEX.test(lower)) return true;
   if (virtualTableParents && virtualTableParents.size > 0) {
     for (const parent of virtualTableParents) {

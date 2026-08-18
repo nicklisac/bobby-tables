@@ -97,7 +97,7 @@ export function initExplorerUi(agentHandle) {
   });
 
   // Initial render
-  renderExplorer().catch(e => console.warn('[explorer-ui] initial render failed:', e));
+  return renderExplorer().catch(e => console.warn('[explorer-ui] initial render failed:', e));
 }
 
 // ── Explorer Tree Rendering ──────────────────────────────────────────

@@ -47,6 +47,12 @@ export class SchemaCompletionIndex {
     this.tableNamesSet = new Set();
     this.columnNamesSet = new Set();
     this.lastUpdated = null;
+    // BUG-008: the index is refreshed LAZILY. data_change marks it stale (no DB
+    // read); the actual re-read runs only when the user next enters bang (SQL)
+    // mode. This keeps the schema re-read from being a concurrent SQL flow that
+    // races a turn's cascade and deadlocks the single-connection VFS.
+    this.stale = true;
+    this.refreshing = false;
   }
 
   /**
@@ -97,6 +103,7 @@ export class SchemaCompletionIndex {
     }
 
     this.lastUpdated = Date.now();
+    this.stale = false;
   }
 
   /**
@@ -104,11 +111,15 @@ export class SchemaCompletionIndex {
    */
   async refreshFromDb(sqlite3, db) {
     if (!sqlite3 || !db) return;
+    if (this.refreshing) return; // coalesce concurrent refresh requests
+    this.refreshing = true;
     try {
       const catalog = await getDatabaseCatalog(sqlite3, db);
       this.updateFromCatalog(catalog);
     } catch (err) {
       console.warn('[sql-autocomplete] Schema refresh failed:', err);
+    } finally {
+      this.refreshing = false;
     }
   }
 }
@@ -419,9 +430,12 @@ export class SqlAutocompleteController {
       return;
     }
 
-    // Opportunistic live refresh if schema index is sparsely populated
-    if (this.options.schemaIndex.tables.length <= 1 && window.__agent?.sqlite3 && window.__agent?.db) {
-      this.options.schemaIndex.refreshFromDb(window.__agent.sqlite3, window.__agent.db).catch(() => {});
+    // Lazy refresh: only now, in bang mode, if the index is sparse or was marked
+    // stale by a data_change. This is the ONLY place the schema re-read runs on
+    // user input — never eagerly on data_change (see BUG-008).
+    const idx = this.options.schemaIndex;
+    if ((idx.tables.length <= 1 || idx.stale) && window.__agent?.sqlite3 && window.__agent?.db) {
+      idx.refreshFromDb(window.__agent.sqlite3, window.__agent.db).catch(() => {});
     }
 
     // 3. Analyze context and fetch candidates

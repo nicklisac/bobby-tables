@@ -297,13 +297,19 @@ document.getElementById('btn-new-session')?.addEventListener('click', async (e) 
   if (!agent) return;
   const name = prompt('Session name:', 'New Session');
   if (!name?.trim()) return;
-  const id = await createSession(agent.sqlite3, agent.db, name.trim());
-  activeSessionId = id;
-  activeStreamingBubble = null;
-  activeToolIndicator = null;
-  await setActiveSession(agent.sqlite3, agent.db, id);
-  await populateSessionDropdown();
-  await renderMessages();
+  const btn = document.getElementById('btn-new-session');
+  if (btn) btn.disabled = true;
+  try {
+    const id = await createSession(agent.sqlite3, agent.db, name.trim());
+    activeSessionId = id;
+    activeStreamingBubble = null;
+    activeToolIndicator = null;
+    await setActiveSession(agent.sqlite3, agent.db, id);
+    await populateSessionDropdown();
+    await renderMessages();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 });
 
 document.getElementById('session-list')?.addEventListener('click', async (e) => {
@@ -781,7 +787,10 @@ async function renderMessages() {
   scrollChatToBottom();
   await updateTokenUsage();
   // T8: keep the left-pane DB Explorer current (tables, views, row counts, DDL).
-  explorerUi.renderExplorer().catch(e => console.warn('[main] explorer render failed (non-fatal):', e));
+  // BUG-008: AWAIT it. A fire-and-forget renderExplorer runs its getDatabaseCatalog
+  // burst in the background, racing the next query on the single connection and
+  // deadlocking the VFS. Awaiting keeps it sequential with the surrounding work.
+  await explorerUi.renderExplorer().catch(e => console.warn('[main] explorer render failed (non-fatal):', e));
 }
 
 async function updateTokenUsage() {
@@ -889,9 +898,12 @@ function handleAgentEvent(event) {
     }
 
     case 'data_change': {
-      if (agent?.sqlite3 && agent?.db) {
-        globalSchemaIndex.refreshFromDb(agent.sqlite3, agent.db).catch(() => {});
-      }
+      // BUG-008: do NOT read the DB here. A data_change fires on every row
+      // change during a turn; a schema re-read here is a concurrent SQL flow on
+      // the single connection that races the cascade and deadlocks the VFS.
+      // Just mark the autocomplete index stale — the real re-read runs lazily
+      // when the user next enters bang (SQL) mode (sql-autocomplete.js).
+      globalSchemaIndex.stale = true;
       break;
     }
 
@@ -1137,11 +1149,6 @@ async function bootAgent() {
       console.warn('[main] T2 context-window persist failed (non-fatal):', e);
     }
 
-    updateReadyStatus();
-
-    inputEl.disabled = false;
-    sendBtn.disabled = false;
-
     await populateSessionDropdown();
     await renderMessages();
 
@@ -1151,7 +1158,7 @@ async function bootAgent() {
     try {
       window.__agent.grid = gridEngine;
       window.__agent.gridUi = gridUi;
-      gridUi.initGridUi(agent);
+      await gridUi.initGridUi(agent);
     } catch (e) {
       console.warn('[main] T11 grid init failed (non-fatal):', e);
     }
@@ -1161,7 +1168,7 @@ async function bootAgent() {
       window.__agent.explorer = explorerEngine;
       window.__agent.explorerUi = explorerUi;
       window.__agent.renderMessages = renderMessages;
-      explorerUi.initExplorerUi(agent);
+      await explorerUi.initExplorerUi(agent);
     } catch (e) {
       console.warn('[main] T8 explorer init failed (non-fatal):', e);
     }
@@ -1190,6 +1197,10 @@ async function bootAgent() {
       console.warn('[main] T24 autocomplete init failed (non-fatal):', e);
     }
 
+    updateReadyStatus();
+    window.__agent.ready = true;
+    inputEl.disabled = false;
+    sendBtn.disabled = false;
     inputEl.focus();
   } catch (e) {
     console.error('[main] Boot failed:', e);

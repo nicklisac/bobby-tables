@@ -261,15 +261,25 @@ export async function bootSqliteAgent(config = {}) {
 
   // 2. Mount VFS (IDB for persistence on main thread, MemoryVFS as fallback)
   let vfsName = '';
+  let vfs = null;
   try {
-    const vfs = await IDBBatchAtomicVFS.create('idb', module);
+    vfs = await IDBBatchAtomicVFS.create('idb', module);
     sqlite3.vfs_register(vfs, true);
+    // T26.1 instrumentation: surface the rare, dangerous VFS events in the
+    // console (crash-recovery deletions and rollbacks). The full event ring
+    // buffer (open/lock/unlock/write/txn-begin/seal/recovery/rollback) is on
+    // vfs.events — exposed as window.__agent.vfs.events for diagnostics.
+    vfs.log = (type, detail) => {
+      if (type === 'recovery' || type === 'rollback') {
+        console.log('[vfs]', type, detail);
+      }
+    };
     vfsName = 'idb';
     console.log('[harness] IDB VFS mounted (persistent)');
   } catch (e) {
     console.warn('[harness] IDB unavailable (', e.message, '), using MemoryVFS');
-    const memVfs = await MemoryVFS.create('mem', module);
-    sqlite3.vfs_register(memVfs, true);
+    vfs = await MemoryVFS.create('mem', module);
+    sqlite3.vfs_register(vfs, true);
     vfsName = 'mem';
   }
 
@@ -306,6 +316,165 @@ export async function bootSqliteAgent(config = {}) {
       });
     }
   });
+
+  // 4c. BUG-008: step/finalize serialization.
+  // Under JSPI every sqlite3 API call that touches the VFS is async and
+  // SUSPENDS the wasm module. The vendor `sqlite3.statements()` generator
+  // finalizes its statement WITHOUT awaiting (sqlite-api.js `maybeFinalize`,
+  // :684-690), so a query's async teardown (finalize -> jUnlock -> IDB sync)
+  // can still be in flight when another statement enters wasm on the same
+  // connection. That re-entrancy corrupts pager/lock state: a statement
+  // "commits" with zero VFS writes — the row exists only in the page cache
+  // and is silently lost on reload (see docs/BUG_LOG.md BUG-008).
+  //
+  // The invariant enforced here (and only this):
+  //   * a STEP may not enter wasm while a finalize teardown is in flight.
+  // The finalize itself must NOT wait for steps to finish: a read statement
+  // holds the VFS's shared `access` Web Lock until its finalize releases it
+  // (WebLocksMixin), so a step can be parked in the lock queue on a lock the
+  // finalize is about to release — waiting for steps would deadlock. This is
+  // also deliberately NOT a statement-lifetime mutex: the agent cascade runs
+  // JS UDFs (ask_llm, run_dynamic_sql, materialize) INSIDE step(), and those
+  // UDFs legally issue nested queries on the same connection (a lifetime
+  // hold deadlocks on the first tool-call turn — reviewed and rejected).
+  // A finalize only does VFS work (IDB sync + lock release) when the
+  // connection actually transitions to NONE, i.e. when no other transaction
+  // holds the locks, so an immediate finalize is safe in the reverse
+  // direction.
+  //
+  // Residual (pre-existing, vendor-level): the generator's internal prepare
+  // (sqlite-api.js:656, a local cwrap we cannot wrap) can overlap an
+  // in-flight finalize for MULTI-STATEMENT SQL strings; the lock ladder
+  // self-heals at the blocking EXCLUSIVE acquisition, and the app's only
+  // multi-statement path (SCHEMA_SQL at boot) runs with no concurrent flow.
+  // The proper fix is awaiting the finalize in the vendor generator
+  // (BUG-008 follow-up 1).
+  if (!globalThis.__T261_DISABLE_MUTEX) {
+    // Kill switch (debugging/visualization): set window.__T261_DISABLE_MUTEX
+    // BEFORE boot to bypass serialization (reproduces BUG-008).
+    const origStatements = sqlite3.statements;
+    const origStep = sqlite3.step;
+    const origFinalize = sqlite3.finalize;
+    const origCreateFunction = sqlite3.create_function;
+    let finalizeDrain = Promise.resolve(); // in-flight finalize teardowns
+    let entryQueue = Promise.resolve();    // serializes INDEPENDENT top-level queries
+    let udfDepth = 0;                      // in-progress UDF executions (nested signal)
+    const nestedInFlight = new Map();      // udfDepth -> count of in-flight nested gens
+    const T261_TRACE = !!globalThis.__T261_TRACE;
+    const tlog = (...a) => { if (T261_TRACE) console.log('[ser]', ...a); };
+
+    // Wrap create_function to track UDF-execution depth. The callback is always
+    // the last argument. A query is NESTED iff it is issued while a UDF is
+    // executing (udfDepth > 0) — i.e. from inside the agent cascade. An
+    // INDEPENDENT query (app event loop) runs at udfDepth 0, even while some
+    // top-level step is in flight/suspended. stepDepth alone can't tell these
+    // apart: a top-level catalog step is in flight when an independent query
+    // starts, which misclassifies it as nested and lets it slip through
+    // unserialized -> C-state clobber. (BUG-008 residual.)
+    sqlite3.create_function = function(...args) {
+      const fn = args[args.length - 1];
+      if (typeof fn === 'function') {
+        // Async wrapper so udfDepth spans the UDF's FULL execution (including
+        // while it is suspended on an await, e.g. a fetch) — a nested query
+        // issued after an await must still see udfDepth > 0.
+        args[args.length - 1] = async function(...callArgs) {
+          udfDepth++;
+          try { return await fn.apply(this, callArgs); }
+          finally { udfDepth--; }
+        };
+      }
+      return origCreateFunction.apply(this, args);
+    };
+
+    // BUG-008 (re-entrant serialization). SQLite's C core is NOT re-entrant on a
+    // single sqlite3* handle (no pthreads => its internal mutexes compile to
+    // no-ops), so two INDEPENDENT queries re-entering wasm concurrently clobber
+    // the Pager/B-tree/page-cache C state -> hangs / silent data loss. A VFS-
+    // layer fix can't help (the damage is inside wasm). We therefore serialize
+    // independent (top-level) queries one-at-a-time via entryQueue, while
+    // ALLOWING nested queries (issued from inside a UDF, i.e. created while
+    // udfDepth > 0) to run — a plain statement mutex would deadlock the agent
+    // cascade on the first tool-call turn.
+    //
+    // Classification + queue acquisition happen on the generator's FIRST next()
+    // (not at statements() call time) so a gen created at depth 0 but first
+    // stepped inside a UDF is classified by the depth it actually runs at.
+    sqlite3.statements = function(db, sql, options) {
+      const origGen = origStatements(db, sql, options);
+      const sqlTag = String(sql).slice(0, 40);
+      tlog('gen create:', sqlTag);
+      return (async function*() {
+        // --- first-next: classify, and (top-level only) acquire the entry slot ---
+        const isNested = udfDepth > 0;
+        const startDepth = udfDepth;
+        let releaseEntry = null;
+        if (!isNested) {
+          // Independent top-level query: serialize. Synchronous tail-swap BEFORE
+          // any await so concurrently-created entries chain correctly.
+          let resolveTurn;
+          const turn = new Promise(r => { resolveTurn = r; });
+          const prev = entryQueue;
+          entryQueue = turn;
+          tlog('entry wait:', sqlTag);
+          await prev.catch(() => {});
+          tlog('entry acquired:', sqlTag);
+          releaseEntry = () => { try { resolveTurn(); } catch { /* noop */ } };
+        } else {
+          // Nested (UDF) query: part of the current entry — skip the queue. Warn
+          // (non-fatal) if a sibling nested query is already in flight at the same
+          // depth (parallel nested -> C-state clobber; the app runs nested seq.).
+          const c = nestedInFlight.get(startDepth) || 0;
+          if (c > 0) {
+            console.warn(`[ser] WARNING: parallel nested query at depth ${startDepth} (C-state clobber risk):`, sqlTag);
+            tlog('WARN parallel-nested depth', startDepth, sqlTag);
+          }
+          nestedInFlight.set(startDepth, c + 1);
+        }
+        try {
+          for (;;) {
+            tlog('gen gate-wait:', sqlTag);
+            await finalizeDrain.catch(() => {});
+            tlog('gen gate-pass:', sqlTag);
+            const { value, done } = await origGen.next();
+            if (done) break;
+            yield value;
+          }
+        } finally {
+          tlog('gen close:', sqlTag);
+          try { await origGen.return(undefined); } catch { /* already done */ }
+          if (isNested) {
+            const c = (nestedInFlight.get(startDepth) || 1) - 1;
+            if (c <= 0) nestedInFlight.delete(startDepth);
+            else nestedInFlight.set(startDepth, c);
+          } else if (releaseEntry) {
+            releaseEntry();
+            tlog('entry released:', sqlTag);
+          }
+        }
+      })();
+    };
+
+    sqlite3.step = async function(stmt) {
+      // Wait for any in-flight finalize teardown to complete before entering
+      // wasm. (Swallow rejections: the error already surfaced to the consumer
+      // that started that finalize.) Nested-query classification is by udfDepth
+      // (tracked in the create_function wrapper), not by step depth.
+      tlog('step gate-wait');
+      await finalizeDrain.catch(() => {});
+      tlog('step gate-pass');
+      return await origStep(stmt);
+    };
+
+    sqlite3.finalize = function(stmt) {
+      // Track the (async wasm) finalize from start to completion so steps
+      // gate on the whole teardown. Runs immediately — see design notes.
+      tlog('fin start');
+      const p = origFinalize(stmt);
+      finalizeDrain = finalizeDrain.then(() => p, () => p);
+      p.then(() => tlog('fin done'), (e) => tlog('fin ERROR:', e && e.message));
+      return p;
+    };
+  }
 
   // 5a. T2: one LLM call (streaming + non-streaming fallback). Returns
   // { content, toolCalls, promptTokens, completionTokens, stopped }. Throws
@@ -1043,7 +1212,7 @@ export async function bootSqliteAgent(config = {}) {
   // `llm` is the resolved LLM config — exposed so compaction.js (T2) can make
   // its one-shot summary fetch to the same model/endpoint.
   return {
-    sqlite3, db, eventStream: agentEventStream, module,
+    sqlite3, db, eventStream: agentEventStream, module, vfs,
     llm: { model: llmModel, endpointUrl, apiKey: llmApiKey, provider: llmProvider },
   };
 }

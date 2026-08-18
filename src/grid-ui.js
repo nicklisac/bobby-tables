@@ -55,7 +55,7 @@ export function initGridUi(agentHandle) {
     if (dlg && !dlg.classList.contains('hidden')) closeCardDialog();
   });
 
-  renderGrid().catch(e => console.warn('[grid-ui] initial render failed:', e));
+  return renderGrid().catch(e => console.warn('[grid-ui] initial render failed:', e));
 }
 
 /** Subscribe to the shared event stream for 'data_change' events. */
