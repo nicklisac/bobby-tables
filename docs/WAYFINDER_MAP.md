@@ -504,8 +504,14 @@ graph TD
 
 ### Ticket 26.4: SQL-Native Views — Actually Create Them
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** ⬜ NOT STARTED
+* **Status:** 🟡 IN PROGRESS (claimed 2026-08-18, branch `t26.4-sql-native-views`)
 * **Depends on:** 26.1, 26.3 (the probe uses shared utils)
+* **Next steps (2026-08-18):**
+  1. **First, settle the scrapped-branch BUG-008 finding empirically on the real build:** the `sql-refactor` BUG_LOG claims a persistent `CREATE VIEW` over `sqlite_master` + `pragma_table_info(m.name)` (non-constant table-valued-PRAGMA argument) caused `database disk image is malformed` on DML inside savepoints. Reproduce-or-disprove with a probe (create the view → run savepoint DML on `messages`/`turn_changesets` → `integrity_check` + IDB dump). This decides whether `v_schema_catalog` is a persistent view, a view over a materialized catalog table, or a documented on-demand query.
+  2. Design + create the 5 views in `src/schema.js` (`DROP VIEW IF EXISTS` + recreate at boot, `v_active_context` pattern): `v_schema_catalog`, `v_turn_boundaries`, `v_tool_call_queries`, `v_grid_matrix`, `v_session_summary`.
+  3. Write the probe that `SELECT`s each view and **fails if it is missing or returns no/invalid rows** for a seeded DB (the scrapped attempt's probe never did this — that is how the vaporware shipped).
+  4. Verify: `npm run build` green; 26.1 harness (`npm test`) green — including persistence (the views must not re-trigger the malformed-image / no-op-commit bug classes under savepoint DML).
+  5. AGY review pass before commit (sign-off standard).
 * **Question:** How do we create the 5 SQL-native views for real — and prove each one works — so "push everything into SQLite" is a fact, not a map claim?
 * **Vision / Approach:**
   * **Create the 5 views** (each individually verifiable; one commit each or one commit + one probe):
