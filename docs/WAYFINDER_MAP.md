@@ -486,8 +486,15 @@ graph TD
 
 ### Ticket 26.3: Shared Utilities + Module Split (Pure Code Move)
 * **Label:** `wayfinder:task` (AFK)
-* **Status:** ⬜ NOT STARTED
+* **Status:** 🟡 IN PROGRESS (claimed 2026-08-18, branch `t26.3-utils-split`)
 * **Depends on:** 26.1 (persistence test green)
+* **Next steps (2026-08-18):**
+  1. Inventory the duplicated helpers across `src/` (`escapeHtml`, `quoteIdent`, `unquoteIdent`, `stripSqlLiterals`, `execParams`, `execSqlRaw`, `queryAll`, `queryRows`, `queryRow`, `queryValue`, `SQLITE_ROW`/`SQLITE_DONE`) — find the canonical version(s) and every call site.
+  2. Create `src/utils.js` as the single home for those helpers; update all import sites; re-export from `schema.js` for back-compat where needed.
+  3. Extract `src/scratchpad.js` from `main.js` (bang grammar, statement classification, write-confirmation gates, protected-table invariants, DDL pre-image capture, per-bubble ⟲).
+  4. Extract `src/chat-render.js` from `main.js` (message rendering, table formatting, draggable chat assets, scratchpad result envelopes). Target `main.js` ≤ ~700 lines.
+  5. Verify: `npm run build` green; 26.1 harness (`npm test`) green; diff is moves/renames only — no logic, transaction-pattern, or SQL changes.
+  6. AGY review pass before commit (sign-off standard).
 * **Question:** How do we deduplicate the shared string/SQL/DB helpers and slim `main.js` (~2,250 lines) **with zero behavior change**, so the diff is moves-only and trivially reviewable?
 * **Vision / Approach:**
   * **`src/utils.js`:** the single home for `escapeHtml`, `quoteIdent`, `unquoteIdent`, `stripSqlLiterals` (+ `stripSqlCommentsAndStrings` alias), `execParams`, `execSqlRaw`, `queryAll`, `queryRows`, `queryRow`, `queryValue`, and the `SQLITE_ROW`/`SQLITE_DONE` constants. Re-export from `schema.js` for back-compat where needed.
