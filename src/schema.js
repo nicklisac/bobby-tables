@@ -309,6 +309,208 @@ CREATE TABLE IF NOT EXISTS dashboard_cards (
 );
 
 -- =====================================================================
+-- 4g. SQL-native subsystem views (T26.4)
+--
+-- The "push everything into SQLite" views: schema introspection,
+-- compaction token/boundary metrics, tool-call extraction, grid
+-- occupancy, and session aggregations — computed in SQL, not JS loops.
+--
+-- All five are DROP VIEW IF EXISTS + recreate (not IF NOT EXISTS) so
+-- existing brains pick up definition changes at boot, consistent with
+-- v_active_context.
+--
+-- Legality note (T26.4 step 1, tests/specs/t26.4-view-legality.spec.mjs):
+-- a persistent view over sqlite_master + correlated NON-CONSTANT
+-- table-valued PRAGMAs (v_schema_catalog's shape) was proven legal and
+-- safe on the real build — it survives savepoint DML/DDL, integrity
+-- checks, IDB-durable commits, and full app boots. The scrapped
+-- sql-refactor branch's "malformed image" finding was its unmerged
+-- local vendor VFS change, not the view pattern.
+-- =====================================================================
+
+-- v_schema_catalog: the full schema (columns, types, defaults, PKs,
+-- indexes, FKs) in one query. Correlates the table-valued PRAGMA
+-- functions with sqlite_master via json_group_array. Views' columns are
+-- their output columns (pragma_table_info works on views); their
+-- indexes/foreign_keys are normally empty.
+DROP VIEW IF EXISTS v_schema_catalog;
+CREATE VIEW v_schema_catalog AS
+SELECT
+    m.name AS table_name,
+    m.type AS object_type,
+    m.sql AS create_sql,
+    COALESCE((
+        SELECT json_group_array(json_object('cid', p.cid, 'name', p.name, 'type', p.type,
+                                             'notnull', p."notnull", 'dflt_value', p.dflt_value, 'pk', p.pk))
+        FROM pragma_table_info(m.name) p
+    ), '[]') AS columns,
+    COALESCE((
+        SELECT json_group_array(json_object('seq', i.seq, 'name', i.name, 'unique', i."unique", 'partial', i.partial))
+        FROM pragma_index_list(m.name) i
+    ), '[]') AS indexes,
+    COALESCE((
+        SELECT json_group_array(json_object('id', f.id, 'table', f."table", 'from', f."from", 'to', f."to"))
+        FROM pragma_foreign_key_list(m.name) f
+    ), '[]') AS foreign_keys
+FROM sqlite_master m
+WHERE m.type IN ('table', 'view') AND m.name NOT LIKE 'sqlite_%'
+ORDER BY (m.type = 'view') ASC, m.name ASC;
+
+-- v_turn_boundaries: pair-safe watermark + cumulative token accounting
+-- for the ACTIVE session's visible region (in_context=1 rows after the
+-- current compaction watermark), per row:
+--   est_tokens        — the compaction estimator (chars÷4 over content +
+--                       tool_calls + tool_call_id; NULLs contribute 0).
+--                       LENGTH() counts UTF-8 bytes vs JS's UTF-16 units:
+--                       identical for ASCII, a bounded difference otherwise
+--                       (the estimate is rough by design).
+--   cum_tokens_head   — running sum from the head of the region (id order).
+--   cum_tokens_tail   — running sum from the TAIL (the compaction walk
+--                       direction): the cut row is the largest-id row with
+--                       cum_tokens_tail >= keepBudget.
+--   total_tokens      — the region's grand total (constant per row).
+--   is_turn_start     — 1 on user rows (turns start at user messages; tool
+--                       pairs never cross one, so cuts there are pair-safe).
+--   next/prev_turn_start_id — nearest user-row id at/after and at/before
+--                       this row (the boundary the JS walk advances to).
+--   prev_id           — the previous row in the region (NULL on the first
+--                       row): the watermark candidate when this row is the
+--                       first retained row.
+-- Pinned to the active session via session_context (same convention as
+-- v_active_context — compaction only ever runs on the active session).
+DROP VIEW IF EXISTS v_turn_boundaries;
+CREATE VIEW v_turn_boundaries AS
+WITH active AS (
+    SELECT value AS session_id FROM session_context WHERE key = 'active_session_id'
+),
+wm AS (
+    SELECT COALESCE(MAX(c.watermark_id), -1) AS watermark_id
+    FROM compactions c
+    CROSS JOIN active a
+    WHERE c.session_id = a.session_id
+),
+visible AS (
+    SELECT
+        m.id,
+        m.role,
+        CEIL((LENGTH(COALESCE(m.content, '')) + LENGTH(COALESCE(m.tool_calls, ''))
+              + LENGTH(COALESCE(m.tool_call_id, ''))) / 4.0) AS est_tokens,
+        m.prompt_tokens,
+        m.completion_tokens
+    FROM messages m
+    CROSS JOIN active a
+    CROSS JOIN wm
+    WHERE m.session_id = a.session_id
+      AND COALESCE(m.in_context, 1) = 1
+      AND m.id > wm.watermark_id
+)
+SELECT
+    id,
+    role,
+    est_tokens,
+    prompt_tokens,
+    completion_tokens,
+    SUM(est_tokens) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum_tokens_head,
+    SUM(est_tokens) OVER (ORDER BY id DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum_tokens_tail,
+    SUM(est_tokens) OVER () AS total_tokens,
+    (role = 'user') AS is_turn_start,
+    MIN(CASE WHEN role = 'user' THEN id END) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS next_turn_start_id,
+    MAX(CASE WHEN role = 'user' THEN id END) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS prev_turn_start_id,
+    LAG(id) OVER (ORDER BY id) AS prev_id
+FROM visible;
+
+-- v_tool_call_queries: one row per tool call in every assistant message's
+-- tool_calls JSON (json_each expansion — kills the JS JSON.parse loops in
+-- rendering). arguments arrives in two shapes: a JSON object or a
+-- JSON-encoded STRING (both occur in the wild); the double-extract
+-- COALESCE handles the string form (mirrors the execute_tool trigger).
+-- query_sql is the extracted query argument for ANY tool (the SQL for
+-- execute_sql, the search query for search_web) — NULL when the tool's
+-- arguments carry no query key (e.g. fetch_url's url).
+DROP VIEW IF EXISTS v_tool_call_queries;
+CREATE VIEW v_tool_call_queries AS
+SELECT
+    m.id AS message_id,
+    m.session_id,
+    m.created_at,
+    tc.key AS call_index,
+    json_extract(tc.value, '$.id') AS tool_call_id,
+    json_extract(tc.value, '$.function.name') AS tool_name,
+    COALESCE(
+        json_extract(tc.value, '$.function.arguments.query'),
+        json_extract(json_extract(tc.value, '$.function.arguments'), '$.query')
+    ) AS query_sql,
+    json_extract(tc.value, '$.function.arguments') AS arguments
+FROM messages m
+-- The guard lives on the json_each INPUT (the FROM clause evaluates before
+-- any WHERE): NULL or malformed tool_calls (e.g. a hand-edited imported
+-- cartridge) expand to zero rows instead of erroring the whole view — this
+-- is a read surface, not the cascade path.
+CROSS JOIN json_each(CASE WHEN json_valid(m.tool_calls) THEN m.tool_calls ELSE '[]' END) tc
+WHERE m.role = 'assistant'
+  AND m.tool_calls IS NOT NULL
+  AND json_type(m.tool_calls) = 'array';
+
+-- v_grid_matrix: the grid's cell matrix — 3 cols × N rows (N self-sizes
+-- exactly like grid.js computeGridRows: at least 3, plus 3 buffer rows
+-- below the lowest occupied row) — LEFT JOINed with dashboard_cards'
+-- span extents. One row per cell; card_id NULL = empty slot. Occupancy
+-- is an O(1) lookup: SELECT … WHERE row = ? AND col = ?.
+DROP VIEW IF EXISTS v_grid_matrix;
+CREATE VIEW v_grid_matrix AS
+WITH RECURSIVE params AS (
+    -- 2-arg MAX is the scalar form (this build has no GREATEST).
+    SELECT MAX(3, COALESCE(MAX(row + row_span), 0) + 3) AS n_rows
+    FROM dashboard_cards
+),
+rows_axis(n) AS (
+    SELECT 0
+    UNION ALL
+    SELECT n + 1 FROM rows_axis, params WHERE n + 1 < params.n_rows
+),
+cols_axis(n) AS (
+    SELECT 0
+    UNION ALL
+    SELECT n + 1 FROM cols_axis WHERE n + 1 < 3
+)
+SELECT
+    r.n AS row,
+    c.n AS col,
+    dc.id AS card_id,
+    dc.title AS card_title,
+    dc.sql AS card_sql,
+    dc.row_span,
+    dc.col_span
+FROM rows_axis r
+CROSS JOIN cols_axis c
+LEFT JOIN dashboard_cards dc
+    ON dc.row <= r.n AND r.n < dc.row + dc.row_span
+   AND dc.col <= c.n AND c.n < dc.col + dc.col_span
+ORDER BY r.n ASC, c.n ASC;
+
+-- v_session_summary: per-session token + message aggregations (the
+-- session list / token counter's data). Ordered like listSessions
+-- (updated_at DESC, created_at DESC).
+DROP VIEW IF EXISTS v_session_summary;
+CREATE VIEW v_session_summary AS
+SELECT
+    s.id AS session_id,
+    s.name,
+    COALESCE(s.description, '') AS description,
+    s.created_at,
+    s.updated_at,
+    COUNT(m.id) AS message_count,
+    COALESCE(SUM(m.prompt_tokens), 0) AS total_prompt_tokens,
+    COALESCE(SUM(m.completion_tokens), 0) AS total_completion_tokens,
+    COALESCE(SUM(m.prompt_tokens), 0) + COALESCE(SUM(m.completion_tokens), 0) AS total_tokens,
+    MAX(m.id) AS last_message_id,
+    (SELECT COUNT(*) FROM compactions c WHERE c.session_id = s.id) AS compaction_count
+FROM sessions s
+LEFT JOIN messages m ON m.session_id = s.id
+GROUP BY s.id, s.name, s.description, s.created_at, s.updated_at
+ORDER BY s.updated_at DESC, s.created_at DESC;
+
+-- =====================================================================
 -- 5. Sample Data
 -- =====================================================================
 CREATE TABLE IF NOT EXISTS sample_data (

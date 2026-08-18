@@ -96,15 +96,15 @@ graph TD
     T26 --> T261[T26.1 Guardrails: persistence / VFS-contract / boot-idempotency tests - DONE]
     T261 --> T262[T26.2 Transaction-pattern rules + upstream bug report - DONE]
     T262 --> T263[T26.3 Shared utils + module split (pure move) - DONE]
-    T263 --> T264[T26.4 SQL-native views (actually created)]
+    T263 --> T264[T26.4 SQL-native views (actually created) - DONE]
     T264 --> T265[T26.5 Subsystem harmonization (consume the views)]
 
     classDef done fill:#238636,stroke:#2ea043,color:#fff;
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T21,T24,T25,T261,T262,T263 done;
-    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T26,T264,T265 frontier;
+    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T21,T24,T25,T261,T262,T263,T264 done;
+    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T26,T265 frontier;
 ```
 
 ---
@@ -504,9 +504,19 @@ graph TD
 
 ### Ticket 26.4: SQL-Native Views — Actually Create Them
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** 🟡 IN PROGRESS (claimed 2026-08-18, branch `t26.4-sql-native-views`)
+* **Status:** ✅ RESOLVED (2026-08-18, branch `t26.4-sql-native-views`)
 * **Depends on:** 26.1, 26.3 (the probe uses shared utils)
-* **Next steps (2026-08-18):**
+* **Resolution (2026-08-18):** All 5 views now actually exist in `src/schema.js` (section 4g, `DROP VIEW IF EXISTS` + recreate at boot) and are probe-proven by `tests/specs/t26.4-views.spec.mjs` (asserts presence in `sqlite_master` + valid, non-empty, **correct** rows for a seeded DB — tool_calls in BOTH argument shapes, a 2×2 card, known token counts — plus boot/reload survival):
+  * `v_schema_catalog` — `sqlite_master` × correlated `pragma_table_info/index_list/foreign_key_list(m.name)` + `json_group_array` → columns/indexes/FKs as JSON per object (tables + views, `sqlite_%` excluded).
+  * `v_turn_boundaries` — per-row `est_tokens` (the compaction chars÷4 estimator) + `cum_tokens_head` / `cum_tokens_tail` / `total_tokens` window sums + `is_turn_start` / `next_turn_start_id` / `prev_turn_start_id` / `prev_id` boundary pointers, over the active session's visible region (in_context=1, after the current watermark) — everything `planCompaction`'s JS walk needs (26.5).
+  * `v_tool_call_queries` — `json_each` expansion of assistant `tool_calls`; both argument shapes handled by the double-extract COALESCE (mirrors `execute_tool`); `query_sql` = the extracted `query` argument for any tool.
+  * `v_grid_matrix` — self-sizing 3×N cell matrix (N = `MAX(3, max(row+row_span)+3)`, mirrors `computeGridRows`) via two recursive-CTE axes, LEFT JOINed with card span extents; `card_id` NULL = empty slot.
+  * `v_session_summary` — per-session message/token aggregates + `compaction_count`, ordered like `listSessions`.
+  * **Key finding (step 1):** the scrapped branch's BUG-008 claim ("persistent view over `sqlite_master` + table-valued PRAGMA = illegal schema construct") is **DISPROVED on the real build** by `tests/specs/t26.4-view-legality.spec.mjs` (kept as a regression guard): the full correlated pattern creates, queries, survives savepoint DML/DDL with `integrity_check: ok`, commits durably to IDB, and survives a full app boot. The scrapped branch's corruption was its unmerged vendor VFS seal change.
+  * **Build quirks hit:** the vendored build has no `GREATEST` (use 2-arg scalar `MAX`); `RECURSIVE` belongs at the head of the `WITH` clause, not per-CTE; no backticks inside the `SCHEMA_SQL` template literal (they terminate the JS string).
+  * **AGY review (2026-08-18, `Gemini 3.7 Flash (Low)`):** no blockers. One SHOULD-FIX **applied**: `json_valid` guard on `v_tool_call_queries`' `json_each` **input** (the FROM clause evaluates before any WHERE) — a malformed `tool_calls` row (e.g. a hand-edited imported cartridge) now expands to zero rows instead of erroring the whole view. One SHOULD-FIX **rejected as false positive**: `CEIL` availability — the probe asserts exact `est_tokens` values, so `CEIL` demonstrably runs on this build.
+  * **Verified:** `npm run build` green; 9/9 harness green (the 26.1 seven + the two new specs); no app behavior change (views exist, nothing consumes them yet — that's 26.5).
+* **Next steps (2026-08-18, superseded by Resolution):**
   1. ~~Settle the scrapped-branch BUG-008 finding empirically~~ **DONE (2026-08-18) — DISPROVED on the current build.** `tests/specs/t26.4-view-legality.spec.mjs` (gradient probe, ~1s, kept as a regression guard): a plain view over `sqlite_master` ✓, a constant-argument table-valued-PRAGMA view ✓, and the full correlated non-constant pattern (`sqlite_master` + `pragma_table_info/index_list/foreign_key_list(m.name)` + `json_group_array` — the `v_schema_catalog` shape) **creates, queries, and survives savepoint DML (INSERT/UPDATE/DELETE) + savepoint DDL (CREATE/DROP TABLE) with `integrity_check: ok`, IDB-durable commits, and a clean app boot (boot runs DDL+DML) with the view in the schema.** The "illegal schema construct" claim does not reproduce; the scrapped branch's corruption was almost certainly its unmerged local vendor VFS seal change (191 lines of `IDBBatchAtomicVFS.js` modified on that branch). **`v_schema_catalog` proceeds as a real persistent view.**
   2. Design + create the 5 views in `src/schema.js` (`DROP VIEW IF EXISTS` + recreate at boot, `v_active_context` pattern): `v_schema_catalog`, `v_turn_boundaries`, `v_tool_call_queries`, `v_grid_matrix`, `v_session_summary`.
   3. Write the probe that `SELECT`s each view and **fails if it is missing or returns no/invalid rows** for a seeded DB (the scrapped attempt's probe never did this — that is how the vaporware shipped).
