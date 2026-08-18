@@ -436,8 +436,15 @@ graph TD
 
 ### Ticket 26.1: Guardrails — Persistence, VFS-Contract & Boot-Idempotency Test Harness
 * **Label:** `wayfinder:task` (AFK)
-* **Status:** ⬜ NOT STARTED
+* **Status:** 🟡 IN PROGRESS (claimed 2026-08-17, branch `t26.1-guardrails`)
 * **Depends on:** nothing (first in the sequence)
+* **Next steps (2026-08-17):**
+  1. ✅ Playwright 1.62.1 installed (was declared in `package.json` but missing from `node_modules`); system Chrome at `/usr/bin/google-chrome` available for the JSPI launch (`channel: 'chrome'` + `--js-flags=--experimental-wasm-jspi`, per the existing `docs/prototypes/*-headless.mjs` pattern).
+  2. Persistence regression test (Playwright): fresh context (fresh IDB) → boot → create session via UI (`#btn-new-session` + native `prompt`) → `page.reload()` → assert session present in dropdown AND in direct `SELECT id FROM sessions WHERE id = ?`. Extend: + message insert → reload → present, no duplicate id.
+  3. VFS write-pattern contract probe (in-page, real `IDBBatchAtomicVFS`): 5 canonical patterns (autocommit INSERT; SAVEPOINT+INSERT+RELEASE; BEGIN IMMEDIATE…COMMIT; multi-statement txn; DDL in txn) → dump IDB blocks → assert the table page's newest committed version contains the row.
+  4. Boot idempotency probe: N boots + simulated mid-migration reload kill → schema + data intact, no stranded `_sessions_clean`, `integrity_check: ok`.
+  5. Wire `npm test` (Playwright config: `npm run dev` webServer on :5174, system Chrome channel + JSPI flag, fresh context per test).
+  6. Discriminator check: savepoint-wrapped `createSession` on a scratch copy must FAIL the persistence test — then revert.
 * **Question:** What is the minimal test harness that would have caught the entire BUG-010/011/012 bug class — silent data loss on refresh — before any refactor code is allowed to merge?
 * **Vision / Approach:**
   * **Persistence regression test (Playwright):** boot the app → create a session via the UI (the name-confirmation path) → `page.reload()` → assert the session is present **both** in the dropdown **and** in a direct `SELECT id FROM sessions WHERE id = ?`. This single test catches the no-op commit. Extend: create a session + send a (fake-LLM) message → reload → assert present + no duplicate id.
