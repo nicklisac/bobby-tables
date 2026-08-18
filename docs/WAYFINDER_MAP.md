@@ -51,7 +51,8 @@ A fresh session resumes from **this map alone** — destination, philosophy, and
 * [Decision: T13 Is the Shared Materialize Function — Sequenced First](#ticket-13-tool-output-materialization-engine) — Materialization = *JSON blob in a `messages` row → named table* (json_each unpacking, T6-style type inference, T9-style DDL logging + capture-trigger sweep), exposed two ways: an **agent tool** (`materialize`, keyed off `tool_call_id`) and a **library function the T12 drag handler calls**. Drag flow: table bubble → recover the SQL → card SELECT; web-search/fetch bubble → materialize → card SELECT over the new table; plain text → not draggable (2026-08-15, user-confirmed).
 * [Decision: Reference-Integrity Semantics for Card Pointers](#ticket-22-reference-integrity-for-dashboard-cards) — **Rename** rewrites referencing cards' SQL (emulating SQLite's native view-rewrite under `ALTER TABLE … RENAME TO`); **delete** cascade-deletes referencing cards behind a confirm that lists them; **alter** dry-runs referencing cards (read-only by construction) and alerts on breakage. Built on a shared `extractReferencedObjects` + dry-run; scoped to user data tables/views, never protected tables (2026-08-15).
 * [Decision: Protected-Tables Boundary (T21 locked)](#ticket-21-protected-tables-boundary) — Formalized `isProtectedTable` covering `INTERNAL_TABLES`, `sqlite_*`, and virtual shadow tables (`fts5`/`vec0`). Wired write target extraction (`extractTargetTables`) across all boundaries: DDL on protected tables is refused outright; DML on internal tables is refused with a narrow allowlist for `system_config` (Option A); CSV ingestion prefixes colliding filenames (`imported_<name>`); boot-time invariant `assertProtectedTablesInvariant` guarantees zero capture triggers on protected tables and active capture on all user tables (2026-08-15).
-* [Decision: Schema-Aware Autocomplete & Bang-Mode Visual Morphing (T24 locked)](#ticket-24-schema-aware-sql-autocomplete-editor--bang-mode-visuals) — Dynamic schema dictionary from `getDatabaseCatalog`, context-aware token rankings (tables boosted after FROM/JOIN, columns boosted after SELECT/WHERE/dot-qualifiers), floating popover with keyboard nav (ArrowUp/ArrowDown/Tab/Enter/Escape), and instant visual morphing for `!SQL` (`⚡ [ ! Direct SQL ]`) and `!!SQL` (`🔒 [ !! Private SQL ]`).
+ * [Decision: Schema-Aware Autocomplete & Bang-Mode Visual Morphing (T24 locked)](#ticket-24-schema-aware-sql-autocomplete-editor--bang-mode-visuals) — Dynamic schema dictionary from `getDatabaseCatalog`, context-aware token rankings (tables boosted after FROM/JOIN, columns boosted after SELECT/WHERE/dot-qualifiers), floating popover with keyboard nav (ArrowUp/ArrowDown/Tab/Enter/Escape), and instant visual morphing for `!SQL` (`⚡ [ ! Direct SQL ]`) and `!!SQL` (`🔒 [ !! Private SQL ]`).
+ * [Decision: Re-entrant Query Serialization Gate (BUG-008 fix, T26.1)](#ticket-26.1-guardrails--persistence-vfs-contract--boot-idempotency-test-harness) — SQLite's C core is **not re-entrant** on one `sqlite3*` handle (no pthreads ⇒ internal mutexes are no-ops). Two **independent** queries re-entering wasm concurrently under JSPI clobber the Pager/B-tree/page-cache C state; the first never reaches `jUnlock(NONE)`, so the second's exclusive `access` Web Lock queues behind it forever → hang. A VFS-layer fix can't help (the damage is inside wasm). The fix serializes independent queries one-at-a-time in `src/harness.js` (`entryQueue`, synchronous tail-swap, acquired on the generator's first `next()`, released in its `finally`) while allowing nested (UDF) queries; a query is nested iff issued while a UDF is executing (`udfDepth`, tracked by wrapping `create_function`). Classifying by `stepDepth` was insufficient (a top-level catalog step in flight misclassifies an independent query as nested → ~25% residual flake). The stranded `lock SHARED` in VFS events was a *symptom*, not the cause. Verified: traced probe 12/12 clean (was ~50% flaky); 7/7 suite green twice (2026-08-18).
 
 ---
 
@@ -92,7 +93,7 @@ graph TD
     T13 --> T22
     T21 --> T22
     T24 --> T26
-    T26 --> T261[T26.1 Guardrails: persistence / VFS-contract / boot-idempotency tests]
+    T26 --> T261[T26.1 Guardrails: persistence / VFS-contract / boot-idempotency tests - DONE]
     T261 --> T262[T26.2 Transaction-pattern rules + upstream bug report]
     T262 --> T263[T26.3 Shared utils + module split (pure move)]
     T263 --> T264[T26.4 SQL-native views (actually created)]
@@ -102,8 +103,8 @@ graph TD
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T21,T24 done;
-    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T25,T26,T261,T262,T263,T264,T265 frontier;
+    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T21,T24,T261 done;
+    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T25,T26,T262,T263,T264,T265 frontier;
 ```
 
 ---
@@ -415,7 +416,7 @@ graph TD
 
 ### Ticket 26: Codebase Compaction, Module Splitting & SQL-Native Migration
 * **Label:** `wayfinder:task` (AFK/HITL)
-* **Status:** 🔁 RE-SCOPED (2026-08-17) — **second attempt at Ticket 26.** The first attempt (branch `sql-refactor`) is **SCRAPPED** (never merged). Re-planned as sub-tickets **26.1 → 26.5** below. Full post-mortem: [RETROSPECTIVE_TICKET_26.md](file:///home/nick/Documents/projects/web-sql-agent/docs/RETROSPECTIVE_TICKET_26.md).
+* **Status:** 🔁 RE-SCOPED (2026-08-17) — **second attempt at Ticket 26.** The first attempt (branch `sql-refactor`) is **SCRAPPED** (never merged). Re-planned as sub-tickets **26.1 → 26.5** below. Full post-mortem: [RETROSPECTIVE_TICKET_26.md](file:///home/nick/Documents/projects/web-sql-agent/docs/archive/RETROSPECTIVE_TICKET_26.md).
 * **Where to look for clues (do NOT re-land the branch as-is):** the scrapped attempt is preserved for reference — branch **`sql-refactor`** (commit `cfa67c9`, still on the remote) has the full diff of what was tried (the `utils.js` helpers, the `scratchpad.js`/`chat-render.js` split, the view SQL drafts, the session-savepoint wrappers). The session's uncommitted WIP (BUG-010/011/012 fixes + VFS instrumentation + this re-scope) is in **`stash@{0}`** (`git stash list` → `git stash show -p stash@{0}`). Mine these for *ideas and working code*, but treat every transaction-pattern, migration, and vendor-VFS change in them as **guilty until proven safe** — they are what caused the bug. The 26.1 harness is the gate that decides what survives.
 * **Question (re-scoped):** How do we deliver Ticket 26's legitimate scope — shared utilities, `main.js` modularization, and SQL-native views replacing JS loops — **safely**: guardrails first, small independently-mergeable increments, transaction patterns that cannot re-trigger the BUG-012 no-op commit, and only what we can actually verify?
 * **Why the first attempt was scrapped (summary — detail in the retrospective):**
@@ -436,15 +437,9 @@ graph TD
 
 ### Ticket 26.1: Guardrails — Persistence, VFS-Contract & Boot-Idempotency Test Harness
 * **Label:** `wayfinder:task` (AFK)
-* **Status:** 🟡 IN PROGRESS (claimed 2026-08-17, branch `t26.1-guardrails`)
-* **Depends on:** nothing (first in the sequence)
-* **Next steps (2026-08-17):**
-  1. ✅ Playwright 1.62.1 installed (was declared in `package.json` but missing from `node_modules`); system Chrome at `/usr/bin/google-chrome` available for the JSPI launch (`channel: 'chrome'` + `--js-flags=--experimental-wasm-jspi`, per the existing `docs/prototypes/*-headless.mjs` pattern).
-  2. Persistence regression test (Playwright): fresh context (fresh IDB) → boot → create session via UI (`#btn-new-session` + native `prompt`) → `page.reload()` → assert session present in dropdown AND in direct `SELECT id FROM sessions WHERE id = ?`. Extend: + message insert → reload → present, no duplicate id.
-  3. VFS write-pattern contract probe (in-page, real `IDBBatchAtomicVFS`): 5 canonical patterns (autocommit INSERT; SAVEPOINT+INSERT+RELEASE; BEGIN IMMEDIATE…COMMIT; multi-statement txn; DDL in txn) → dump IDB blocks → assert the table page's newest committed version contains the row.
-  4. Boot idempotency probe: N boots + simulated mid-migration reload kill → schema + data intact, no stranded `_sessions_clean`, `integrity_check: ok`.
-  5. Wire `npm test` (Playwright config: `npm run dev` webServer on :5174, system Chrome channel + JSPI flag, fresh context per test).
-  6. Discriminator check: savepoint-wrapped `createSession` on a scratch copy must FAIL the persistence test — then revert.
+ * **Status:** ✅ COMPLETE (resolved 2026-08-18, merged to `main` @ `e3fad7b`)
+ * **Depends on:** nothing (first in the sequence)
+ * **Resolution (2026-08-18):** All 6 next-steps shipped. The harness is green on `main` (7/7: boot-idempotency, persistence incl. tool-call turn, vfs-contract) and wired as `npm test`. Building it surfaced **BUG-008** (silent data loss + JSPI re-entrancy hang) — root-caused and fixed; the decisive fix is the **re-entrant query-serialization gate** in `src/harness.js` (see Decision below + `docs/archive/BUG-008_INVESTIGATION.md`). Acceptance met: `npm test` green on clean `main`; boot idempotency survives a mid-migration reload with zero data loss; the persistence test is the regression guard for the no-op-commit bug class.
 * **Question:** What is the minimal test harness that would have caught the entire BUG-010/011/012 bug class — silent data loss on refresh — before any refactor code is allowed to merge?
 * **Vision / Approach:**
   * **Persistence regression test (Playwright):** boot the app → create a session via the UI (the name-confirmation path) → `page.reload()` → assert the session is present **both** in the dropdown **and** in a direct `SELECT id FROM sessions WHERE id = ?`. This single test catches the no-op commit. Extend: create a session + send a (fake-LLM) message → reload → assert present + no duplicate id.

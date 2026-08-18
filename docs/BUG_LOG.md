@@ -74,7 +74,7 @@ This document tracks known issues, edge cases, and improvements to be addressed 
 ---
 
 ### BUG-008: Silent Data Loss — Statement Commits Write Zero Pages to IDB (JSPI Re-entrancy)
- - **Status**: **Resolved & verified** — traced probe 12/12 clean (was ~50% flaky pre-fix); full 7/7 suite green, run twice. Investigation record: **`docs/BUG-008_INVESTIGATION.md`** (§12 = the definitive record).
+ - **Status**: **Resolved & verified** — traced probe 12/12 clean (was ~50% flaky pre-fix); full 7/7 suite green, run twice. Investigation record (archived): **`docs/archive/BUG-008_INVESTIGATION.md`** (§12 = the definitive record).
  - **Reported**: Ticket 26.1 (guardrails harness) — persistence suite red on clean `main`
  - **Component**: **`src/harness.js` (the decisive fix — re-entrant serialization gate, §below item 8)**, plus `vendor/wa-sqlite-jspi/sqlite-api.js` (floating `maybeFinalize` in `sqlite3.statements` generator & prepare on empty `zTail`), `vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js` (`jLock(SHARED)` read-only default mode, inactive retry `#txComplete` deadlock, and `sync()` write durability await), `src/schema.js` (protected tables `_` & `_clean`), `src/main.js` (`btn-new-session` disable guard, boot UI lifecycle await, awaited explorer render, lazy schema refresh).
 - **Description**: A statement that "commits" successfully could write **zero pages** to the IDB-backed VFS. The row existed only in the WASM page cache — same-connection reads (dropdown, `SELECT`) saw it, but after a reload it was gone. In the worst case the interleaving corrupted the on-disk image: `SQLiteError: file is not a database` on the next boot.

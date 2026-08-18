@@ -2,7 +2,7 @@
 
 The safety net for the Ticket 26 re-plan and every ticket after it. A data
 persistence app with zero automated tests is how silent data loss ships
-(see `docs/RETROSPECTIVE_TICKET_26.md`). **Nothing merges without `npm test`
+(see `docs/archive/RETROSPECTIVE_TICKET_26.md`). **Nothing merges without `npm test`
 green.**
 
 ## Run
