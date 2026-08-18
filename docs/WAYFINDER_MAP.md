@@ -71,7 +71,7 @@ graph TD
     T1 --> T11[Ticket 11: 3-Pane Layout & Grid Engine - DONE]
     T11 --> T12[Ticket 12: Dynamic Grid Canvas, Drag-to-Move, Resize & Chat Pinning - DONE]
     T11 --> T25[Ticket 25: Professional Workstation UI & Design System Overhaul - DONE]
-    T25 --> T26[Ticket 26: Codebase Compaction & SQL-Native Migration]
+    T25 --> T26
     T1 --> T13[Ticket 13: Tool-Output Materialization - DONE]
     T1 --> T14
     T1 --> T15[Ticket 15: Durable Semantic Memory]
@@ -91,15 +91,19 @@ graph TD
     T12 --> T22[Ticket 22: Reference Integrity for Dashboard Cards]
     T13 --> T22
     T21 --> T22
-    T24 --> T26[Ticket 26: Codebase Compaction, Module Splitting & Boilerplate Reduction]
-    T25 --> T26
+    T24 --> T26
+    T26 --> T261[T26.1 Guardrails: persistence / VFS-contract / boot-idempotency tests]
+    T261 --> T262[T26.2 Transaction-pattern rules + upstream bug report]
+    T262 --> T263[T26.3 Shared utils + module split (pure move)]
+    T263 --> T264[T26.4 SQL-native views (actually created)]
+    T264 --> T265[T26.5 Subsystem harmonization (consume the views)]
 
     classDef done fill:#238636,stroke:#2ea043,color:#fff;
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
     class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T21,T24 done;
-    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T25,T26 frontier;
+    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T25,T26,T261,T262,T263,T264,T265 frontier;
 ```
 
 ---
@@ -411,27 +415,122 @@ graph TD
 
 ### Ticket 26: Codebase Compaction, Module Splitting & SQL-Native Migration
 * **Label:** `wayfinder:task` (AFK/HITL)
-* **Status:** Open (Frontier)
-* **Question:** How should we refactor shared utilities, deduplicate boilerplate, modularize `src/main.js` (~1,870 lines), and replace imperative JavaScript loops with native SQLite views and table-valued functions?
-* **Scope & Objectives:**
-  * **1. SQL-Native Subsystem Migrations ("Push Everything into SQLite"):**
-    * **Schema Catalog View (`v_schema_catalog`):** Replace manual JS loops over `sqlite_master` in `src/explorer.js` with SQLite's table-valued functions (`pragma_table_info`, `pragma_foreign_key_list`) and `json_group_array` to fetch full schemas, PKs, and FKs in 1 query.
-    * **Context Token & Boundary Metrics (`v_turn_boundaries`):** Replace manual imperative token walks in `src/compaction.js` with window functions (`SUM() OVER()`, `LAG()`, `LEAD()`) to identify pair-safe watermarks and cumulative token counts directly in SQL.
-    * **Tool Query Extraction View (`v_tool_call_queries`):** Replace JS `JSON.parse` loops over `tool_calls` in `src/main.js` with native SQLite `json_extract(tool_calls, '$[0].function.arguments.query')`.
-    * **Reactive Grid Matrix View (`v_grid_matrix`):** Replace 2D JS array collision & empty-slot loops in `src/grid.js` with a recursive CTE Cartesian product matrix (`rows CROSS JOIN cols LEFT JOIN dashboard_cards`).
-    * **Session Aggregations View (`v_session_summary`):** Replace async per-session message/token counting loops with a unified group-by SQL view.
-  * **2. Shared Utility Module (`src/utils.js`):**
-    * Centralize duplicated utility functions across modules:
-      * `escapeHtml()` (currently duplicated in `main.js`, `explorer-ui.js`, `grid-ui.js`, `sql-autocomplete.js`).
-      * `quoteIdent()` & `queryAll()` / `execParams()` (standardize usage across `cartridge.js`, `schema.js`, etc.).
-      * Unified statement iteration helpers (`queryRows`, `queryValue`, `queryScalar`) to eliminate ~40 repetitive `while (await sqlite3.step(stmt) === SQLITE_ROW)` loops.
-  * **3. Modularize `src/main.js` Subsystems:**
-    * Extract **Direct SQL Scratchpad & Parser** into `src/scratchpad.js` (`classifyStatement`, `captureDropPreImage`, `execScratchSql`, `runScratchpad`, and scratchpad rewind).
-    * Extract **Chat & Tool Bubble Rendering** into `src/chat-render.js` (`renderToolContent`, `renderScratchpadResult`, markdown formatting, and welcome onboarding cards).
-  * **4. CSS Consolidation in `src/styles.css`:**
-    * Consolidate redundant selector chains, repetitive padding/margin patterns, and harmonize shared card/modal/badge utilities.
-  * **5. Comment & Scaffolding Compaction:**
-    * Streamline historical ticket scratch commentary while rigorously preserving key architectural invariants (JSPI fiber suspension, savepoint protocols, and IDB race-condition guards).
+* **Status:** 🔁 RE-SCOPED (2026-08-17) — the first attempt (branch `sql-refactor`) is **SCRAPPED** (never merged). Re-planned as sub-tickets **26.1 → 26.5** below. Full post-mortem: [RETROSPECTIVE_TICKET_26.md](file:///home/nick/Documents/projects/web-sql-agent/docs/RETROSPECTIVE_TICKET_26.md).
+* **Question (re-scoped):** How do we deliver Ticket 26's legitimate scope — shared utilities, `main.js` modularization, and SQL-native views replacing JS loops — **safely**: guardrails first, small independently-mergeable increments, transaction patterns that cannot re-trigger the BUG-012 no-op commit, and only what we can actually verify?
+* **Why the first attempt was scrapped (summary — detail in the retrospective):**
+  * One giant un-bisectable commit (17 files, +1546/−1749) mixing pure refactor + a behavior change + a migration change + a **vendor VFS seal-timing change** — with **zero tests** (Playwright sat in devDependencies, unused).
+  * `createSession`/`renameSession` changed from plain autocommit to **SAVEPOINT-wrapped** single statements — the exact pattern that produces the captured **BUG-012 no-op commit** (the INSERT step performs zero VFS I/O; the RELEASE commits zero dirty pages; the row lives only in the in-memory page cache and is lost on refresh).
+  * A **per-boot non-atomic** `DROP TABLE sessions` + `RENAME` migration (BUG-010) and `listSessions` **swallowing the query error and fabricating a default session** — which turned a no-op commit into silent data loss with no error anywhere.
+  * The 5 "SQL-native views" were **vaporware** — claimed in the map and in the "verification," but never `CREATE VIEW`'d; the consuming code still ran JS loops + per-table PRAGMAs.
+* **The plan (recommended order; each sub-ticket merges with 26.1's persistence test green):**
+  * **26.1 Guardrails → 26.2 Transaction rules + upstream report → 26.3 Shared utils + module split → 26.4 SQL-native views (actually created) → 26.5 Subsystem harmonization.**
+  * Hard dependencies: 26.1 gates everything; 26.3 gates 26.4/26.5 (shared utils); 26.4 gates 26.5 (the views). 26.2 is orthogonal to the refactor but is done right after 26.1 so the rules are in force before any transaction code is touched.
+* **Original scope (what the legitimate goal was — do NOT re-land the scrapped branch as-is):**
+  * **SQL-Native Subsystem Migrations:** `v_schema_catalog` (pragma_table_info/index_list/foreign_key_list + json_group_array), `v_turn_boundaries` (window functions for pair-safe watermarks + cumulative token accounting), `v_tool_call_queries` (json_each/json_extract tool-query extraction), `v_grid_matrix` (recursive-CTE Cartesian matrix LEFT JOIN dashboard_cards), `v_session_summary` (session token/message aggregations).
+  * **Shared Utility Module (`src/utils.js`):** `escapeHtml`, `quoteIdent`, `unquoteIdent`, `stripSqlLiterals` (+ `stripSqlCommentsAndStrings` alias), `execParams`, `execSqlRaw`, `queryAll`, `queryRows`, `queryRow`, `queryValue`.
+  * **Module Splitting (`main.js` ~1,870 → ~700):** `src/scratchpad.js` (bang grammar, classification, write gates, DDL pre-image, ⟲), `src/chat-render.js` (message rendering, table formatting, scratchpad envelopes).
+  * **Full Subsystem Harmonization:** `explorer.js`, `compaction.js`, `grid.js`, `explorer-ui.js`, `grid-ui.js`, `sql-autocomplete.js`, `cartridge.js` → shared utils + SQL-native views.
+
+---
+
+### Ticket 26.1: Guardrails — Persistence, VFS-Contract & Boot-Idempotency Test Harness
+* **Label:** `wayfinder:task` (AFK)
+* **Status:** ⬜ NOT STARTED
+* **Depends on:** nothing (first in the sequence)
+* **Question:** What is the minimal test harness that would have caught the entire BUG-010/011/012 bug class — silent data loss on refresh — before any refactor code is allowed to merge?
+* **Vision / Approach:**
+  * **Persistence regression test (Playwright):** boot the app → create a session via the UI (the name-confirmation path) → `page.reload()` → assert the session is present **both** in the dropdown **and** in a direct `SELECT id FROM sessions WHERE id = ?`. This single test catches the no-op commit. Extend: create a session + send a (fake-LLM) message → reload → assert present + no duplicate id.
+  * **VFS write-pattern contract probe (real `IDBBatchAtomicVFS`):** for each canonical pattern — (a) autocommit INSERT, (b) `SAVEPOINT`+INSERT+`RELEASE`, (c) `BEGIN IMMEDIATE`…`COMMIT`, (d) multi-statement txn, (e) DDL in txn — run it, then **dump the IDB blocks** and assert the table page's newest committed version actually contains the row (i.e., the commit wrote the page). Catches no-op commits and seal-timing regressions at the VFS boundary.
+  * **Boot idempotency test:** boot N times, including a simulated mid-boot kill (a reload landing between migration steps) → assert schema + data intact, no stranded `_sessions_clean`, `integrity_check: ok`. Catches BUG-010/011-class bugs.
+  * **No-silent-failure rule (convention + review gate):** data-path functions must not `catch` and fabricate success. A DB failure surfaces (throw, or at minimum `console.error`) — never a fabricated default row.
+  * Wire all of it into `package.json` as `npm test` (Playwright for the UI persistence test; a node/probe runner for the VFS-contract + boot-idempotency probes).
+* **Acceptance (definition of done):**
+  * `npm test` runs all three suites and is green on a clean `main`.
+  * **Discriminator check:** re-introducing the savepoint-wrapped `createSession` (on a scratch copy) makes the persistence test FAIL — proving the harness catches the exact bug class. Then revert.
+  * Boot idempotency survives a mid-migration reload with zero data loss.
+* **Rationale:** the first attempt shipped a **data-persistence app with zero automated tests**. This ticket is the safety net; every later ticket merges green against it. It is the single highest-leverage piece of the re-plan.
+
+---
+
+### Ticket 26.2: Transaction-Pattern Rules (Codified) + Upstream Bug Report
+* **Label:** `wayfinder:task` (AFK)
+* **Status:** ⬜ NOT STARTED
+* **Depends on:** 26.1 (needs the harness to verify the safety net)
+* **Question:** How do we make the BUG-012 lessons durable — so neither this re-plan nor any future ticket re-introduces a transaction pattern that skips the write-transaction transition — and get the real WASM/VFS bugs fixed at the source?
+* **Vision / Approach:**
+  * **In-repo rules doc** (`docs/TRANSACTION_RULES.md`), enforced by review + AGY sign-off:
+    1. **Single statement → autocommit.** Never wrap a single INSERT/UPDATE in a savepoint (it is already atomic; the wrapper only changes the transaction pattern — and that change is what triggered BUG-012).
+    2. **Multi-statement atomic op → `BEGIN IMMEDIATE`…`COMMIT`.** `IMMEDIATE` forces the write-transaction transition **up front** — the exact transition the no-op commit skipped. Savepoints are for nested / `ROLLBACK TO` semantics, not top-level app ops.
+    3. **Dev-mode read-back assertion** after every session write: `SELECT 1 FROM sessions WHERE id = ?` → throw in dev if missing (a no-op commit becomes a loud failure, not silent data loss).
+    4. **Vendor VFS policy:** no behavioral change to `vendor/wa-sqlite-jspi/*` without a 26.1 contract test written first (red → green).
+    5. **Boot-migration discipline:** any schema migration is one-time, gated (PK check / `PRAGMA user_version`), atomic, and has a recovery path — never a per-boot `DROP`+`RENAME` of a user table (BUG-010).
+  * **Add the dev read-back assertion** to the session-write path (`createSession`, `renameSession`, `deleteSession`, `forkSession`) — a small, safe, real code change.
+  * **File the upstream report** (wa-sqlite maintainer): (a) the **no-op commit** (a savepoint-wrapped INSERT whose step performs zero VFS I/O and whose RELEASE commits zero dirty pages — the pager never transitions to a write transaction), and (b) the **JSPI table-read hang** (a table read suspends and never resumes; Web Locks / IDB / VFS file state all ruled out). Attach the unified `__b12uni` VFS event trace (the format was built for this). Record the issue/PR link here.
+* **Acceptance:**
+  * `docs/TRANSACTION_RULES.md` committed; the 5 rules are explicit and testable.
+  * Read-back assertion present in the session-write path (dev-mode throw).
+  * Upstream report filed with the trace; link recorded on this ticket.
+  * 26.1 persistence test still green; no change to committed data-path behavior.
+* **Rationale:** codify "learn from the bug" so the refactor tickets (and all future work) cannot re-trigger it, and push the two genuine WASM/VFS defects to where they can actually be fixed.
+
+---
+
+### Ticket 26.3: Shared Utilities + Module Split (Pure Code Move)
+* **Label:** `wayfinder:task` (AFK)
+* **Status:** ⬜ NOT STARTED
+* **Depends on:** 26.1 (persistence test green)
+* **Question:** How do we deduplicate the shared string/SQL/DB helpers and slim `main.js` (~1,870 lines) **with zero behavior change**, so the diff is moves-only and trivially reviewable?
+* **Vision / Approach:**
+  * **`src/utils.js`:** the single home for `escapeHtml`, `quoteIdent`, `unquoteIdent`, `stripSqlLiterals` (+ `stripSqlCommentsAndStrings` alias), `execParams`, `execSqlRaw`, `queryAll`, `queryRows`, `queryRow`, `queryValue`, and the `SQLITE_ROW`/`SQLITE_DONE` constants. Re-export from `schema.js` for back-compat where needed.
+  * **Module split:** extract `src/scratchpad.js` (bang grammar, statement classification, write-confirmation gates, protected-table invariants, DDL pre-image capture, per-bubble ⟲) and `src/chat-render.js` (message rendering, table formatting, draggable chat assets, scratchpad result envelopes) out of `main.js`, targeting `main.js` ≤ ~700 lines.
+  * **Moves only:** no logic changes, no transaction-pattern changes, no new SQL. If a "pure move" would require changing behavior, stop and split it into its own ticket.
+* **Acceptance:**
+  * `npm run build` green; 26.1 persistence test green.
+  * The diff is moves/renames only (reviewable as such); `main.js` ≤ ~700 lines.
+  * No transaction-pattern or VFS changes in this ticket.
+* **Rationale:** this was the *good*, low-risk part of the scrapped attempt. Doing it first (after guardrails) establishes the shared utilities that 26.4/26.5 consume, and keeps the riskier work (views, harmonization) isolated in later tickets.
+
+---
+
+### Ticket 26.4: SQL-Native Views — Actually Create Them
+* **Label:** `wayfinder:prototype` (HITL)
+* **Status:** ⬜ NOT STARTED
+* **Depends on:** 26.1, 26.3 (the probe uses shared utils)
+* **Question:** How do we create the 5 SQL-native views for real — and prove each one works — so "push everything into SQLite" is a fact, not a map claim?
+* **Vision / Approach:**
+  * **Create the 5 views** (each individually verifiable; one commit each or one commit + one probe):
+    * `v_schema_catalog` — correlate `pragma_table_info` / `pragma_index_list` / `pragma_foreign_key_list` with `json_group_array` → full schema (columns, types, defaults, PKs, FKs) in one query.
+    * `v_turn_boundaries` — window functions (`SUM(est_tokens) OVER (…)`) for pair-safe watermarks + cumulative token accounting from tail and head.
+    * `v_tool_call_queries` — `json_each()` / `json_extract(tool_calls, '$.arguments.query')` to extract query SQL + tool names (kills the JS `JSON.parse` loops in rendering).
+    * `v_grid_matrix` — recursive-CTE Cartesian matrix (`3 cols × N rows LEFT JOIN dashboard_cards`) for O(1) slot/occupancy.
+    * `v_session_summary` — per-session token + message aggregations.
+  * **A probe that `SELECT`s each view** and **fails if it is missing or returns no/invalid rows.** (The scrapped attempt's probe never did this — that is how the vaporware shipped.)
+  * Views are `DROP VIEW IF EXISTS` + recreate at boot (existing brains pick up changes), consistent with `v_active_context`.
+* **Acceptance:**
+  * All 5 views present in `sqlite_master` after boot.
+  * Probe queries each view and asserts valid, non-empty output for a seeded DB.
+  * 26.1 persistence test green; no app behavior change yet (views exist but are not consumed until 26.5).
+* **Rationale:** the first attempt claimed these views in the map and in its "verification" but never created them. This ticket makes them real and probe-proven — only what the probe verifies gets claimed.
+
+---
+
+### Ticket 26.5: Subsystem Harmonization — Consume the Views + Utils
+* **Label:** `wayfinder:task` (AFK)
+* **Status:** ⬜ NOT STARTED
+* **Depends on:** 26.3 (utils), 26.4 (the views)
+* **Question:** How do we refactor the subsystems to actually use the SQL-native views and shared utilities — replacing imperative JS loops with SQL — without changing any observable behavior?
+* **Vision / Approach:**
+  * **`src/explorer.js`** → catalog introspection via `v_schema_catalog` (replace the per-table `PRAGMA table_info` JS loop).
+  * **`src/compaction.js`** → watermark/token metrics via `v_turn_boundaries` (replace the JS token-boundary walk).
+  * **`src/grid.js`** → slot/occupancy via `v_grid_matrix`.
+  * **Message rendering** (`chat-render.js`) → tool-query extraction via `v_tool_call_queries` (replace the `JSON.parse` loops).
+  * **Session list** (`schema.js`/`main.js`) → `v_session_summary`.
+  * **One subsystem per commit**, each with a before/after output-equality check (the view must return exactly what the JS loop returned).
+* **Acceptance:**
+  * Each subsystem reads from its view (verified by probe); the corresponding JS loop is removed.
+  * Output-equality: for a seeded DB, each refactored subsystem returns the same data as before (no behavior change).
+  * `npm run build` + 26.1 persistence test green.
+* **Rationale:** this is where the ticket's actual value ("push everything into SQLite") is delivered. 26.4 without 26.5 is dead code; 26.5 without 26.4 has nothing to consume. Doing it last, one subsystem at a time, keeps each step independently verifiable.
 
 ---
 
