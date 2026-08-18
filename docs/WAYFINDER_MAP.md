@@ -542,8 +542,15 @@ graph TD
 
 ### Ticket 26.5: Subsystem Harmonization — Consume the Views + Utils
 * **Label:** `wayfinder:task` (AFK)
-* **Status:** ⬜ NOT STARTED
+* **Status:** 🟡 IN PROGRESS (claimed 2026-08-18, branch `t26.5-harmonization`)
 * **Depends on:** 26.3 (utils), 26.4 (the views)
+* **Next steps (2026-08-18):**
+  1. `src/explorer.js` → `v_schema_catalog` (one query replaces the per-object `PRAGMA table_info`/`index_list`/`index_info`/`foreign_key_list` JS loop) + **system-view vs user-view delineation**: a `SYSTEM_VIEWS` name list next to `INTERNAL_TABLES` so user views get user-view treatment (explorer actions, T22 reference-integrity scope) and the app's own views (`v_active_context` + the five 26.4 views) don't.
+  2. `src/compaction.js` → `v_turn_boundaries` (replace `planCompaction`'s JS token-boundary walk; `estimateActiveContextTokens` via `total_tokens`).
+  3. `src/grid.js` → `v_grid_matrix` (row count + slot/occupancy).
+  4. `src/chat-render.js` → `v_tool_call_queries` (replace the `JSON.parse` tool-calls loops).
+  5. `listSessions` (`src/schema.js`) → `v_session_summary`.
+  6. One subsystem per commit, each with a before/after output-equality check (the view must return exactly what the JS loop returned); `npm run build` + 26.1 harness green; AGY review pass before each commit (sign-off standard).
 * **Question:** How do we refactor the subsystems to actually use the SQL-native views and shared utilities — replacing imperative JS loops with SQL — without changing any observable behavior?
 * **Vision / Approach:**
   * **`src/explorer.js`** → catalog introspection via `v_schema_catalog` (replace the per-table `PRAGMA table_info` JS loop).
