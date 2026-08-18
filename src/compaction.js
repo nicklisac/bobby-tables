@@ -94,15 +94,6 @@ export function summaryCap(window) {
   return Math.floor(window * 0.25);
 }
 
-/** Rough token estimate for one row's contribution (chars ÷ 4). */
-function estTokens(content, toolCalls, toolCallId) {
-  let chars = 0;
-  if (content) chars += String(content).length;
-  if (toolCalls) chars += String(toolCalls).length;
-  if (toolCallId) chars += String(toolCallId).length;
-  return Math.ceil(chars / 4);
-}
-
 /** Read a system_config value (null if absent). */
 async function getConfigValue(sqlite3, db, key) {
   const rows = await queryAll(sqlite3, db, `SELECT value FROM system_config WHERE key = ?`, [key]);
@@ -110,12 +101,34 @@ async function getConfigValue(sqlite3, db, key) {
 }
 
 /**
+ * v_turn_boundaries is pinned to the ACTIVE session (same convention as
+ * v_active_context — compaction only ever runs on the active session; every
+ * call site passes the active session id). Guard it: without this, a
+ * non-active sessionId would silently plan the active session's data.
+ */
+async function assertActiveSession(sqlite3, db, sessionId) {
+  const rows = await queryAll(sqlite3, db,
+    `SELECT value FROM session_context WHERE key = 'active_session_id'`);
+  const activeSessionId = rows.length ? rows[0][0] : null;
+  if (sessionId !== activeSessionId) {
+    throw new Error(
+      `compaction: session "${sessionId}" is not the active session ("${activeSessionId}") — ` +
+      `the v_turn_boundaries views are active-session-pinned`
+    );
+  }
+}
+
+/**
  * Provider-anchored estimate of the current active-context size (tokens):
  * the latest assistant row's `prompt_tokens` (the provider's own count) +
- * chars÷4 over the visible rows added after it. Falls back to chars÷4 over the
- * whole view when there's no anchor (no real LLM call yet).
+ * chars÷4 over the visible rows added after it (v_turn_boundaries'
+ * est_tokens). Falls back to chars÷4 over the whole active context when
+ * there's no anchor (no real LLM call yet) — system row + synthetic summary
+ * row + the visible tail.
  */
 export async function estimateActiveContextTokens(sqlite3, db, sessionId) {
+  await assertActiveSession(sqlite3, db, sessionId);
+
   const anchorRows = await queryAll(sqlite3, db, `
     SELECT id, prompt_tokens FROM messages
     WHERE session_id = ? AND role = 'assistant' AND prompt_tokens > 0
@@ -123,97 +136,99 @@ export async function estimateActiveContextTokens(sqlite3, db, sessionId) {
   `, [sessionId]);
   const anchor = anchorRows[0]; // [id, prompt_tokens] | undefined
 
-  const ctx = await queryAll(sqlite3, db, `
-    SELECT id, content, tool_calls, tool_call_id FROM v_active_context
-    WHERE session_id = ? ORDER BY ctx_order ASC
-  `, [sessionId]);
-
-  let est = 0;
   if (anchor) {
-    est = anchor[1]; // provider-anchored
-    for (const [id, content, toolCalls, toolCallId] of ctx) {
-      if (typeof id === 'number' && id > anchor[0]) {
-        est += estTokens(content, toolCalls, toolCallId);
-      }
-    }
-  } else {
-    for (const [, content, toolCalls, toolCallId] of ctx) {
-      est += estTokens(content, toolCalls, toolCallId);
-    }
+    const tailRows = await queryAll(sqlite3, db, `
+      SELECT COALESCE(SUM(est_tokens), 0) FROM v_turn_boundaries WHERE id > ?
+    `, [anchor[0]]);
+    return anchor[1] + tailRows[0][0];
   }
-  return est;
+
+  // No anchor: the whole active context — the same three row sets
+  // v_active_context emits: [system row (id=0)] + [latest summary as a
+  // synthetic user row, the "Previous conversation summary:" wrapper] +
+  // [the visible tail]. The tail comes from v_turn_boundaries minus the
+  // system row (id=0 is in the region before the first compaction and is
+  // emitted by Branch 1 of v_active_context, not the tail).
+  const rows = await queryAll(sqlite3, db, `
+    SELECT COALESCE(SUM(est), 0) FROM (
+      SELECT CEIL(LENGTH(content) / 4.0) AS est
+      FROM messages WHERE id = 0 AND session_id = ?
+      UNION ALL
+      SELECT CEIL(LENGTH('Previous conversation summary:' || char(10) || c.summary) / 4.0)
+      FROM compactions c
+      WHERE c.session_id = ?
+        AND c.seq = (SELECT MAX(seq) FROM compactions WHERE session_id = ?)
+      UNION ALL
+      SELECT est_tokens FROM v_turn_boundaries WHERE id != 0
+    )
+  `, [sessionId, sessionId, sessionId]);
+  return rows[0][0];
 }
 
 /**
  * Plan a compaction: find the pair-safe watermark.
  *
- * Watermark rule (pair-safe): walk back over in_context=1 rows from the tail
- * accumulating estimates until ≥ keepBudget; advance FORWARD to the next
- * in_context=1 `user` message (turn boundary — tool pairs never cross a user
- * message, so the cut is pair-safe by construction); watermark_id = MAX(id) <
- * firstRetainedId.
+ * The walk lives in v_turn_boundaries (T26.5): the cut row is the largest-id
+ * row whose tail-cumulative tokens (cum_tokens_tail) reach keepBudget —
+ * exactly the old JS walk-back (cum_tokens_tail is monotone, so the largest
+ * such id is where the accumulated sum first crosses the budget); the first
+ * retained row is the next turn boundary (next_turn_start_id — itself when
+ * the cut is a user row — falling back to prev_turn_start_id when the cut is
+ * in the last turn); the watermark is the first retained row's prev_id.
+ *
+ * Watermark rule (pair-safe): tool pairs never cross a user message, so a cut
+ * advanced to a user boundary is pair-safe by construction.
  *
  * @returns {Promise<{watermarkId, firstRetainedId, summarizedCount, keepBudget} | null>}
  *   null if nothing should be summarized (region too small, or no valid cut).
  */
-async function planCompaction(sqlite3, db, sessionId, keepBudget) {
-  const wmRows = await queryAll(sqlite3, db, `
-    SELECT COALESCE(MAX(watermark_id), -1) FROM compactions WHERE session_id = ?
-  `, [sessionId]);
-  const currentWm = wmRows[0][0]; // -1 if no compaction yet
+export async function planCompaction(sqlite3, db, sessionId, keepBudget) {
+  await assertActiveSession(sqlite3, db, sessionId);
 
-  // The visible region: in_context=1 rows after the current watermark, id order.
-  const rows = await queryAll(sqlite3, db, `
-    SELECT id, role, content, tool_calls, tool_call_id FROM messages
-    WHERE session_id = ? AND COALESCE(in_context, 1) = 1 AND id > ?
-    ORDER BY id ASC
-  `, [sessionId, currentWm]);
-
-  if (rows.length === 0) return null; // nothing visible to summarize
+  const countRows = await queryAll(sqlite3, db, `SELECT COUNT(*) FROM v_turn_boundaries`);
+  const regionCount = countRows[0][0];
+  if (regionCount === 0) return null; // nothing visible to summarize
 
   // Manual compaction (keepBudget = 0): summarize the ENTIRE visible region.
   // The active context becomes [system, summary] — no orphaned tool pairs
   // (no tool messages remain). Pair-safe by construction.
   if (keepBudget <= 0) {
-    const last = rows[rows.length - 1];
-    return { watermarkId: last[0], firstRetainedId: null, summarizedCount: rows.length, keepBudget: 0 };
+    const lastRows = await queryAll(sqlite3, db,
+      `SELECT id FROM v_turn_boundaries ORDER BY id DESC LIMIT 1`);
+    return { watermarkId: lastRows[0][0], firstRetainedId: null, summarizedCount: regionCount, keepBudget: 0 };
   }
 
-  // Walk back from the tail accumulating estimates until ≥ keepBudget.
-  let acc = 0;
-  let cutIndex = -1;
-  for (let i = rows.length - 1; i >= 0; i--) {
-    acc += estTokens(rows[i][2], rows[i][3], rows[i][4]);
-    if (acc >= keepBudget) { cutIndex = i; break; }
-  }
-  if (cutIndex === -1) return null; // whole region < keepBudget → nothing worth compacting
+  // The cut: the largest-id row whose tail-cumulative tokens reach keepBudget.
+  const cutRows = await queryAll(sqlite3, db, `
+    SELECT id, next_turn_start_id, prev_turn_start_id
+    FROM v_turn_boundaries
+    WHERE cum_tokens_tail >= ?
+    ORDER BY id DESC
+    LIMIT 1
+  `, [keepBudget]);
+  if (!cutRows.length) return null; // whole region < keepBudget → nothing worth compacting
+  const [, nextTurnStart, prevTurnStart] = cutRows[0];
 
-  // Advance FORWARD to the next in_context=1 user message (turn boundary).
-  let firstRetainedIndex = -1;
-  if (rows[cutIndex][1] === 'user') {
-    firstRetainedIndex = cutIndex;
-  } else {
-    for (let j = cutIndex + 1; j < rows.length; j++) {
-      if (rows[j][1] === 'user') { firstRetainedIndex = j; break; }
-    }
-    // No user message forward (the cut is in the last turn): fall back to the
-    // last user message at or before the cut point (the start of that turn).
-    // The tail is pair-safe (starts at a user message) and ≥ keepBudget.
-    if (firstRetainedIndex === -1) {
-      for (let i = cutIndex; i >= 0; i--) {
-        if (rows[i][1] === 'user') { firstRetainedIndex = i; break; }
-      }
-    }
-  }
-  if (firstRetainedIndex === -1) return null; // no user message at all (defensive)
+  // Advance to the turn boundary: the next user row at/after the cut; no user
+  // row forward (the cut is in the last turn) → the last user row at/before
+  // the cut (the start of that turn). The tail is pair-safe (starts at a user
+  // message) and ≥ keepBudget.
+  const firstRetainedId = nextTurnStart !== null ? nextTurnStart : prevTurnStart;
+  if (firstRetainedId === null) return null; // no user message at all (defensive)
 
   // tau: first_kept_index <= 0 → None (nothing before the first retained row).
-  if (firstRetainedIndex === 0) return null;
+  const prevRows = await queryAll(sqlite3, db,
+    `SELECT prev_id FROM v_turn_boundaries WHERE id = ?`, [firstRetainedId]);
+  const watermarkId = prevRows.length ? prevRows[0][0] : null;
+  if (watermarkId === null) return null;
+
+  const summarizedRows = await queryAll(sqlite3, db,
+    `SELECT COUNT(*) FROM v_turn_boundaries WHERE id < ?`, [firstRetainedId]);
 
   return {
-    watermarkId: rows[firstRetainedIndex - 1][0],
-    firstRetainedId: rows[firstRetainedIndex][0],
-    summarizedCount: firstRetainedIndex,
+    watermarkId,
+    firstRetainedId,
+    summarizedCount: summarizedRows[0][0],
     keepBudget,
   };
 }
