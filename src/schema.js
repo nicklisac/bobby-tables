@@ -438,6 +438,22 @@ export async function setActiveSession(sqlite3, db, sessionId) {
 }
 
 /**
+ * T26.2 dev-mode read-back assertion. After a session write, verify the
+ * expected row state actually landed in `sessions`. A no-op commit (a write
+ * whose step performs zero VFS I/O — e.g. a single INSERT needlessly wrapped
+ * in a SAVEPOINT) is otherwise silent data loss; this turns it into a loud
+ * failure in dev (throw) and a console.error in prod.
+ */
+async function assertSessionState(sqlite3, db, sessionId, expectExists, label) {
+  const rows = await queryAll(sqlite3, db, `SELECT 1 FROM sessions WHERE id = ?`, [sessionId]);
+  const exists = rows.length > 0;
+  if (exists === expectExists) return;
+  const msg = `[session read-back] ${label}: expected session ${expectExists ? 'present' : 'absent'} but found ${exists ? 'present' : 'absent'} (id=${sessionId})`;
+  if (import.meta.env.DEV) throw new Error(msg);
+  console.error(msg);
+}
+
+/**
  * Create a new session and return its ID.
  */
 export async function createSession(sqlite3, db, name = 'New Session') {
@@ -447,6 +463,7 @@ export async function createSession(sqlite3, db, name = 'New Session') {
     sqlite3.bind_collection(stmt, [id, cleanName]);
     await sqlite3.step(stmt);
   }
+  await assertSessionState(sqlite3, db, id, true, 'createSession');
   return id;
 }
 
@@ -480,6 +497,7 @@ export async function renameSession(sqlite3, db, sessionId, newName) {
     sqlite3.bind_collection(stmt, [cleanName, sessionId]);
     await sqlite3.step(stmt);
   }
+  await assertSessionState(sqlite3, db, sessionId, true, 'renameSession');
   return { id: sessionId, name: cleanName };
 }
 
@@ -494,6 +512,7 @@ export async function deleteSession(sqlite3, db, sessionId) {
     } catch { /* table might not exist in early migrations */ }
   }
   await execParams(sqlite3, db, `DELETE FROM sessions WHERE id = ?`, [sessionId]);
+  await assertSessionState(sqlite3, db, sessionId, false, 'deleteSession');
 }
 
 /**
@@ -570,6 +589,7 @@ export async function forkSession(sqlite3, db, sourceSessionId, forkPointId, new
   } finally {
     await setSuppressCascade(sqlite3, db, false);
   }
+  await assertSessionState(sqlite3, db, newId, true, 'forkSession');
   return newId;
 }
 

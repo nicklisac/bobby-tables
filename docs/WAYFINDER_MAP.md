@@ -94,7 +94,7 @@ graph TD
     T21 --> T22
     T24 --> T26
     T26 --> T261[T26.1 Guardrails: persistence / VFS-contract / boot-idempotency tests - DONE]
-    T261 --> T262[T26.2 Transaction-pattern rules + upstream bug report]
+    T261 --> T262[T26.2 Transaction-pattern rules + upstream bug report - DONE]
     T262 --> T263[T26.3 Shared utils + module split (pure move)]
     T263 --> T264[T26.4 SQL-native views (actually created)]
     T264 --> T265[T26.5 Subsystem harmonization (consume the views)]
@@ -103,8 +103,8 @@ graph TD
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T21,T24,T261 done;
-    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T25,T26,T262,T263,T264,T265 frontier;
+    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T21,T24,T261,T262 done;
+    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T25,T26,T263,T264,T265 frontier;
 ```
 
 ---
@@ -457,8 +457,9 @@ graph TD
 
 ### Ticket 26.2: Transaction-Pattern Rules (Codified) + Upstream Bug Report
 * **Label:** `wayfinder:task` (AFK)
-* **Status:** ⬜ NOT STARTED
+* **Status:** ✅ COMPLETE (resolved 2026-08-18)
 * **Depends on:** 26.1 (needs the harness to verify the safety net)
+* **Resolution (2026-08-18):** All three parts done. (1) `docs/TRANSACTION_RULES.md` committed with the 6 rules (rule 6 = the BUG-008 JSPI re-entrancy constraint). (2) Dev-mode read-back assertion (`assertSessionState`) added to `createSession`/`renameSession`/`deleteSession`/`forkSession` in `src/schema.js` — throws in dev when a session write doesn't land in the page cache. (3) Upstream report **resolved without filing**: the 26.1 VFS contract probe re-ran the exact BUG-012 trigger pattern (`SAVEPOINT`→single `INSERT`→`RELEASE`) and it commits correctly on the current VFS — the no-op commit does not reproduce (it was specific to the scrapped branch's local vendor seal change). No vendor defect to file. 26.1 harness 7/7 green.
 * **Context (2026-08-18, post-26.1):** 26.1 surfaced and **fixed BUG-008** — the "JSPI table-read hang" this ticket originally hypothesized as a WASM/VFS defect is now root-caused as an **app-layer re-entrancy** issue (two independent queries re-entering wasm concurrently clobber the Pager/B-tree C state; the first never reaches `jUnlock(NONE)`, so the second's exclusive `access` Web Lock queues behind it forever → hang). It is **not** a vendor defect — it's fixed by the 26.1 re-entrant serialization gate in `src/harness.js`. This changes the upstream-report scope below: **item (b) is dropped**, and **item (a) needs re-verification** before filing.
 * **Question:** How do we make the BUG-012 *and* BUG-008 lessons durable — so neither this re-plan nor any future ticket re-introduces a transaction pattern that skips the write-transaction transition, or re-enters wasm concurrently on the single connection — and (only where a *genuine* vendor defect remains) get it fixed at the source?
 * **Vision / Approach:**
@@ -471,7 +472,7 @@ graph TD
     6. **JSPI re-entrancy (BUG-008):** independent queries must not re-enter wasm concurrently on the single `sqlite3*` handle — the C core is not re-entrant (no pthreads ⇒ internal mutexes are no-ops), so two independent in-flight queries clobber the Pager/B-tree/page-cache C state → hang. Nested (UDF) queries are fine; independent queries are serialized. Enforced automatically by the 26.1 gate in `src/harness.js` (`udfDepth`-classified `entryQueue`). Do not bypass/remove the gate without a 26.1 regression test proving the alternative is safe.
   * **Add the dev read-back assertion** to the session-write path (`createSession`, `renameSession`, `deleteSession`, `forkSession`) — a small, safe, real code change.
   * **File the upstream report — conditionally, after re-verification (wa-sqlite maintainer):**
-    * (a) the **no-op commit** (a savepoint-wrapped INSERT whose step performs zero VFS I/O and whose RELEASE commits zero dirty pages — the pager never transitions to a write transaction): **re-verify first** whether this is a genuine pager/VFS defect or an *app* transaction-pattern issue (wrapping a single already-atomic autocommit statement in a savepoint). If it's the latter, rule 1 above already covers it and it is **not** a vendor bug — record that finding instead of filing. If it's a real vendor defect, file with a VFS event trace — the tracing capability is in the 26.1 harness (`src/harness.js` `vfs.events` + `tests/probes/probe_toolcall_traced.mjs` / `probe_reload_corruption.mjs`), and the original `__b12uni` unified format + the full BUG-012 repro are in `docs/archive/RETROSPECTIVE_TICKET_26.md` (§7).
+    * (a) the **no-op commit** (a savepoint-wrapped INSERT whose step performs zero VFS I/O and whose RELEASE commits zero dirty pages — the pager never transitions to a write transaction): **RESOLVED 2026-08-18 — not a vendor defect, no upstream filing.** Re-verified with the 26.1 VFS contract probe (`tests/probes/vfs-contract-probe.mjs`), which runs this exact pattern (`SAVEPOINT` → single `INSERT` → `RELEASE`) against the live `IDBBatchAtomicVFS` and asserts the marker reaches IDB at the committed version — it **passes** (`inIdb=true`, `atCommittedVersion`, `noPendingVersion`). The no-op commit does **not** reproduce on the current (26.1-fixed) VFS: it was specific to the scrapped `sql-refactor` branch, which combined the savepoint wrapper with a *local* vendor seal change (never merged). Rule 1 (prefer autocommit) + the 26.1 persistence test are the durable guards. Finding recorded here; nothing to file upstream.
     * (b) the **JSPI table-read hang**: **drop from the report.** Root-caused in 26.1 as the BUG-008 app-layer re-entrancy hang (fixed by the serialization gate), not a vendor defect. The durable lesson is a *usage constraint* (rule 6), enforced by the gate — document it, don't file it upstream.
     * Record the outcome on this ticket: either "filed + issue/PR link" or "not a vendor defect — see finding."
 * **Acceptance:**
