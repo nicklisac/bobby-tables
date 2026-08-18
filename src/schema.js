@@ -720,18 +720,19 @@ export async function createSession(sqlite3, db, name = 'New Session') {
  * List all sessions, strictly deduplicated by session ID.
  */
 export async function listSessions(sqlite3, db) {
+  // T26.5: read the session list from v_session_summary (the 26.4 view)
+  // instead of a raw `sessions` scan — same base fields (the view adds
+  // aggregates we don't surface here), same ordering (baked into the view),
+  // and unique non-null ids (GROUP BY s.id) so the old seen-set dedup is
+  // unnecessary. The display-name normalization (trim + the
+  // 'Default Session'/'Untitled Session' fallbacks) stays in JS: it is a UI
+  // concern, and the view returns s.name raw.
+  const rows = await queryAll(sqlite3, db,
+    `SELECT session_id, name, description, created_at, updated_at FROM v_session_summary`);
   const sessions = [];
-  const seen = new Set();
-  for await (const stmt of sqlite3.statements(db, `SELECT id, name, COALESCE(description, ''), created_at, updated_at FROM sessions ORDER BY updated_at DESC, created_at DESC`)) {
-    while (await sqlite3.step(stmt) === 100 /* SQLITE_ROW */) {
-      const v = sqlite3.row(stmt);
-      const id = v[0];
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      const rawName = v[1];
-      const name = (rawName && rawName.trim()) ? rawName.trim() : (id === 'default' ? 'Default Session' : 'Untitled Session');
-      sessions.push({ id, name, description: v[2], created_at: v[3], updated_at: v[4] });
-    }
+  for (const [id, rawName, description, created_at, updated_at] of rows) {
+    const name = (rawName && rawName.trim()) ? rawName.trim() : (id === 'default' ? 'Default Session' : 'Untitled Session');
+    sessions.push({ id, name, description, created_at, updated_at });
   }
   return sessions;
 }
