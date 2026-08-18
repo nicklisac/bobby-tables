@@ -681,9 +681,11 @@ export function Factory(Module) {
 
         // Ensure that statement handles are not leaked.
         let stmt;
-        function maybeFinalize() {
+        async function maybeFinalize() {
           if (stmt && !options.unscoped) {
-            sqlite3.finalize(stmt);
+            const s = stmt;
+            stmt = 0;
+            await sqlite3.finalize(s);
           }
           stmt = 0;
         }
@@ -693,11 +695,27 @@ export function Factory(Module) {
         Module.setValue(pzTail, pzHead, '*');
         do {
           // Reclaim resources for the previous iteration.
-          maybeFinalize();
+          await maybeFinalize();
 
           // Call sqlite3_prepare_v3() for the next statement.
           // Allow retry operations.
           const zTail = Module.getValue(pzTail, '*');
+          if (zTail >= pzEnd - 1) {
+            stmt = 0;
+            break;
+          }
+          let hasNonWhitespace = false;
+          for (let p = zTail; p < pzEnd - 1; ++p) {
+            if (Module.HEAPU8[p] > 32) {
+              hasNonWhitespace = true;
+              break;
+            }
+          }
+          if (!hasNonWhitespace) {
+            stmt = 0;
+            break;
+          }
+
           const rc = await retry(() => {
             return prepare(
               db,
@@ -720,7 +738,7 @@ export function Factory(Module) {
         } while (stmt);
       } finally {
         while (onFinally.length) {
-          onFinally.pop()();
+          await onFinally.pop()();
         }
       }
     })();

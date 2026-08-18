@@ -43,6 +43,35 @@ export class IDBBatchAtomicVFS extends WebLocksMixin(FacadeVFS) {
 
   log = null; // console.log
 
+  // ── T26.1 INSTRUMENTATION (logging only — no behavior change) ──────────
+  // Event ring buffer + per-instance id + lock-level mirror, exposed for
+  // diagnostics (window.__agent.vfs.events). See tests/README.md.
+  static #nextVfsId = 1;
+  /** @type {number} */ vfsId = IDBBatchAtomicVFS.#nextVfsId++;
+  /** @type {Array.<object>} */ events = [];
+  /** @type {Map<number, number>} */ #lockLevels = new Map();
+
+  /**
+   * Record a VFS event in the ring buffer and forward to this.log.
+   * @param {string} type
+   * @param {object} [detail]
+   */
+  #record(type, detail = {}) {
+    const ev = { t: Math.round(performance.now()), id: this.vfsId, type, ...detail };
+    this.events.push(ev);
+    if (this.events.length > 5000) this.events.splice(0, this.events.length - 5000);
+    if (this.log) this.log(type, detail);
+  }
+
+  /**
+   * @param {number} fileId
+   * @returns {number} current lock level (0=NONE..4=EXCLUSIVE)
+   */
+  #lockLevel(fileId) {
+    return this.#lockLevels.get(fileId) ?? 0;
+  }
+  // ── end T26.1 instrumentation helpers ──────────────────────────────────
+
   /** @type {Promise} */ #isReady;
   /** @type {IDBContext} */ #idb;
 
@@ -104,6 +133,7 @@ export class IDBBatchAtomicVFS extends WebLocksMixin(FacadeVFS) {
       const file = new File(path, flags, meta);
       this.mapIdToFile.set(fileId, file);
       pOutFlags.setInt32(0, flags, true);
+      this.#record('open', { path, version: meta.version, fileSize: meta.fileSize }); // T26.1
       return VFS.SQLITE_OK;
     } catch (e) {
       this.lastError = e;
@@ -246,6 +276,11 @@ export class IDBBatchAtomicVFS extends WebLocksMixin(FacadeVFS) {
 
           file.rollback = Object.assign({}, file.metadata);
           file.metadata.version--;
+          this.#record('txn-begin', { // T26.1
+            version: file.metadata.version,
+            pendingVersion: file.metadata.version,
+            prevVersion: file.rollback.version,
+          });
         }
       }
 
@@ -291,6 +326,7 @@ export class IDBBatchAtomicVFS extends WebLocksMixin(FacadeVFS) {
         file.metadata.fileSize = iOffset + pData.length;
         file.needsMetadataSync = true;
       }
+      this.#record('write', { offset: iOffset, version, size: pData.length, level: this.#lockLevel(fileId) }); // T26.1
       return VFS.SQLITE_OK;
     } catch (e) {
       this.lastError = e;
@@ -376,38 +412,57 @@ export class IDBBatchAtomicVFS extends WebLocksMixin(FacadeVFS) {
   async jLock(fileId, lockType) {
     // Call the actual lock implementation.
     const file = this.mapIdToFile.get(fileId);
+    this.#record('lock', { lockType, level: this.#lockLevel(fileId), path: file.path }); // T26.1
     const result = await super.jLock(fileId, lockType);
+    if (result === VFS.SQLITE_OK) {
+      this.#lockLevels.set(fileId, Math.max(this.#lockLevel(fileId), lockType)); // T26.1
+    }
 
     if (lockType === VFS.SQLITE_LOCK_SHARED) {
-      // Update metadata.
-      file.metadata = await this.#idb.q(async ({ metadata, blocks }) => {
-        // @ts-ignore
-        /** @type {Metadata} */ const m = await metadata.get(file.path);
-        if (m.pendingVersion) {
-          console.warn(`removing failed transaction ${m.pendingVersion}`);
-          await new Promise((resolve, reject) => {
-            const range = IDBKeyRange.bound([m.name, -Infinity], [m.name, Infinity]);
-            const request = blocks.openCursor(range);
-            request.onsuccess = () => {
-              const cursor = request.result;
-              if (cursor) {
-                const block = cursor.value;
-                if (block.version < m.version) {
-                  cursor.delete();
-                }
-                cursor.continue();
-              } else {
-                resolve();
-              }
-            };
-            request.onerror = () => reject(request.error);
-          })
+      // Update metadata (read-only by default; escalate to readwrite only on recovery).
+      file.metadata = await this.#idb.q(async ({ metadata }) => {
+        return metadata.get(file.path);
+      }, 'ro');
 
-          delete m.pendingVersion;
-          metadata.put(m);
-        }
-        return m;
-      }, 'rw', file.txOptions);
+      if (file.metadata && file.metadata.pendingVersion) {
+        file.metadata = await this.#idb.q(async ({ metadata, blocks }) => {
+          // @ts-ignore
+          /** @type {Metadata} */ const m = await metadata.get(file.path);
+          if (m && m.pendingVersion) {
+            const pendingVersion = m.pendingVersion; // T26.1
+            console.warn(`removing failed transaction ${m.pendingVersion}`);
+            const deleted = []; // T26.1
+            await new Promise((resolve, reject) => {
+              const range = IDBKeyRange.bound([m.name, -Infinity], [m.name, Infinity]);
+              const request = blocks.openCursor(range);
+              request.onsuccess = () => {
+                const cursor = request.result;
+                if (cursor) {
+                  const block = cursor.value;
+                  if (block.version < m.version) {
+                    cursor.delete();
+                    deleted.push([block.version, -block.offset]); // T26.1
+                  }
+                  cursor.continue();
+                } else {
+                  resolve();
+                }
+              };
+              request.onerror = () => reject(request.error);
+            });
+
+            delete m.pendingVersion;
+            await metadata.put(m);
+            this.#record('recovery', { // T26.1
+              metaVersion: m.version,
+              pendingVersion,
+              deleted: deleted.length,
+              blocks: deleted.slice(0, 100),
+            });
+          }
+          return m;
+        }, 'rw', file.txOptions);
+      }
     }
     return result;
   }
@@ -418,13 +473,18 @@ export class IDBBatchAtomicVFS extends WebLocksMixin(FacadeVFS) {
    * @returns {Promise<number>}
    */
   async jUnlock(fileId, lockType) {
+    this.#record('unlock', { lockType, level: this.#lockLevel(fileId) }); // T26.1
     if (lockType === VFS.SQLITE_LOCK_NONE) {
       const file = this.mapIdToFile.get(fileId);
       await this.#idb.sync(file.synchronous === 'full');
     }
 
     // Call the actual unlock implementation.
-    return super.jUnlock(fileId, lockType);
+    const result = await super.jUnlock(fileId, lockType);
+    if (result === VFS.SQLITE_OK) {
+      this.#lockLevels.set(fileId, Math.min(this.#lockLevel(fileId), lockType)); // T26.1
+    }
+    return result;
   }
 
   /**
@@ -507,6 +567,12 @@ export class IDBBatchAtomicVFS extends WebLocksMixin(FacadeVFS) {
             }, 'rw', file.txOptions);
             file.needsMetadataSync = false;
             file.rollback = null;
+            this.#record('seal', { // T26.1
+              version: commitMetadata.version,
+              pages: [...file.changedPages],
+              prevFileSize,
+              level: this.#lockLevel(fileId),
+            });
           }
           break;
         case VFS.SQLITE_FCNTL_BEGIN_ATOMIC_WRITE:
@@ -532,6 +598,11 @@ export class IDBBatchAtomicVFS extends WebLocksMixin(FacadeVFS) {
           }, 'rw', file.txOptions);
           file.needsMetadataSync = false;
           file.rollback = null;
+          this.#record('rollback', { // T26.1
+            version: rollbackMetadata.version,
+            pages: [...file.changedPages],
+            level: this.#lockLevel(fileId),
+          });
           return VFS.SQLITE_OK;
       }
     } catch (e) {
@@ -701,10 +772,12 @@ export class IDBContext {
 
     for (let i = 0; i < 2; ++i) {
       if (!tx) {
-        // The current transaction is missing or doesn't match so
-        // replace it with a new one. wait for the previous
-        // transaction to complete so the lifetimes do not overlap.
-        await this.#txComplete;
+        // Only wait for #txComplete if there is an active readwrite transaction.
+        // Readonly transactions can safely overlap and retrying inactive transactions
+        // must not deadlock awaiting macrotask completion events.
+        if (mode === 'readwrite' && this.#request?.transaction?.mode === 'readwrite') {
+          await this.#txComplete;
+        }
 
         // Create the new transaction.
         // @ts-ignore
@@ -799,8 +872,9 @@ export class IDBContext {
     if (this.#chain) {
       // This waits for all IndexedDB calls to be made.
       await this.#chain;
-      if (durable) {
-        // This waits for the final transaction to commit.
+      const hasPendingWrite = Array.from(this.#txPending).some(tx => tx.mode === 'readwrite');
+      if (durable || hasPendingWrite) {
+        // This waits for the write transaction to commit.
         await this.#txComplete;
       }
       this.reset();
