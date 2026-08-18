@@ -547,6 +547,7 @@ graph TD
 * **Question:** How do we refactor the subsystems to actually use the SQL-native views and shared utilities — replacing imperative JS loops with SQL — without changing any observable behavior?
 * **Vision / Approach:**
   * **`src/explorer.js`** → catalog introspection via `v_schema_catalog` (replace the per-table `PRAGMA table_info` JS loop).
+  * **System-view vs user-view delineation** (user-requested 2026-08-18, scoped here rather than 26.4): `v_schema_catalog` currently lumps the app's own views (`v_active_context` + the five 26.4 views) together with user-created views — the explorer has a System Tables section but no view equivalent. When the explorer consumes the catalog, classify system vs user views explicitly (a `SYSTEM_VIEWS` name list next to `INTERNAL_TABLES` is the natural analogue) so user views get user-view treatment (explorer actions, T22 reference-integrity scope) and app views don't.
   * **`src/compaction.js`** → watermark/token metrics via `v_turn_boundaries` (replace the JS token-boundary walk).
   * **`src/grid.js`** → slot/occupancy via `v_grid_matrix`.
   * **Message rendering** (`chat-render.js`) → tool-query extraction via `v_tool_call_queries` (replace the `JSON.parse` loops).
