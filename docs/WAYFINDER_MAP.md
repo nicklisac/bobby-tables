@@ -544,6 +544,12 @@ graph TD
 * **Label:** `wayfinder:task` (AFK)
 * **Status:** 🟡 IN PROGRESS (claimed 2026-08-18, branch `t26.5-harmonization`)
 * **Depends on:** 26.3 (utils), 26.4 (the views)
+* **Progress (2026-08-18):** 3 of 5 subsystems committed, each build-green + harness-green + AGY-CLEAN, one commit each:
+  1. ✅ **sub1** `5be9011` — `explorer.js` → `v_schema_catalog` + `SYSTEM_VIEWS`/`isSystemView()` delineation (system views get no drop action; autocomplete indexes them as `system`). Differential probe `tests/probes/t26.5-explorer-catalog.mjs`. AGY `agy-1787091359-2804216` CLEAN.
+  2. ✅ **sub2** `f8f6906` — `compaction.js` → `v_turn_boundaries` (`planCompaction` cut row = largest id with `cum_tokens_tail >= keepBudget`; `firstRetainedId = next_turn_start_id ?? prev_turn_start_id`; `watermarkId = prev_id(firstRetainedId)`; no-anchor estimate = 3-branch UNION ALL mirroring `v_active_context`; added `assertActiveSession`; removed `estTokens`). Probe `tests/probes/t26.5-compaction.mjs`. AGY `agy-1787091879-2848450` CLEAN.
+  3. ✅ **sub3** `9ac0cde` — `grid.js` render path → `v_grid_matrix` (`queryGridRows` = `SELECT MAX(row)+1 FROM v_grid_matrix`; `renderGrid` reads it). **Scoping note:** the placement/reflow/auto-pack engine (`validatePlacement`/`computePushDownReflow`/`sanitizeCardLayout`/`findFreeSpot`) stays a **pure in-memory engine** over the cards array (what-if computations; the T12 prototype probe tests it with in-memory arrays) — only the DB-backed render-path row count moves to the view; `computeGridRows` retained as the pure oracle. Probe `tests/probes/t26.5-grid.mjs` (3-way: oracle vs view vs distinct-row count) + renderGrid `gridTemplateRows` UI check. AGY `agy-1787092457-2896465` CLEAN.
+  4. ⬜ **sub4** — `chat-render.js` → `v_tool_call_queries` (replace the `JSON.parse` tool-calls loops).
+  5. ⬜ **sub5** — `listSessions` (`schema.js`) → `v_session_summary`.
 * **Next steps (2026-08-18):**
   1. `src/explorer.js` → `v_schema_catalog` (one query replaces the per-object `PRAGMA table_info`/`index_list`/`index_info`/`foreign_key_list` JS loop) + **system-view vs user-view delineation**: a `SYSTEM_VIEWS` name list next to `INTERNAL_TABLES` so user views get user-view treatment (explorer actions, T22 reference-integrity scope) and the app's own views (`v_active_context` + the five 26.4 views) don't.
   2. `src/compaction.js` → `v_turn_boundaries` (replace `planCompaction`'s JS token-boundary walk; `estimateActiveContextTokens` via `total_tokens`).
