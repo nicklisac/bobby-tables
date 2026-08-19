@@ -221,7 +221,10 @@ if (configForm) {
     e.preventDefault();
     saveConfig({
       provider: configProvider.value,
-      url: configUrl.value.trim(),
+      // Gemini uses a fixed endpoint — the URL field is hidden for it, so a
+      // value present is stale (e.g. a leftover local Ollama URL). Persisting
+      // it would be confusing even though resolveEndpointUrl ignores it.
+      url: configProvider.value === 'gemini' ? '' : configUrl.value.trim(),
       model: configModel.value.trim(),
       apiKey: configKey.value.trim(),
       contextWindow: configContextWindow.value.trim(),

@@ -239,7 +239,12 @@ export function isContextLengthError(status, text) {
  */
 function resolveEndpointUrl(url, provider) {
   if (provider === 'gemini') {
-    return url || 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+    // The "Google Gemini API" provider always uses the fixed Google endpoint.
+    // A user-supplied url is deliberately IGNORED: the config UI hides the URL
+    // field for Gemini, so any value present is stale (e.g. a leftover local
+    // Ollama/LM Studio URL) and would silently route Gemini turns to the wrong
+    // model. (Custom endpoints belong to the "OpenAI Compatible" provider.)
+    return 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
   }
   if (!url) return '';
   const cleanUrl = url.trim().replace(/\/+$/, '');

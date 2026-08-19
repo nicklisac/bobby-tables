@@ -141,6 +141,15 @@ This document tracks known issues, edge cases, and improvements to be addressed 
 
 ---
 
+### BUG-016: Gemini Provider Could Be Routed to a Stale / Wrong Endpoint URL
+- **Status**: **Closed** (fixed 2026-08-19 — landed via a split T3 session).
+- **Reported**: Split T3 session (config / endpoint hardening).
+- **Component**: `src/harness.js` (`resolveEndpointUrl`), `src/main.js` (`saveConfig`)
+- **Description**: The config UI hides the URL field for the "Google Gemini API" provider, but a value can still be present in the stored config (e.g. a leftover local Ollama / LM Studio endpoint from a previous "OpenAI Compatible" setup). `resolveEndpointUrl` used to return `url || <fixed Google endpoint>`, so that stale URL would **silently route Gemini turns to the wrong model / endpoint**.
+- **Resolution**: The `gemini` provider now **always** uses the fixed Google endpoint (`resolveEndpointUrl` ignores any stored `url` for it), and `saveConfig` clears the URL to `''` when the provider is `gemini` (other providers still persist the URL field). Custom endpoints remain the "OpenAI Compatible" provider's job.
+
+---
+
 ### Numbering note (BUG-010 / 011 / 012)
 BUG-010, BUG-011, and BUG-012 are the **Ticket 26 debugging-session bugs** (per-boot `DROP`+`RENAME` session migration; double-boot VFS corruption; the no-op commit that writes zero pages to IDB). They are tracked in `docs/archive/RETROSPECTIVE_TICKET_26.md` and `docs/TRANSACTION_RULES.md` (§5, §6) and referenced by the `persistence` / `boot-idempotency` / `vfs-contract` specs. Their `BUG_LOG.md` entries were drafted during the `sql-refactor` re-scope but stashed (see retrospective §5) and not merged, so this log jumps from BUG-009 to BUG-013. New entries continue from BUG-013 to avoid colliding with the reserved numbers.
 
