@@ -411,7 +411,9 @@ async function renderMessages() {
   const rows = [];
   for await (const stmt of agent.sqlite3.statements(
     agent.db,
-    `SELECT id, role, content, tool_calls, tool_call_id, created_at FROM messages WHERE session_id = ? ORDER BY id ASC`
+    // T3 chat rewind: rewound=1 rows (at/after a rewind point) are hidden —
+    // the audit log keeps them; the pane shows the live conversation.
+    `SELECT id, role, content, tool_calls, tool_call_id, created_at FROM messages WHERE session_id = ? AND COALESCE(rewound, 0) = 0 ORDER BY id ASC`
   )) {
     agent.sqlite3.bind_collection(stmt, [sessionId]);
     while (await agent.sqlite3.step(stmt) === SQLITE_ROW) {
@@ -592,7 +594,7 @@ async function renderMessages() {
           const rewindBtn = document.createElement('button');
           rewindBtn.className = 'rewind-btn';
           rewindBtn.title = bangs === 0
-            ? 'Rewind database to before this message'
+            ? 'Rewind the database and the conversation to before this message'
             : 'Rewind database to before this scratchpad command';
           rewindBtn.innerHTML = `<span class="btn-bracket">[</span>${ICONS.undo({ size: 11 })}<span class="btn-bracket">]</span>`;
           rewindBtn.addEventListener('click', target);

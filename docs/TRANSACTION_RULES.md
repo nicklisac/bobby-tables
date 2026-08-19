@@ -60,7 +60,12 @@ Independent queries must not re-enter wasm concurrently on the single
 are no-ops), so two independent in-flight queries clobber the Pager/B-tree/
 page-cache C state → hang. Nested (UDF) queries are fine; independent queries
 are serialized. Enforced automatically by the gate in `src/harness.js`
-(`udfDepth`-classified `entryQueue`). Do not bypass/remove the gate without a
+(`udfDepth`-classified `entryQueue`). A query is *nested* iff issued while a UDF is
+executing (`udfDepth > 0`) **or** inside a manual nested scope
+(`manualDepth > 0`, via `agentApi.beginNestedScope()` / `endNestedScope()`) — the
+scratchpad DDL path (`!!CREATE` / `!!DROP`) uses the manual scope so its inner
+`logDDL` / drop-pre-image queries run inline instead of queueing behind their own
+generator (BUG-014, a T26.1 gate regression). Do not bypass/remove the gate without a
 26.1 regression test proving the alternative is safe.
 
 ## How these are verified

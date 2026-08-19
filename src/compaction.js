@@ -132,6 +132,7 @@ export async function estimateActiveContextTokens(sqlite3, db, sessionId) {
   const anchorRows = await queryAll(sqlite3, db, `
     SELECT id, prompt_tokens FROM messages
     WHERE session_id = ? AND role = 'assistant' AND prompt_tokens > 0
+      AND COALESCE(rewound, 0) = 0  -- T3 chat rewind: hidden rows aren't sent
     ORDER BY id DESC LIMIT 1
   `, [sessionId]);
   const anchor = anchorRows[0]; // [id, prompt_tokens] | undefined
@@ -349,7 +350,9 @@ export async function runCompaction(sqlite3, db, sessionId, llmCfg, opts = {}) {
 
   const toSummarize = await queryAll(sqlite3, db, `
     SELECT role, content, tool_calls, tool_call_id FROM messages
-    WHERE session_id = ? AND COALESCE(in_context, 1) = 1 AND id > ? AND id <= ?
+    WHERE session_id = ? AND COALESCE(in_context, 1) = 1
+      AND COALESCE(rewound, 0) = 0  -- T3 chat rewind: never summarize hidden rows
+      AND id > ? AND id <= ?
     ORDER BY id ASC
   `, [sessionId, currentWm, plan.watermarkId]);
 

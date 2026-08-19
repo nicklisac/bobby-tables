@@ -96,6 +96,51 @@ This document tracks known issues, edge cases, and improvements to be addressed 
 - **Description**: A tool-call turn writes two rows — an **assistant** row (`content = ''`, `tool_calls = <call>`) and a **tool** row (`content = <result>`). The chat renders the assistant row as `[empty]` because `renderMessages()` does `div.textContent = content || '[empty]'` and never reads `tool_calls`. The tool *result* (a table) renders fine as its own `tool` row.
 - **Observed behavior (user):** during the turn the (soon-to-be-empty) assistant bubble **fills up with the tool-call code** — i.e. a live/streaming path is watching the model response and painting it (raw tool-call payload included). When the turn finishes, the tool-call trigger fires, runs the tool, and the post-turn `renderMessages()` re-render (the "blink") replaces that bubble with `[empty]`. So the streaming render and the DB re-render disagree about what an assistant-with-tool-call row should show.
 - **Expected**: the assistant row should show the tool call (e.g. a "⚙ execute_sql — `SELECT …`" chip, or a collapsible call) instead of `[empty]`, so the turn reads *user → [tool call] → [tool result] → assistant answer*. Also reconcile the streaming bubble with the re-render so the bubble doesn't visibly "fill then clear".
-- **Notes**: Pre-existing (not introduced by the BUG-008 work — the per-message render was untouched). Only became visible now that BUG-008 no longer breaks the tool-call path before this point.
+ - **Notes**: Pre-existing (not introduced by the BUG-008 work — the per-message render was untouched). Only became visible now that BUG-008 no longer breaks the tool-call path before this point.
+
+---
+
+### BUG-013: Rewind Doesn't Rewind — Chat Conversation Not Cleared, Agent DDL Turns Never Undone
+- **Status**: **Closed** (fixed & verified 2026-08-19; regression guard `tests/specs/t3-rewind.spec.mjs`)
+- **Reported**: User feedback — "When I rewind the chats do not rewind/get removed from the chat window up to the rewind point."
+- **Component**: `src/schema.js` (views + `messages.rewound` column), `src/rewind.js` (flag + replay scope), `src/harness.js` (agent DDL logging), `src/chat-render.js` (pane query), `src/compaction.js` (context estimator), `src/scratchpad.js` (nested-scope DDL)
+- **Description**: Two distinct defects behind one user-facing symptom ("rewind doesn't rewind"):
+  1. **Chat not rewound.** Rewind was *data-only* by design (T3): it replayed inverse DML/DDL against the database but left the `messages` conversation untouched, so the chat pane still showed every turn at/after the rewind point. The user expected the conversation to rewind too.
+  2. **Agent DDL turns never undone.** The agent's `execute_sql` DDL path logged `turn_ddl_log` rows with `table_name = NULL` and no drop pre-image (both hardcoded `null`), so the rewind's DDL-inverse replay ran `DROP TABLE "null"` / a no-op `CREATE` — an agent `CREATE TABLE` turn left the table in place after rewind.
+- **Root Cause**:
+  1. T3's locked design was "data only — `messages` is an immutable audit log; a system marker row is appended". No mechanism existed to hide the rewound conversation from the pane or the agent's LLM context.
+  2. The agent DDL path in `run_dynamic_sql` (harness.js) pre-dated the per-statement table-name extraction that the scratchpad path (`scratchpad.js`) already had. It logged one coarse row per statement batch with `tableName`/`preImage` left `null`.
+- **Resolution**:
+  1. **Chat rewind (flag + hide, non-destructive).** New `messages.rewound INTEGER DEFAULT 0` column (SCHEMA_SQL + `migrateMessagesTable`). On a real-turn rewind, every row `id >= beforeTurnId` is flagged `rewound = 1` (never deleted — the audit log survives). Flagged rows are hidden from: the chat pane query (`chat-render.js`), the agent's `v_active_context` / `v_turn_boundaries` / `v_tool_call_queries` views (`schema.js`), the compaction `toSummarize` + anchor queries (`compaction.js`), and the orphan-pair repair. `forkSession` copies the column. The marker row is still appended.
+  2. **Agent DDL now logged correctly.** `extractDdlTableName` + `captureDropPreImage` moved from `scratchpad.js` to `schema.js` (exported, shared). The agent DDL path in `harness.js` now logs **per statement** (before each `step`), with the real `table_name` and a drop pre-image for `DROP TABLE`, so the DDL-inverse replay actually drops/recreates the right table. `getChangesetSummary` now counts DDL so the confirm dialog doesn't claim "no data changes".
+  3. **Consistency:** a real-turn rewind now also undoes scratchpad commands issued *after* the point (their bubbles get flagged, so their data must be undone too) — the replay + changeset-consumption scope is `(turn_id >= N OR turn_id <= -N)`.
+- **Verification**: `tests/specs/t3-rewind.spec.mjs` (3 tests): agent `CREATE TABLE` → rewind → table gone + chat flagged + context cleared + dialog counts DDL; scratchpad `DROP TABLE` (with rows) → rewind → table + rows restored from pre-image; real-turn rewind undoes scratchpad commands issued after the point. Full suite 26/26 green.
+
+---
+
+### BUG-014: Scratchpad DDL Deadlock — `!!CREATE` / `!!DROP` Hang (BUG-008 Gate Regression)
+- **Status**: **Closed** (fixed & verified 2026-08-19; exercised by `tests/specs/t3-rewind.spec.mjs` test 2)
+- **Reported**: Found while fixing BUG-013 (the scratchpad DDL path is the working DROP path and hung during verification).
+- **Component**: `src/scratchpad.js` (`execScratchSql`), `src/harness.js` (serialization gate nested-scope API)
+- **Description**: Running a DDL command through the scratchpad (`!!CREATE TABLE …`, `!!DROP TABLE …`) hung forever — the DDL never executed and the turn never completed.
+- **Root Cause**: A regression from the BUG-008 re-entrant serialization gate (T26.1). The gate classifies a query as *nested* (allowed to run inline) iff it is issued while a UDF is executing (`udfDepth > 0`). The scratchpad DDL path's inner queries (`logDDL`, `captureDropPreImage`'s pre-image SELECT) were issued from *inside the same generator* that holds the entry slot — not from a UDF — so they were misclassified as *independent* and queued behind their own generator's entry slot → self-deadlock.
+- **Resolution**: Added a **manual nested-scope** API to the gate in `harness.js` (`agentApi.beginNestedScope()` / `agentApi.endNestedScope()`, backed by a `manualDepth` counter). `execScratchSql` enters the scope after its first `next()` (once the generator has acquired the entry slot), so its inner DDL-logging / pre-image queries are classified nested (`isNested = udfDepth > 0 || manualDepth > 0`) and run inline instead of queueing behind themselves. See `docs/TRANSACTION_RULES.md` §6.
+- **Verification**: `tests/specs/t3-rewind.spec.mjs` test 2 (scratchpad `DROP TABLE` with rows → rewind → restored) exercises the scratchpad DDL path and passes; full suite 26/26 green.
+
+---
+
+### BUG-015: Agent `execute_sql` Cannot `DROP TABLE` in the UDF Cascade (SQLITE_LOCKED_TABLE)
+- **Status**: **Open** — pre-existing, **not** fixed (out of scope for the BUG-013 work). Tracked here so it is not lost.
+- **Reported**: Found while fixing BUG-013 (probing whether the agent DDL path could be exercised with a real `DROP TABLE`).
+- **Component**: `src/harness.js` (`run_dynamic_sql` UDF), `vendor/wa-sqlite-jspi/` (SQLite C core + JSPI VFS)
+- **Description**: When the agent's `execute_sql` tool runs `DROP TABLE` inside the ReAct UDF cascade, SQLite fails with `SQLITE_LOCKED_TABLE` and the drop never happens. `CREATE TABLE` and `ALTER TABLE` work in the same path; only `DROP TABLE` fails.
+- **Root Cause (hypothesis, unverified)**: A schema change (`DROP TABLE`) nested inside a suspended write statement (the JSPI UDF is mid-cascade, holding a write transaction) is rejected by the SQLite C core. Fails even with zero inner queries, so it is **not** the BUG-014 gate misclassification. The scratchpad path (top-level, not nested in a UDF) drops tables fine — which is why BUG-013's DROP-rewind is verified via the scratchpad path.
+- **Impact**: Agent-initiated `DROP TABLE` turns never actually drop the table (the tool returns an error). DML + `CREATE` / `ALTER` are unaffected. The user can still drop tables via the scratchpad (`!!DROP TABLE …`).
+- **Proposed Fix**: Investigate whether the agent DDL path should (a) run DDL outside the UDF suspension (a dedicated top-level DDL tool/endpoint), (b) restructure the savepoint / transaction nesting so the drop is not "locked", or (c) accept the limitation and document that agent DDL is create/alter-only. Needs a controlled repro probe before any fix (per the T26 BUG-012 lesson: don't declare fixed without the exact repro).
+
+---
+
+### Numbering note (BUG-010 / 011 / 012)
+BUG-010, BUG-011, and BUG-012 are the **Ticket 26 debugging-session bugs** (per-boot `DROP`+`RENAME` session migration; double-boot VFS corruption; the no-op commit that writes zero pages to IDB). They are tracked in `docs/archive/RETROSPECTIVE_TICKET_26.md` and `docs/TRANSACTION_RULES.md` (§5, §6) and referenced by the `persistence` / `boot-idempotency` / `vfs-contract` specs. Their `BUG_LOG.md` entries were drafted during the `sql-refactor` re-scope but stashed (see retrospective §5) and not merged, so this log jumps from BUG-009 to BUG-013. New entries continue from BUG-013 to avoid colliding with the reserved numbers.
 
 

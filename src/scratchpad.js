@@ -29,6 +29,7 @@
 import {
   setSuppressCascade, setCurrentTurnId, evictChangesets,
   logDDL, sweepCaptureTriggers, extractTargetTables, isProtectedObject,
+  extractDdlTableName, captureDropPreImage,
 } from './schema.js';
 import {
   queryAll, quoteIdent, unquoteIdent, execSqlRaw, SQLITE_ROW, SQLITE_DONE,
@@ -145,55 +146,6 @@ export function classifyStatement(sql) {
   return { kind: 'other' };
 }
 
-/** Best-effort object name from a CREATE/DROP/ALTER statement (null if unparseable).
- *  Handles bare, double-quoted, backtick, and [bracket] identifiers. */
-function extractDdlTableName(sql) {
-  const t = sql.trim().replace(/;+\s*$/, '').trim();
-  // Quoted identifiers may contain spaces; bare ones may not.
-  // NOTE: the name group MUST be capturing — m[1] is the identifier.
-  const name = '("[^"]+"|`[^`]+`|\\[[^\\]]+\\]|[A-Za-z_][\\w$]*)';
-  // SQLite: CREATE [TEMP|TEMPORARY] [UNIQUE] TABLE … (UNIQUE precedes TABLE).
-  let m = t.match(new RegExp(`^CREATE\\s+(?:TEMP(?:ORARY)?\\s+)?(?:UNIQUE\\s+)?(?:TABLE|INDEX|VIEW)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${name}`, 'i'));
-  if (m) return unquoteIdent(m[1]);
-  m = t.match(new RegExp(`^DROP\\s+(?:TABLE|INDEX|VIEW)\\s+(?:IF\\s+EXISTS\\s+)?${name}`, 'i'));
-  if (m) return unquoteIdent(m[1]);
-  m = t.match(new RegExp(`^ALTER\\s+TABLE\\s+${name}`, 'i'));
-  if (m) return unquoteIdent(m[1]);
-  return null;
-}
-
-/**
- * Capture a pre-image for DROP TABLE so ⟲ can restore it:
- * { create_sql, columns, rows } — rows are JSON objects keyed by column.
- * Must run BEFORE the drop (it SELECTs the table).
- */
-async function captureDropPreImage(sqlite3, db, tableName) {
-  const master = await queryAll(sqlite3, db,
-    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, [tableName]);
-  if (!master.length) return null;
-  const createSql = master[0][0];
-
-  const cols = [];
-  for await (const stmt of sqlite3.statements(db, `PRAGMA table_info(${quoteIdent(tableName)})`)) {
-    while (await sqlite3.step(stmt) === SQLITE_ROW) {
-      cols.push(sqlite3.row(stmt)[1]);
-    }
-  }
-  if (!cols.length) return null;
-
-  const rows = [];
-  const colList = cols.map(quoteIdent).join(', ');
-  for await (const stmt of sqlite3.statements(db, `SELECT ${colList} FROM ${quoteIdent(tableName)}`)) {
-    while (await sqlite3.step(stmt) === SQLITE_ROW) {
-      const v = sqlite3.row(stmt);
-      const obj = {};
-      cols.forEach((c, i) => { obj[c] = v[i]; });
-      rows.push(obj);
-    }
-  }
-  return { create_sql: createSql, columns: cols, rows };
-}
-
 /** Confirm a write command before it executes (reads skip this). */
 function confirmScratchpadWrite(cls, sql, tableName) {
   let what;
@@ -230,59 +182,72 @@ async function execScratchSql(sqlite3, db, sql, turnId, sessionId) {
   const results = [];
   const infos = [];
 
-  for await (const stmt of sqlite3.statements(db, sql)) {
-    const text = (sqlite3.sql(stmt) || '').trim();
-    if (!text) continue;
-    const cls = classifyStatement(text);
-    const tableName = cls.kind === 'ddl' ? extractDdlTableName(text) : null;
+  // BUG-008 gate: the statements generator below acquires the top-level entry
+  // slot on its first next(). The inner queries in the loop body (drop
+  // pre-image, logDDL) would classify as INDEPENDENT and queue behind that
+  // same slot -> deadlock (this path predates the gate). Enter the manual
+  // nested scope AFTER the first next() so the inner queries run as part of
+  // this entry.
+  const agent = ctx.getAgent();
+  let scoped = false;
+  try {
+    for await (const stmt of sqlite3.statements(db, sql)) {
+      if (!scoped) { scoped = true; agent?.beginNestedScope?.(); }
+      const text = (sqlite3.sql(stmt) || '').trim();
+      if (!text) continue;
+      const cls = classifyStatement(text);
+      const tableName = cls.kind === 'ddl' ? extractDdlTableName(text) : null;
 
-    // Transaction control or protected-table modifications are forbidden in scratchpad.
-    if (cls.kind === 'forbidden') {
-      throw new Error(cls.reason || `Forbidden statement (${text.split(/\s+/)[0]}) cannot run inside scratchpad.`);
-    }
-
-    // Every write command confirms before executing (reads run immediately).
-    if (cls.kind !== 'read') {
-      if (!confirmScratchpadWrite(cls, text, tableName)) throw new ScratchpadCancelled(text);
-    }
-
-    // DDL: log with pre-image BEFORE executing (the drop must see the rows).
-    if (cls.kind === 'ddl') {
-      let preImage = null;
-      if (cls.ddlType === 'drop' && cls.target === 'table' && tableName) {
-        preImage = await captureDropPreImage(sqlite3, db, tableName);
+      // Transaction control or protected-table modifications are forbidden in scratchpad.
+      if (cls.kind === 'forbidden') {
+        throw new Error(cls.reason || `Forbidden statement (${text.split(/\s+/)[0]}) cannot run inside scratchpad.`);
       }
-      await logDDL(sqlite3, db, { turnId, sessionId, tableName, ddlSql: text, preImage });
-    }
 
-    if (cls.kind === 'read' || cls.kind === 'other') {
-      // Row-returning statement (SELECT/WITH/EXPLAIN/PRAGMA/…).
-      const cols = sqlite3.column_names(stmt);
-      const values = [];
-      while (await sqlite3.step(stmt) === SQLITE_ROW) {
-        values.push(sqlite3.row(stmt));
-        if (values.length >= SCRATCH_ROW_CAP) break;
+      // Every write command confirms before executing (reads run immediately).
+      if (cls.kind !== 'read') {
+        if (!confirmScratchpadWrite(cls, text, tableName)) throw new ScratchpadCancelled(text);
       }
-      if (cols.length) {
-        results.push({ columns: cols, values, truncated: values.length >= SCRATCH_ROW_CAP });
-      }
-    } else {
-      // DML / DDL — run to completion, report affected rows.
-      while (await sqlite3.step(stmt) !== SQLITE_DONE) { /* step */ }
-      const n = sqlite3.changes(db);
+
+      // DDL: log with pre-image BEFORE executing (the drop must see the rows).
       if (cls.kind === 'ddl') {
-        const verb = cls.ddlType === 'drop' ? 'dropped' : cls.ddlType === 'alter' ? 'altered' : 'created';
-        infos.push(`✓ ${verb} ${tableName || 'object'}${cls.reversible ? '' : ' (NOT rewound-able)'}`);
+        let preImage = null;
+        if (cls.ddlType === 'drop' && cls.target === 'table' && tableName) {
+          preImage = await captureDropPreImage(sqlite3, db, tableName);
+        }
+        await logDDL(sqlite3, db, { turnId, sessionId, tableName, ddlSql: text, preImage });
+      }
+
+      if (cls.kind === 'read' || cls.kind === 'other') {
+        // Row-returning statement (SELECT/WITH/EXPLAIN/PRAGMA/…).
+        const cols = sqlite3.column_names(stmt);
+        const values = [];
+        while (await sqlite3.step(stmt) === SQLITE_ROW) {
+          values.push(sqlite3.row(stmt));
+          if (values.length >= SCRATCH_ROW_CAP) break;
+        }
+        if (cols.length) {
+          results.push({ columns: cols, values, truncated: values.length >= SCRATCH_ROW_CAP });
+        }
       } else {
-        infos.push(`✓ ${n} row${n === 1 ? '' : 's'} affected`);
+        // DML / DDL — run to completion, report affected rows.
+        while (await sqlite3.step(stmt) !== SQLITE_DONE) { /* step */ }
+        const n = sqlite3.changes(db);
+        if (cls.kind === 'ddl') {
+          const verb = cls.ddlType === 'drop' ? 'dropped' : cls.ddlType === 'alter' ? 'altered' : 'created';
+          infos.push(`✓ ${verb} ${tableName || 'object'}${cls.reversible ? '' : ' (NOT rewound-able)'}`);
+        } else {
+          infos.push(`✓ ${n} row${n === 1 ? '' : 's'} affected`);
+        }
+      }
+
+      // DDL invalidates the capture-trigger landscape: DROP TABLE drops its
+      // triggers, CREATE TABLE leaves the new table uninstrumented. Re-sweep.
+      if (cls.kind === 'ddl') {
+        await sweepCaptureTriggers(sqlite3, db);
       }
     }
-
-    // DDL invalidates the capture-trigger landscape: DROP TABLE drops its
-    // triggers, CREATE TABLE leaves the new table uninstrumented. Re-sweep.
-    if (cls.kind === 'ddl') {
-      await sweepCaptureTriggers(sqlite3, db);
-    }
+  } finally {
+    if (scoped) agent?.endNestedScope?.();
   }
 
   return { results, infos };

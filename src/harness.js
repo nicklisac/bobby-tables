@@ -18,7 +18,7 @@ import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_INSERT, 
 import { SQLITE_ROW } from './utils.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
-import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, migrateDashboardCardsTable, migrateDocumentsTable, queryAll, isInternalTable, isProtectedObject, logDDL, sweepCaptureTriggers, extractTargetTables } from './schema.js';
+import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, migrateDashboardCardsTable, migrateDocumentsTable, migrateToolsTable, queryAll, isInternalTable, isProtectedObject, logDDL, sweepCaptureTriggers, extractTargetTables, extractDdlTableName, captureDropPreImage } from './schema.js';
 import { runCompaction, queryActiveContextJson } from './compaction.js';
 import { materializeToolResult } from './materialize.js';
 import { upsertDocument, searchDocuments } from './documents.js';
@@ -427,6 +427,9 @@ export async function bootSqliteAgent(config = {}) {
   // multi-statement path (SCHEMA_SQL at boot) runs with no concurrent flow.
   // The proper fix is awaiting the finalize in the vendor generator
   // (BUG-008 follow-up 1).
+  // Manual nested-scope API (no-ops when the mutex is disabled): lets
+  // top-level code mark its inner queries as nested (see the gate below).
+  const agentApi = {};
   if (!globalThis.__T261_DISABLE_MUTEX) {
     // Kill switch (debugging/visualization): set window.__T261_DISABLE_MUTEX
     // BEFORE boot to bypass serialization (reproduces BUG-008).
@@ -437,9 +440,20 @@ export async function bootSqliteAgent(config = {}) {
     let finalizeDrain = Promise.resolve(); // in-flight finalize teardowns
     let entryQueue = Promise.resolve();    // serializes INDEPENDENT top-level queries
     let udfDepth = 0;                      // in-progress UDF executions (nested signal)
-    const nestedInFlight = new Map();      // udfDepth -> count of in-flight nested gens
+    // Manual nested scope: top-level code (e.g. the scratchpad's execScratchSql)
+    // that issues inner queries (logDDL, drop pre-image) WHILE its own
+    // statements generator holds the entry slot. Without this, the inner
+    // queries classify as independent, queue behind the outer generator's own
+    // entry slot, and deadlock (the T9 scratchpad DDL path predates this gate).
+    // The scope is entered AFTER the outer generator's first next() (which
+    // acquires the slot as independent) and exited after the loop.
+    let manualDepth = 0;
+    const nestedInFlight = new Map();      // effective depth -> in-flight nested gens
     const T261_TRACE = !!globalThis.__T261_TRACE;
     const tlog = (...a) => { if (T261_TRACE) console.log('[ser]', ...a); };
+
+    agentApi.beginNestedScope = () => { manualDepth++; };
+    agentApi.endNestedScope = () => { manualDepth = Math.max(0, manualDepth - 1); };
 
     // Wrap create_function to track UDF-execution depth. The callback is always
     // the last argument. A query is NESTED iff it is issued while a UDF is
@@ -483,8 +497,8 @@ export async function bootSqliteAgent(config = {}) {
       tlog('gen create:', sqlTag);
       return (async function*() {
         // --- first-next: classify, and (top-level only) acquire the entry slot ---
-        const isNested = udfDepth > 0;
-        const startDepth = udfDepth;
+        const isNested = udfDepth > 0 || manualDepth > 0;
+        const startDepth = udfDepth + manualDepth;
         let releaseEntry = null;
         if (!isNested) {
           // Independent top-level query: serialize. Synchronous tail-swap BEFORE
@@ -937,6 +951,10 @@ export async function bootSqliteAgent(config = {}) {
         const firstWord = (t.split(/\s+/)[0] || '').replace(/[^A-Z]/g, '');
         const isReadOnly = firstWord === 'SELECT' || firstWord === 'WITH' || firstWord === 'EXPLAIN' || firstWord === 'PRAGMA';
         const isDDL = firstWord === 'CREATE' || firstWord === 'DROP' || firstWord === 'ALTER';
+        // Turn identity for the DDL log (set in the approval block below; the
+        // execution loop needs it for per-statement logDDL).
+        let sessId = 'default';
+        let turnId = 0;
 
         if (!isReadOnly) {
           // T21: Protected-objects boundary check on write targets — internal
@@ -990,7 +1008,7 @@ export async function bootSqliteAgent(config = {}) {
           // lives inside the turn savepoint — RELEASE commits it with the
           // turn. Replaces the interim window.confirm().
           const sessRows = await queryAll(sqlite3, db, `SELECT value FROM session_context WHERE key = 'active_session_id'`);
-          const sessId = sessRows.length ? sessRows[0][0] : 'default';
+          sessId = sessRows.length ? sessRows[0][0] : 'default';
           // The current turn's user row is the one that fired the cascade.
           // T27 fixed the root cause (agent_turn_init is now created last, so
           // it fires FIRST and session_context.current_turn_id holds the
@@ -1003,7 +1021,7 @@ export async function bootSqliteAgent(config = {}) {
           // boot re-render matches.
           const turnRows = await queryAll(sqlite3, db,
             `SELECT MAX(id) FROM messages WHERE session_id = ? AND role = 'user' AND content NOT LIKE '!%'`, [sessId]);
-          const turnId = turnRows.length && turnRows[0][0] != null ? parseInt(turnRows[0][0], 10) : 0;
+          turnId = turnRows.length && turnRows[0][0] != null ? parseInt(turnRows[0][0], 10) : 0;
 
           for await (const stmt of sqlite3.statements(db,
             `INSERT INTO tool_approvals (turn_id, session_id, tool_name, payload, status) VALUES (?, ?, 'execute_sql', ?, 'pending')`)) {
@@ -1040,21 +1058,31 @@ export async function bootSqliteAgent(config = {}) {
             return;
           }
 
-          // If DDL, log to turn_ddl_log for rewind undo
-          if (isDDL) {
-            await logDDL(sqlite3, db, {
-              turnId,
-              sessionId: sessId,
-              tableName: null,
-              ddlSql: sql,
-              preImage: null,
-            });
-          }
         }
 
         const rows = [];
         let cols = [];
         for await (const stmt of sqlite3.statements(db, sql)) {
+          // If DDL, log to turn_ddl_log for rewind undo — per statement,
+          // BEFORE stepping it, so a DROP TABLE's pre-image is captured while
+          // the table still exists. (Must be inside the execution loop:
+          // preparing a later DML statement before an earlier CREATE runs
+          // fails with "no such table" — sqlite3_prepare_v3 resolves names.)
+          // [T3 fix: the old code logged the whole string with
+          // tableName/preImage null — rewind's inverse replay then ran
+          // DROP TABLE IF EXISTS "null" and agent DDL was never undone.]
+          if (isDDL) {
+            const text = (sqlite3.sql(stmt) || '').trim();
+            const w = (text.split(/\s+/)[0] || '').toUpperCase();
+            if (w === 'CREATE' || w === 'DROP' || w === 'ALTER') {
+              const tableName = extractDdlTableName(text);
+              let preImage = null;
+              if (/^DROP\s+TABLE\b/i.test(text) && tableName) {
+                preImage = await captureDropPreImage(sqlite3, db, tableName);
+              }
+              await logDDL(sqlite3, db, { turnId, sessionId: sessId, tableName, ddlSql: text, preImage });
+            }
+          }
           cols = sqlite3.column_names(stmt);
           while (await sqlite3.step(stmt) === SQLITE_ROW) {
             rows.push(sqlite3.row(stmt));
@@ -1405,7 +1433,17 @@ export async function bootSqliteAgent(config = {}) {
     console.warn('[harness] migrateDocumentsTable failed (non-fatal):', e.message);
   }
 
-  // 9b. Initialize schema
+  // 9b. T16 repair: a corrupted tools row (malformed schema JSON) breaks
+  // EVERY turn — agent_think runs json(schema) on all rows — and the seed is
+  // INSERT OR IGNORE, so it survives boot un-repaired. Delete the bad rows
+  // BEFORE SCHEMA_SQL so the canonical schemas re-seed.
+  try {
+    await migrateToolsTable(sqlite3, db);
+  } catch (e) {
+    console.warn('[harness] migrateToolsTable failed (non-fatal):', e.message);
+  }
+
+  // 9c. Initialize schema
   await sqlite3.exec(db, SCHEMA_SQL);
 
   // 10. Schema migration: detect old agent_memory table and migrate
@@ -1450,5 +1488,6 @@ export async function bootSqliteAgent(config = {}) {
   return {
     sqlite3, db, eventStream: agentEventStream, module, vfs,
     llm: { model: llmModel, endpointUrl, apiKey: llmApiKey, provider: llmProvider },
+    ...agentApi,
   };
 }

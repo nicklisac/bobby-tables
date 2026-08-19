@@ -153,6 +153,11 @@ CREATE TABLE IF NOT EXISTS messages (
     -- (default: every normal conversation row). 0 = excluded — used by the !!
     -- scratchpad (private direct-SQL commands the agent must never see).
     in_context        INTEGER DEFAULT 1,
+    -- T3 (chat rewind): 1 = this row is at/after a rewind point — hidden from
+    -- the chat pane and from v_active_context (the agent forgets the rewound
+    -- conversation). The row itself is NEVER deleted: messages stays an
+    -- immutable audit log (T2 compaction / T1 fork / T10 cartridge rely on it).
+    rewound           INTEGER DEFAULT 0,
     created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -298,10 +303,11 @@ FROM messages m
 CROSS JOIN active a
 LEFT JOIN latest l ON l.session_id = a.session_id
 WHERE m.session_id = a.session_id
-  AND COALESCE(m.in_context, 1) = 1
-   AND m.id != 0  -- the system row (id=0) is emitted by Branch 1, not here
-  AND (l.watermark_id IS NULL OR m.id > l.watermark_id)
-ORDER BY ctx_order ASC;
+   AND COALESCE(m.in_context, 1) = 1
+    AND m.id != 0  -- the system row (id=0) is emitted by Branch 1, not here
+   AND (l.watermark_id IS NULL OR m.id > l.watermark_id)
+   AND COALESCE(m.rewound, 0) = 0  -- T3 chat rewind: hidden from the agent's context
+ ORDER BY ctx_order ASC;
 
 -- =====================================================================
 -- 4g. Dashboard Cards (T11: 3-pane workstation — right-pane grid)
@@ -506,6 +512,7 @@ visible AS (
     CROSS JOIN wm
     WHERE m.session_id = a.session_id
       AND COALESCE(m.in_context, 1) = 1
+      AND COALESCE(m.rewound, 0) = 0  -- T3 chat rewind: not in the agent's context
       AND m.id > wm.watermark_id
 )
 SELECT
@@ -562,10 +569,11 @@ FROM visible;
 -- any WHERE): NULL or malformed tool_calls (e.g. a hand-edited imported
 -- cartridge) expand to zero rows instead of erroring the whole view — this
 -- is a read surface, not the cascade path.
- CROSS JOIN json_each(CASE WHEN json_valid(m.tool_calls) THEN m.tool_calls ELSE '[]' END) tc
- WHERE m.role = 'assistant'
-   AND m.tool_calls IS NOT NULL
-   AND json_type(m.tool_calls) = 'array';
+  CROSS JOIN json_each(CASE WHEN json_valid(m.tool_calls) THEN m.tool_calls ELSE '[]' END) tc
+  WHERE m.role = 'assistant'
+    AND m.tool_calls IS NOT NULL
+    AND json_type(m.tool_calls) = 'array'
+    AND COALESCE(m.rewound, 0) = 0;  -- T3 chat rewind: faithful to the visible transcript
 
 -- v_grid_matrix: the grid's cell matrix — 3 cols × N rows (N self-sizes
 -- exactly like grid.js computeGridRows: at least 3, plus 3 buffer rows
@@ -905,8 +913,8 @@ export async function forkSession(sqlite3, db, sourceSessionId, forkPointId, new
       await sqlite3.step(stmt);
     }
     for await (const stmt of sqlite3.statements(db, `
-      INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, in_context, created_at)
-      SELECT ?, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, COALESCE(in_context, 1), created_at
+      INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, in_context, rewound, created_at)
+      SELECT ?, role, content, tool_calls, tool_call_id, prompt_tokens, completion_tokens, COALESCE(in_context, 1), COALESCE(rewound, 0), created_at
       FROM messages WHERE session_id = ? AND id <= ?
     `)) {
       sqlite3.bind_collection(stmt, [newId, sourceSessionId, forkPointId]);
@@ -1373,6 +1381,59 @@ export async function logDDL(sqlite3, db, { turnId, sessionId, tableName = null,
     [turnId, sessionId, tableName, ddlSql, preImage ? JSON.stringify(preImage) : null]);
 }
 
+/** Best-effort object name from a CREATE/DROP/ALTER statement (null if unparseable).
+ *  Handles bare, double-quoted, backtick, and [bracket] identifiers.
+ *  [T3 fix: moved from scratchpad.js so the agent's execute_sql DDL path can
+ *  log a real table_name — with null, rewind's inverse replay targeted a
+ *  table literally named "null" and agent DDL was never undone.] */
+export function extractDdlTableName(sql) {
+  const t = sql.trim().replace(/;+\s*$/, '').trim();
+  // Quoted identifiers may contain spaces; bare ones may not.
+  // NOTE: the name group MUST be capturing — m[1] is the identifier.
+  const name = '("[^"]+"|`[^`]+`|\\[[^\\]]+\\]|[A-Za-z_][\\w$]*)';
+  // SQLite: CREATE [TEMP|TEMPORARY] [UNIQUE] TABLE … (UNIQUE precedes TABLE).
+  let m = t.match(new RegExp(`^CREATE\\s+(?:TEMP(?:ORARY)?\\s+)?(?:UNIQUE\\s+)?(?:TABLE|INDEX|VIEW)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${name}`, 'i'));
+  if (m) return unquoteIdentifier(m[1]);
+  m = t.match(new RegExp(`^DROP\\s+(?:TABLE|INDEX|VIEW)\\s+(?:IF\\s+EXISTS\\s+)?${name}`, 'i'));
+  if (m) return unquoteIdentifier(m[1]);
+  m = t.match(new RegExp(`^ALTER\\s+TABLE\\s+${name}`, 'i'));
+  if (m) return unquoteIdentifier(m[1]);
+  return null;
+}
+
+/**
+ * Capture a pre-image for DROP TABLE so ⟲ can restore it:
+ * { create_sql, columns, rows } — rows are JSON objects keyed by column.
+ * Must run BEFORE the drop (it SELECTs the table).
+ * [T3 fix: moved from scratchpad.js — the agent path needs it too.]
+ */
+export async function captureDropPreImage(sqlite3, db, tableName) {
+  const master = await queryAll(sqlite3, db,
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, [tableName]);
+  if (!master.length) return null;
+  const createSql = master[0][0];
+
+  const cols = [];
+  for await (const stmt of sqlite3.statements(db, `PRAGMA table_info(${quoteIdent(tableName)})`)) {
+    while (await sqlite3.step(stmt) === SQLITE_ROW) {
+      cols.push(sqlite3.row(stmt)[1]);
+    }
+  }
+  if (!cols.length) return null;
+
+  const rows = [];
+  const colList = cols.map(quoteIdent).join(', ');
+  for await (const stmt of sqlite3.statements(db, `SELECT ${colList} FROM ${quoteIdent(tableName)}`)) {
+    while (await sqlite3.step(stmt) === SQLITE_ROW) {
+      const v = sqlite3.row(stmt);
+      const obj = {};
+      cols.forEach((c, i) => { obj[c] = v[i]; });
+      rows.push(obj);
+    }
+  }
+  return { create_sql: createSql, columns: cols, rows };
+}
+
 /**
  * Boot-time repair for orphaned tool_call pairs: an assistant row with
  * tool_calls but no matching tool row would make the next LLM API call 400.
@@ -1383,9 +1444,13 @@ export async function logDDL(sqlite3, db, { turnId, sessionId, tableName = null,
 export async function repairOrphanedToolCalls(sqlite3, db, sessionId) {
   await setSuppressCascade(sqlite3, db, true);
   try {
+    // Rewound (hidden) rows are never sent to the LLM, so their orphans can't
+    // 400 a call — and repairing them would mint a VISIBLE synthetic tool row
+    // whose parent bubble is hidden. Skip them.
     const rows = await queryAll(sqlite3, db, `
       SELECT id, tool_calls FROM messages
       WHERE session_id = ? AND role = 'assistant' AND tool_calls IS NOT NULL
+        AND COALESCE(rewound, 0) = 0
     `, [sessionId]);
 
     for (const [, toolCallsJson] of rows) {
@@ -1421,20 +1486,27 @@ export async function repairOrphanedToolCalls(sqlite3, db, sessionId) {
  * drop+recreate on SQLite builds without ALTER TABLE DROP COLUMN (< 3.35).
  */
 /**
- * T9 migration: existing brains have no `messages.in_context` column (added
- * with the scratchpad). `CREATE TABLE IF NOT EXISTS` never alters an existing
- * table, so add it here — every pre-existing row defaults to 1 (in context),
- * which is exactly the pre-T9 behavior.
+ * T9/T3 migration: existing brains may lack `messages.in_context` (added with
+ * the scratchpad) and/or `messages.rewound` (added with chat rewind).
+ * `CREATE TABLE IF NOT EXISTS` never alters an existing table, so add any
+ * missing column here — pre-existing rows default to in_context=1 (in context,
+ * the pre-T9 behavior) and rewound=0 (visible, the pre-chat-rewind behavior).
  */
 export async function migrateMessagesTable(sqlite3, db) {
   const rows = await queryAll(sqlite3, db, `PRAGMA table_info(messages)`);
   // Table doesn't exist yet (fresh brain) — SCHEMA_SQL creates it with the
-  // column. MUST run before SCHEMA_SQL: the T9 agent_think trigger references
+  // columns. MUST run before SCHEMA_SQL: the T9 agent_think trigger references
   // in_context, and CREATE TRIGGER fails on a missing column.
   if (!rows.length) return;
-  if (rows.some(([, name]) => name === 'in_context')) return;
-  console.warn('[schema] messages.in_context missing — adding (T9)');
-  await execParams(sqlite3, db, `ALTER TABLE messages ADD COLUMN in_context INTEGER DEFAULT 1`);
+  const cols = new Set(rows.map(([, name]) => name));
+  if (!cols.has('in_context')) {
+    console.warn('[schema] messages.in_context missing — adding (T9)');
+    await execParams(sqlite3, db, `ALTER TABLE messages ADD COLUMN in_context INTEGER DEFAULT 1`);
+  }
+  if (!cols.has('rewound')) {
+    console.warn('[schema] messages.rewound missing — adding (T3 chat rewind)');
+    await execParams(sqlite3, db, `ALTER TABLE messages ADD COLUMN rewound INTEGER DEFAULT 0`);
+  }
 }
 
 export async function migrateTurnTables(sqlite3, db) {
@@ -1480,6 +1552,28 @@ export async function migrateDocumentsTable(sqlite3, db) {
   const legacy = `documents_legacy_${Date.now()}`;
   console.warn(`[schema] User table 'documents' lacks the app's title/content shape — renaming to '${legacy}' (T16)`);
   await execParams(sqlite3, db, `ALTER TABLE documents RENAME TO ${legacy}`);
+}
+
+/**
+ * Migration (T16 repair): delete tools rows whose schema is not a valid JSON
+ * object. The agent_think trigger runs json_group_array(json(schema)) FROM
+ * tools on EVERY turn, so one corrupted row throws "malformed JSON" and
+ * breaks every turn in every session, regardless of LLM provider. An old
+ * boot can persist such a row (the T16 template-literal escaping hazard
+ * wrote unescaped quotes into a description), and the seed is INSERT OR
+ * IGNORE — it never repairs an existing row. Deleting the bad rows lets
+ * SCHEMA_SQL re-seed the canonical schemas. MUST run before SCHEMA_SQL.
+ * Rows with valid object JSON (including user-customized tools) are kept.
+ */
+export async function migrateToolsTable(sqlite3, db) {
+  const rows = await queryAll(sqlite3, db, `PRAGMA table_info(tools)`);
+  if (!rows.length) return; // fresh brain — SCHEMA_SQL creates + seeds it
+  const bad = await queryAll(sqlite3, db,
+    `SELECT name FROM tools WHERE json_valid(schema) = 0 OR json_type(schema) != 'object'`);
+  for (const [name] of bad) {
+    console.warn(`[schema] Malformed tools row '${name}' — deleting so boot re-seeds it (T16 repair)`);
+    await execParams(sqlite3, db, `DELETE FROM tools WHERE name = ?`, [name]);
+  }
 }
 
 export async function migrateDashboardCardsTable(sqlite3, db) {
