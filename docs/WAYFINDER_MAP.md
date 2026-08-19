@@ -53,9 +53,11 @@ A fresh session resumes from **this map alone** — destination, philosophy, and
 * [Decision: Protected-Tables Boundary (T21 locked)](#ticket-21-protected-tables-boundary) — Formalized `isProtectedTable` covering `INTERNAL_TABLES`, `sqlite_*`, and virtual shadow tables (`fts5`/`vec0`). Wired write target extraction (`extractTargetTables`) across all boundaries: DDL on protected tables is refused outright; DML on internal tables is refused with a narrow allowlist for `system_config` (Option A); CSV ingestion prefixes colliding filenames (`imported_<name>`); boot-time invariant `assertProtectedTablesInvariant` guarantees zero capture triggers on protected tables and active capture on all user tables (2026-08-15).
  * [Decision: Schema-Aware Autocomplete & Bang-Mode Visual Morphing (T24 locked)](#ticket-24-schema-aware-sql-autocomplete-editor--bang-mode-visuals) — Dynamic schema dictionary from `getDatabaseCatalog`, context-aware token rankings (tables boosted after FROM/JOIN, columns boosted after SELECT/WHERE/dot-qualifiers), floating popover with keyboard nav (ArrowUp/ArrowDown/Tab/Enter/Escape), and instant visual morphing for `!SQL` (`⚡ [ ! Direct SQL ]`) and `!!SQL` (`🔒 [ !! Private SQL ]`).
  * [Decision: Re-entrant Query Serialization Gate (BUG-008 fix, T26.1)](#ticket-26.1-guardrails--persistence-vfs-contract--boot-idempotency-test-harness) — SQLite's C core is **not re-entrant** on one `sqlite3*` handle (no pthreads ⇒ internal mutexes are no-ops). Two **independent** queries re-entering wasm concurrently under JSPI clobber the Pager/B-tree/page-cache C state; the first never reaches `jUnlock(NONE)`, so the second's exclusive `access` Web Lock queues behind it forever → hang. A VFS-layer fix can't help (the damage is inside wasm). The fix serializes independent queries one-at-a-time in `src/harness.js` (`entryQueue`, synchronous tail-swap, acquired on the generator's first `next()`, released in its `finally`) while allowing nested (UDF) queries; a query is nested iff issued while a UDF is executing (`udfDepth`, tracked by wrapping `create_function`). Classifying by `stepDepth` was insufficient (a top-level catalog step in flight misclassifies an independent query as nested → ~25% residual flake). The stranded `lock SHARED` in VFS events was a *symptom*, not the cause. Verified: traced probe 12/12 clean (was ~50% flaky); 7/7 suite green twice (2026-08-18).
- * [Decision: Trigger Firing Order — create `agent_turn_init` LAST so it fires first (T27)](#ticket-27-trigger-firing-order--current_turn_id-is-stale-during-the-cascade-off-by-one-turn-changeset-attribution) — SQLite fires same-type triggers in REVERSE creation order, so the cascade (`agent_think`) ran BEFORE the turn stamp (`agent_turn_init`): `current_turn_id` was stale for the whole cascade → `cap_*` stamped changesets with the PREVIOUS turn's id (first turn → `0`, never rewindable) and T3 per-bubble rewind undid the wrong turn. Fixed by moving the stamp trigger to last-created (fires first) — root cause, no migration (triggers drop+create at boot; brains self-heal on load). T17's direct turn-id computation kept as defense-in-depth; `materialize.js`/`explorer.js` need no code change (they read the now-correct value). Guarded by `tests/specs/t27-trigger-order.spec.mjs` (2026-08-18).
+  * [Decision: Trigger Firing Order — create `agent_turn_init` LAST so it fires first (T27)](#ticket-27-trigger-firing-order--current_turn_id-is-stale-during-the-cascade-off-by-one-turn-changeset-attribution) — SQLite fires same-type triggers in REVERSE creation order, so the cascade (`agent_think`) ran BEFORE the turn stamp (`agent_turn_init`): `current_turn_id` was stale for the whole cascade → `cap_*` stamped changesets with the PREVIOUS turn's id (first turn → `0`, never rewindable) and T3 per-bubble rewind undid the wrong turn. Fixed by moving the stamp trigger to last-created (fires first) — root cause, no migration (triggers drop+create at boot; brains self-heal on load). T17's direct turn-id computation kept as defense-in-depth; `materialize.js`/`explorer.js` need no code change (they read the now-correct value). Guarded by `tests/specs/t27-trigger-order.spec.mjs` (2026-08-18).
+  * [Decision: Document Corpus = Derived Index State (T16)](#ticket-16-in-browser-full-text-keyword-search-fts5) — A `documents` table + external-content `fts5` index (`documents_fts`, 3 sync triggers) is the in-browser full-text corpus. It is **INTERNAL/derived state**, not user data: no capture triggers, no agent `execute_sql` DML (T21 boundary), never rewound; ingestion only via app flows (`fetch_url`/`search_web` auto-ingest, the `ingest_document` tool, the Documents UI). Two agent tools: `search_documents(query, limit?)` (BM25 `MATCH`, bound-parameter query → no injection, FTS5 syntax errors → error envelope) and `ingest_document(title, content, source?, source_ref?)` (upsert on `(source, source_ref)`). Global to the brain (no `session_id`) — the corpus is a property of the database, like the data itself. T20's vector layer will later consume this same table as its chunk source. Guarded by `tests/specs/t16-fts5.spec.mjs` (2026-08-19).
+  * [Lesson: JSON-in-Template-Literal Escaping Hazard (T16)](#ticket-16-in-browser-full-text-keyword-search-fts5) — `SCHEMA_SQL` is a JS **template literal**. A `\"` inside it is parsed by the template-literal parser into a bare `"` (the backslash is consumed) — so a tool-schema description written as `(default \"user\")` produced `(default "user")` in the final SQL → **malformed JSON** → `json_group_array(json(schema)) FROM tools` threw `malformed JSON` → the **entire agent cascade broke** (and silently regressed T27). A raw-file `JSON.parse` check passes (the file still has `\"`, a valid JSON escape) — the bug only manifests after the browser evaluates the template literal. **Rule:** never rely on `\"` to embed a quote in JSON-in-a-template-literal; use `\\"` or (better) reword to avoid embedded quotes. Verify tool-schema JSON by evaluating the template literal (or in-browser), not by parsing the source file (2026-08-19).
 
----
+ ---
 
 ## The Frontier Dependency Graph
 
@@ -88,7 +90,7 @@ graph TD
     T6[Ticket 6: CSV & Tabular Ingestion Engine - DONE]
     T7[Ticket 7: Web Search & URL Fetch Tools - DONE]
     T10[Ticket 10: Cartridge Import / Export - DONE]
-    T16[Ticket 16: In-Browser Full-Text Search FTS5]
+    T16[Ticket 16: In-Browser Full-Text Search FTS5 - DONE]
     T21[Ticket 21: Protected-Tables Boundary - DONE]
     T13 --> T12
     T12 --> T22[Ticket 22: Reference Integrity for Dashboard Cards]
@@ -105,8 +107,8 @@ graph TD
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T17,T21,T24,T25,T26,T261,T262,T263,T264,T265,T27 done;
-    class T14,T15,T16,T18,T19,T20,T22,T23 frontier;
+    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T16,T17,T21,T24,T25,T26,T261,T262,T263,T264,T265,T27 done;
+    class T14,T15,T18,T19,T20,T22,T23 frontier;
 ```
 
 ---
@@ -304,9 +306,9 @@ graph TD
 
 ---
 
-### Ticket 16: In-Browser Full-Text Keyword Search (`fts5`)
-* **Label:** `wayfinder:task` (AFK)
-* **Status:** 🟡 IN PROGRESS — claimed 2026-08-18, branch `t16-fts5-search`
+ ### Ticket 16: In-Browser Full-Text Keyword Search (`fts5`)
+ * **Label:** `wayfinder:task` (AFK)
+ * **Status:** ✅ DONE — merged to main 2026-08-19 (branch `t16-fts5-search`, commit `ef5951d`)
 * **Question:** How should documents be ingested into SQLite WASM's native `fts5` virtual table to enable BM25 keyword search queries by the agent?
 * **Solved fact (2026-08-14):** `fts5` is compiled into the vendored `wa-sqlite-jspi.wasm` (verified in binary) — no build work required. Remaining work is the app layer: document ingestion flow, the `fts5` virtual table definition, and registering a BM25 `MATCH` search tool in the `tools` table.
 * **Next steps:** survey corpus candidates (T13 materialized tables, T7 fetch/search results, T6 CSV, T20's future `documents` table) → lock design (table + FTS5 sync + tool registration + ingestion hooks) → implement → probe-verify → AGY review → merge.
@@ -321,9 +323,10 @@ graph TD
   * **D5 UI = compact "Documents" accordion** (3rd left-pane section between DB Explorer and Sessions — the generic `.accordion-header` wiring picks it up): FTS search box (live `MATCH` preview — the same query the agent runs, empty = newest-first list), document rows (source badge, title, `source_ref`, date, char count, ✕ delete with confirm), inline add form (title + content). Refreshes on boot, add/delete, and `tool_result` events from `fetch_url`/`search_web`.
   * **D6 System prompt** gains a `search_documents`/`ingest_document` line in `system_config.system_prompt` (new brains; existing brains still see both tools via the `tools` JSON the LLM always receives).
   * **Out of scope (this ticket):** chunking/embedding the corpus (T20 owns the vector layer and will consume this same `documents` table as its chunk source); stemming/tokenizer tuning; per-session corpus partitioning (the corpus is global, like the database itself).
-  * **Verification plan:** (1) probe `docs/prototypes/ticket-16-fts5-probe.mjs` — boot schema (tables/triggers/tools), ingest→search→BM25→snippet, upsert dedup, update/delete index sync, malformed-query envelope, T21 boundary (agent DML on `documents` refused, no `cap_*` triggers, invariant passes), fake-LLM cascade driving `fetch_url`/`search_documents` end-to-end; (2) Playwright spec `tests/specs/t16-fts5.spec.mjs`; (3) full suite; (4) AGY review pass.
+   * **Verification plan:** (1) probe `docs/prototypes/ticket-16-fts5-probe.mjs` — boot schema (tables/triggers/tools), ingest→search→BM25→snippet, upsert dedup, update/delete index sync, malformed-query envelope, T21 boundary (agent DML on `documents` refused, no `cap_*` triggers, invariant passes), fake-LLM cascade driving `fetch_url`/`search_documents` end-to-end; (2) Playwright spec `tests/specs/t16-fts5.spec.mjs`; (3) full suite; (4) AGY review pass.
+ * **DONE (2026-08-19):** Implemented exactly per the locked design — `documents` + external-content `documents_fts` + 3 sync triggers (schema.js §4i), `search_documents`/`ingest_document` tools (execute_tool arms + async UDFs in harness.js), auto-ingest in `fetch_url`/`search_web`, `migrateDocumentsTable`, the Documents accordion (documents-ui.js), and the probe + Playwright guard. **Root-cause bug found & fixed during verification:** a backslash-escaped double-quote inside a tool-schema description (in the `SCHEMA_SQL` **template literal**) evaluated to an *unescaped* quote → malformed `tools` JSON → `json_group_array(json(schema)) FROM tools` threw `malformed JSON` → **the entire agent cascade broke** (this also regressed T27, which was previously green). Reworded the description to avoid the escaping hazard. **Lesson:** JSON embedded in a JS template literal must not rely on `\"` — the backslash is consumed by the template-literal parser, so use `\\"` or (better) avoid embedded quotes entirely. AGY review (Gemini 3.6 Flash High) verdict **SHIP** + 3 minor resilience fixes applied (search_web per-result isolation, fetch_url whitespace-title fallback, Documents UI re-boot guard). Full suite **22/22 green**.
 
----
+ ---
 
 ### Ticket 17: Human-in-the-Loop Approval Queue (`tool_approvals`)
 * **Label:** `wayfinder:prototype` (HITL)
