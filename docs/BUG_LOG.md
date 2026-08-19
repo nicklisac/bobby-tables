@@ -150,6 +150,17 @@ This document tracks known issues, edge cases, and improvements to be addressed 
 
 ---
 
+### BUG-017: Reopening the App Always Lands on the Default Chat, Not the Last-Used Session
+- **Status**: **Closed** (fixed & verified 2026-08-19; regression guard `tests/specs/bug-017-active-session-restore.spec.mjs`)
+- **Reported**: User feedback — "When the app reopens it always takes us to the default chat instead of the most recently used one."
+- **Component**: `src/main.js` (`bootAgent` active-session restore)
+- **Description**: After a reload/reopen, the chat pane always showed the `default` session, even when the user's last action was switching to (or creating) another session — including a freshly created session with no messages yet.
+- **Root Cause**: The global state the feature needs **already existed**: `session_context.active_session_id` (the key/value "global vars" table), written by `setActiveSession()` on every session switch (`sessions-ui.js`) and on every session create — before any message is sent. The defect was purely in boot: `bootAgent()` hardcoded `activeSessionId = 'default'` and called `setActiveSession(…, 'default')`, clobbering the persisted pointer on every reopen.
+- **Resolution**: Boot now restores the pointer from `session_context.active_session_id` and verifies the session still exists. Fallback when the stored id is stale (session deleted out from under the app via direct SQL / cartridge — the UI delete path already resets the pointer itself): the most recent session in list-view order (`v_session_summary`: `updated_at DESC, created_at DESC`), else `default`. No new table was needed; the restore is wrapped in try/catch and degrades to `default` non-fatally.
+- **Verification**: `tests/specs/bug-017-active-session-restore.spec.mjs` (2 tests): (1) session created via the real UI with **no chat** → reload → that session is the single `.active` item and the pointer agrees; (2) stored session deleted via direct SQL (stale id) → reload → lands on the most recent session in list-view order (not `default`) and the pointer is rewritten to it.
+
+---
+
 ### Numbering note (BUG-010 / 011 / 012)
 BUG-010, BUG-011, and BUG-012 are the **Ticket 26 debugging-session bugs** (per-boot `DROP`+`RENAME` session migration; double-boot VFS corruption; the no-op commit that writes zero pages to IDB). They are tracked in `docs/archive/RETROSPECTIVE_TICKET_26.md` and `docs/TRANSACTION_RULES.md` (§5, §6) and referenced by the `persistence` / `boot-idempotency` / `vfs-contract` specs. Their `BUG_LOG.md` entries were drafted during the `sql-refactor` re-scope but stashed (see retrospective §5) and not merged, so this log jumps from BUG-009 to BUG-013. New entries continue from BUG-013 to avoid colliding with the reserved numbers.
 

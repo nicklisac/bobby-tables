@@ -263,8 +263,32 @@ async function bootAgent() {
     // Start event stream listener
     startEventStreamListener();
 
-    // Set active session
+    // Restore the active session (BUG-017): the persisted global state
+    // (session_context.active_session_id — written by setActiveSession on
+    // every switch/create, even before the session has any messages) so a
+    // reopen lands on the last-used chat instead of always 'default'.
+    // Fallback: the most recent session in list-view order (v_session_summary:
+    // updated_at DESC, created_at DESC) when the stored id no longer exists
+    // (deleted out from under the app via direct SQL / cartridge), else
+    // 'default'.
     activeSessionId = 'default';
+    try {
+      const stored = await queryAll(agent.sqlite3, agent.db,
+        `SELECT value FROM session_context WHERE key = 'active_session_id'`);
+      const storedId = stored.length ? stored[0][0] : null;
+      if (storedId && storedId !== 'default') {
+        const exists = await queryAll(agent.sqlite3, agent.db,
+          `SELECT 1 FROM sessions WHERE id = ?`, [storedId]);
+        if (exists.length) {
+          activeSessionId = storedId;
+        } else {
+          const recent = await listSessions(agent.sqlite3, agent.db);
+          if (recent.length) activeSessionId = recent[0].id;
+        }
+      }
+    } catch (e) {
+      console.warn('[main] active-session restore failed (non-fatal):', e);
+    }
     await setActiveSession(agent.sqlite3, agent.db, activeSessionId);
 
     // T3: clear any suppression flags left stuck at '1' by a crashed/reloaded
