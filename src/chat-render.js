@@ -453,17 +453,27 @@ function renderApprovalWidget({ approvalId, sql, status, decidedAt }) {
   const label = decided
     ? (status === 'approved' ? 'Write Approved' : 'Write Rejected')
     : 'Approval Required';
+  // BUG-018: pre-compacted — the full SQL used to render expanded and was a
+  // "bear on the screen". Now the same <details> pattern as the BUG-009
+  // tool-call chip: one-line summary (label + collapsed SQL + timestamp),
+  // expandable to the full SQL. The [Approve]/[Reject] buttons stay OUTSIDE
+  // the <details> so the live decision path never requires an expand click.
+  const flatSql = (sql || '').replace(/\s+/g, ' ').trim();
   div.innerHTML = `
-    <div class="message-label">${ICONS.shield({ size: 12 })} <span>${label}</span></div>
-    <div class="approval-sql"><code>${escapeHtml(sql || '')}</code></div>
-    ${decided
-      ? `<div class="approval-decided ${status}">${status === 'approved'
-            ? `${ICONS.check({ size: 12 })} <span>Approved</span>`
-            : `${ICONS.alertTriangle({ size: 12 })} <span>Rejected</span>`}${decidedAt ? ` <span class="approval-time">· ${escapeHtml(String(decidedAt))}</span>` : ''}</div>`
-      : `<div class="approval-actions">
-           <button type="button" class="approval-btn approve" data-approval-id="${approvalId}">${ICONS.check({ size: 12 })} <span>Approve</span></button>
-           <button type="button" class="approval-btn reject" data-approval-id="${approvalId}">${ICONS.alertTriangle({ size: 12 })} <span>Reject</span></button>
-         </div>`}
+    <details class="approval-details">
+      <summary>
+        <span class="approval-chevron">▸</span>
+        <span class="approval-icon">${ICONS.shield({ size: 12 })}</span>
+        <span class="approval-name">${label}</span>
+        ${flatSql ? `<span class="approval-summary" title="${escapeHtml(flatSql)}">${escapeHtml(flatSql)}</span>` : ''}
+        ${decidedAt ? `<span class="approval-time">· ${escapeHtml(String(decidedAt))}</span>` : ''}
+      </summary>
+      <div class="approval-sql"><pre>${escapeHtml(sql || '')}</pre></div>
+    </details>
+    ${decided ? '' : `<div class="approval-actions">
+            <button type="button" class="approval-btn approve" data-approval-id="${approvalId}">${ICONS.check({ size: 12 })} <span>Approve</span></button>
+            <button type="button" class="approval-btn reject" data-approval-id="${approvalId}">${ICONS.alertTriangle({ size: 12 })} <span>Reject</span></button>
+          </div>`}
   `;
   return div;
 }
@@ -870,7 +880,7 @@ function handleAgentEvent(event) {
       // T17: the decision landed — flip the live widget to a static record.
       const widget = messagesEl.querySelector(`.approval-widget[data-approval-id="${event.approvalId}"]`);
       if (widget && !widget.dataset.decided) {
-        const sql = widget.querySelector('.approval-sql code')?.textContent || '';
+        const sql = widget.querySelector('.approval-sql pre')?.textContent || '';
         widget.replaceWith(renderApprovalWidget({
           approvalId: event.approvalId,
           sql,

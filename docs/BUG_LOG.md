@@ -161,6 +161,22 @@ This document tracks known issues, edge cases, and improvements to be addressed 
 
 ---
 
+### BUG-018: Approval Notice Is a Screen Bear + Tool-Call Chip Has Phantom Whitespace
+- **Status**: **Closed** (fixed & verified 2026-08-19; regression guard `tests/specs/bug-018-approval-compact.spec.mjs`)
+- **Reported**: User feedback — "Much like the tool call, we need our approval notice to be precompacted and then expandable. Right now it is a bear on the screen. Also… extra whitespace above and below the new tool call entry."
+- **Component**: `src/chat-render.js` (`renderApprovalWidget`, `approval_decided` handler), `src/styles.css` (T17 block, `.toolcall-only` / `.toolcall-chip`)
+- **Description**: Two chat-pane rendering defects:
+  1. **Approval notice expanded by default.** The T17 widget rendered label row + FULL SQL block + decision row inline — a long write SQL dominated the pane.
+  2. **Phantom whitespace around the BUG-009 chip.** The chip's markup template (leading/trailing newlines) was injected into a `.message` with `white-space: pre-wrap`, so the newlines rendered as full blank lines — measured 42px above AND below the chip (a 31px chip sat in a 115px message box), plus phantom lines inside the chip when expanded.
+- **Resolution**:
+  1. `renderApprovalWidget` now uses the same `<details>` pattern as the tool-call chip: one-line summary (chevron + shield + label + whitespace-flattened one-line SQL + timestamp), expandable to the full SQL in a `<pre>`. The [Approve]/[Reject] buttons stay OUTSIDE the `<details>` so the live decision path never requires an expand click; the decided record keeps the timestamp and drops the buttons. The `approval_decided` live-flip handler now reads `.approval-sql pre` (was `code`).
+  2. `white-space: normal` on `.message.assistant.toolcall-only` and `.toolcall-chip` (the chip is markup, not text); `.toolcall-args pre` keeps its own `pre-wrap` for the arguments.
+  3. **Follow-up (same session):** in the decided state the timestamp was a shrinkable flex item with `min-width: auto`, so when the SQL summary took the width it wrapped at its spaces ("·" / "2026-08-19" / "15:03:21" — measured 3 lines, a 55px-tall summary row around a 1-line widget). `.approval-time` is now `flex-shrink: 0; white-space: nowrap` — the ellipsized `.approval-summary` absorbs the shrink instead.
+  - Also updated the T17 dev probe's read-back selectors (`docs/prototypes/ticket-17-approval-e2e-probe.mjs`: `.approval-name`, `.approval-sql pre`).
+- **Verification**: `tests/specs/bug-018-approval-compact.spec.mjs` (2 tests): (1) fake-LLM write turn → pending widget starts collapsed with the one-line SQL summary, Approve/Reject visible without expanding, opening grows the box by the SQL block, approving from the collapsed state flips it to a compact "Write Approved · <time>" record with no buttons; (2) seeded tool-call turn → the message box hugs the chip (≤2px) both closed and expanded (was 84px of phantom whitespace).
+
+---
+
 ### Numbering note (BUG-010 / 011 / 012)
 BUG-010, BUG-011, and BUG-012 are the **Ticket 26 debugging-session bugs** (per-boot `DROP`+`RENAME` session migration; double-boot VFS corruption; the no-op commit that writes zero pages to IDB). They are tracked in `docs/archive/RETROSPECTIVE_TICKET_26.md` and `docs/TRANSACTION_RULES.md` (§5, §6) and referenced by the `persistence` / `boot-idempotency` / `vfs-contract` specs. Their `BUG_LOG.md` entries were drafted during the `sql-refactor` re-scope but stashed (see retrospective §5) and not merged, so this log jumps from BUG-009 to BUG-013. New entries continue from BUG-013 to avoid colliding with the reserved numbers.
 

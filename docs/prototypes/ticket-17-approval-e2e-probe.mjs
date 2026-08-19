@@ -224,8 +224,8 @@ export async function runT17RerenderProbe() {
     results.widgets = widgets.map(w => ({
       decided: w.dataset.decided || null,
       hasButtons: !!w.querySelector('.approval-btn'),
-      label: w.querySelector('.message-label span')?.textContent || null,
-      sql: (w.querySelector('.approval-sql code')?.textContent || '').slice(0, 60),
+      label: w.querySelector('.approval-name')?.textContent || null,
+      sql: (w.querySelector('.approval-sql pre')?.textContent || '').slice(0, 60),
     }));
 
     // Cleanup: drop the probe session (cascades its approvals/messages) and

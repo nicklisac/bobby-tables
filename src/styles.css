@@ -1336,6 +1336,10 @@ header h1.app-title {
   box-shadow: none;
   padding: 0;
   max-width: 90%;
+  /* BUG-018: the chip is markup, not text — with the .message pre-wrap the
+     template's leading/trailing newlines render as full blank lines above
+     and below the chip (measured 42px each). normal collapses them. */
+  white-space: normal;
 }
 .toolcall-chip {
   background: var(--bg-surface);
@@ -1345,6 +1349,10 @@ header h1.app-title {
   padding: 0.35rem 0.6rem;
   font-family: var(--font-mono);
   font-size: 0.72rem;
+  /* BUG-018: same for the template newlines INSIDE the chip (between
+     <summary> and .toolcall-args when expanded); .toolcall-args pre keeps
+     its own pre-wrap for the arguments text. */
+  white-space: normal;
 }
 .toolcall-chip + .toolcall-chip {
   margin-top: 0.35rem;
@@ -1418,20 +1426,62 @@ header h1.app-title {
   border-left-color: var(--red);
 }
 
-.approval-sql code {
-  display: block;
+/* BUG-018: pre-compacted approval — one-line summary row (label + collapsed
+   SQL + timestamp), expandable to the full SQL. Same <details> pattern as the
+   BUG-009 tool-call chip. The [Approve]/[Reject] buttons stay outside the
+   <details> so the live decision path never requires an expand click. */
+.approval-details {
+  white-space: normal;
+}
+.approval-details summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  list-style: none;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  user-select: none;
+}
+.approval-details summary::-webkit-details-marker { display: none; }
+.approval-chevron {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  flex-shrink: 0;
+}
+.approval-details[open] .approval-chevron { transform: rotate(90deg); }
+.approval-icon { display: inline-flex; flex-shrink: 0; color: var(--yellow); }
+.approval-widget.decided .approval-icon { color: var(--green); }
+.approval-widget.decided[data-decided="rejected"] .approval-icon { color: var(--red); }
+.approval-name { font-weight: 600; flex-shrink: 0; }
+.approval-widget.decided .approval-name { color: var(--green); }
+.approval-widget.decided[data-decided="rejected"] .approval-name { color: var(--red); }
+.approval-summary {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.approval-sql {
+  margin-top: 0.4rem;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 0.4rem 0.5rem;
+}
+.approval-sql pre {
+  margin: 0;
   font-family: var(--font-mono);
   font-size: 0.68rem;
   color: var(--text-primary);
-  background: var(--bg-base);
-  padding: 0.3rem 0.5rem;
-  border-radius: 4px;
-  border: 1px solid var(--border-subtle);
-  overflow-x: auto;
-  overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-all;
-  max-height: 120px;
+  max-height: 240px;
+  overflow: auto;
 }
 
 .approval-actions {
@@ -1480,21 +1530,15 @@ header h1.app-title {
   cursor: default;
 }
 
-.approval-decided {
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  font-weight: 600;
-}
-
-.approval-decided.approved { color: var(--green); }
-.approval-decided.rejected { color: var(--red); }
-
 .approval-time {
   color: var(--text-muted);
   font-weight: 400;
+  /* BUG-018 follow-up: as a shrinkable flex item with min-width:auto the
+     timestamp wrapped at its spaces ("·" / "2026-08-19" / "15:03:21" —
+     measured 3 lines, 55px tall summary row) whenever the SQL summary took
+     the width. Never wrap; the ellipsized .approval-summary absorbs shrink. */
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 /* Tool & Scratchpad Result Messages */
@@ -1513,8 +1557,7 @@ header h1.app-title {
 }
 
 .message.tool .message-label,
-.message.tool_result .message-label,
-.approval-widget .message-label {
+.message.tool_result .message-label {
   font-family: var(--font-mono);
   font-size: 0.62rem;
   font-weight: 600;
