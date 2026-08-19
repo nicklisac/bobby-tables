@@ -51,7 +51,7 @@ test.describe('T26.5 sub1 — explorer catalog via v_schema_catalog', () => {
       '#table-list .explorer-section .explorer-section-title',
       (els) => els.map((e) => e.textContent.trim()),
     );
-    expect(titles).toEqual(['User Tables', 'Views', 'System Views', 'Internal System Tables']);
+    expect(titles).toEqual(['User Tables', 'User Views', 'System Tables', 'System Views']);
 
     const sysViewNames = await page.$$eval(
       '.section-system-view .explorer-item-name',

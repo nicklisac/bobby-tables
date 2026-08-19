@@ -123,16 +123,16 @@ export async function renderExplorer() {
     container.appendChild(userSection);
 
     // Section 2: SQL Views (user views)
-    const viewsSection = createSectionElement('Views', catalog.views, 'view', true);
+    const viewsSection = createSectionElement('User Views', catalog.views, 'view', true);
     container.appendChild(viewsSection);
 
-    // Section 3: System Views (the app's own views — no user-view treatment)
+    // Section 3: System / Internal Tables
+    const systemSection = createSectionElement('System Tables', catalog.systemTables, 'system', false);
+    container.appendChild(systemSection);
+
+    // Section 4: System Views (the app's own views — no user-view treatment)
     const systemViewsSection = createSectionElement('System Views', catalog.systemViews || [], 'system-view', false);
     container.appendChild(systemViewsSection);
-
-    // Section 4: System / Internal Tables
-    const systemSection = createSectionElement('Internal System Tables', catalog.systemTables, 'system', false);
-    container.appendChild(systemSection);
 
     // Re-apply filter if user had typed in search
     if (currentFilterText) filterExplorerItems();
@@ -180,7 +180,7 @@ function createSectionElement(title, items, categoryType, defaultExpanded = true
   if (!items.length) {
     const empty = document.createElement('div');
     empty.className = 'explorer-empty-msg';
-    empty.textContent = categoryType === 'view' ? 'No views created' : (categoryType === 'table' ? 'No user tables' : 'None');
+    empty.textContent = categoryType === 'view' ? 'No user views created' : (categoryType === 'table' ? 'No user tables' : 'None');
     list.appendChild(empty);
   } else {
     items.forEach(item => {
