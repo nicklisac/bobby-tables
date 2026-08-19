@@ -18,7 +18,7 @@ import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_INSERT, 
 import { SQLITE_ROW } from './utils.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
-import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, migrateDashboardCardsTable, queryAll, isProtectedTable, isInternalTable, logDDL, sweepCaptureTriggers, extractTargetTables } from './schema.js';
+import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, migrateDashboardCardsTable, queryAll, isInternalTable, isProtectedObject, logDDL, sweepCaptureTriggers, extractTargetTables } from './schema.js';
 import { runCompaction, queryActiveContextJson } from './compaction.js';
 import { materializeToolResult } from './materialize.js';
 
@@ -863,13 +863,15 @@ export async function bootSqliteAgent(config = {}) {
         const isDDL = firstWord === 'CREATE' || firstWord === 'DROP' || firstWord === 'ALTER';
 
         if (!isReadOnly) {
-          // T21: Protected-tables boundary check on write targets
+          // T21: Protected-objects boundary check on write targets — internal
+          // tables AND app system views (isProtectedObject), so the agent can't
+          // DROP/CREATE/ALTER or DML on objects the app owns.
           const targets = extractTargetTables(sql);
           for (const target of targets) {
-            if (isProtectedTable(target.name)) {
+            if (isProtectedObject(target.name)) {
               if (target.operation === 'ddl') {
                 const res = {
-                  error: `Operation rejected: Cannot execute DDL (${target.verb}) on protected table '${target.name}'.`,
+                  error: `Operation rejected: Cannot execute DDL (${target.verb}) on protected object '${target.name}'.`,
                 };
                 agentEventStream.emit('tool_result', { tool: 'execute_sql', query: sql, error: res.error, result: res });
                 sqlite3.result_text(context, JSON.stringify(res));
@@ -879,7 +881,7 @@ export async function bootSqliteAgent(config = {}) {
                 // Option A: Only allow system_config modifications
                 if (target.name.toLowerCase() !== 'system_config') {
                   const res = {
-                    error: `Operation rejected: Cannot modify protected system table '${target.name}'.`,
+                    error: `Operation rejected: Cannot modify protected object '${target.name}'.`,
                   };
                   agentEventStream.emit('tool_result', { tool: 'execute_sql', query: sql, error: res.error, result: res });
                   sqlite3.result_text(context, JSON.stringify(res));

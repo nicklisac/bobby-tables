@@ -961,6 +961,18 @@ export function isInternalTable(name) {
 }
 
 /**
+ * True if `name` is a protected object the app owns: an internal/protected
+ * table (isProtectedTable) OR one of the app's own system views
+ * (isSystemView). The SQL-execution boundary guards (run_dynamic_sql in
+ * harness.js and the scratchpad write gate in scratchpad.js) use this to
+ * reject DDL/DML on app-owned objects whether the caller is the agent or the
+ * direct console.
+ */
+export function isProtectedObject(name) {
+  return isProtectedTable(name) || isSystemView(name);
+}
+
+/**
  * Extract target table names and operation types from a SQL query string.
  * Supports INSERT, REPLACE, UPDATE, DELETE, CREATE, DROP, ALTER, and WITH statements.
  *
@@ -979,8 +991,8 @@ export function extractTargetTables(sql) {
     const s = stmt.trim();
     if (!s) continue;
 
-    // DDL: CREATE TABLE / VIEW / INDEX
-    let m = s.match(new RegExp(`^CREATE\\s+(?:TEMP(?:ORARY)?\\s+)?(?:UNIQUE\\s+)?(?:TABLE|VIEW|INDEX)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${schemaIdentPattern}`, 'i'));
+    // DDL: CREATE [OR REPLACE] TABLE / VIEW / INDEX
+    let m = s.match(new RegExp(`^CREATE\\s+(?:OR\\s+REPLACE\\s+)?(?:TEMP(?:ORARY)?\\s+)?(?:UNIQUE\\s+)?(?:TABLE|VIEW|INDEX)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${schemaIdentPattern}`, 'i'));
     if (m) {
       targets.push({ name: unquoteIdentifier(m[1]), operation: 'ddl', verb: 'CREATE' });
       continue;

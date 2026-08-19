@@ -28,7 +28,7 @@
 
 import {
   setSuppressCascade, setCurrentTurnId, evictChangesets,
-  logDDL, sweepCaptureTriggers, extractTargetTables, isProtectedTable,
+  logDDL, sweepCaptureTriggers, extractTargetTables, isProtectedObject,
 } from './schema.js';
 import {
   queryAll, quoteIdent, unquoteIdent, execSqlRaw, SQLITE_ROW, SQLITE_DONE,
@@ -90,21 +90,22 @@ export function parseScratchpad(text) {
  *               own errors surface in the result bubble (e.g. VACUUM cannot
  *               run inside the scratchpad savepoint).
  */
-function classifyStatement(sql) {
+export function classifyStatement(sql) {
   const t = sql.trim().replace(/;+\s*$/, '').trim();
   const first = (t.split(/\s+/)[0] || '').toUpperCase();
   if (['BEGIN', 'COMMIT', 'ROLLBACK', 'SAVEPOINT', 'RELEASE', 'END'].includes(first)) {
     return { kind: 'forbidden', reason: `Transaction-control statements (${first}) cannot run inside the scratchpad savepoint.` };
   }
 
-  // T21: Protected-tables boundary check on scratchpad queries
+  // T21: Protected-objects boundary check on scratchpad queries — internal
+  // tables AND app system views (isProtectedObject).
   const targets = extractTargetTables(sql);
   for (const target of targets) {
-    if (isProtectedTable(target.name)) {
+    if (isProtectedObject(target.name)) {
       if (target.operation === 'ddl') {
         return {
           kind: 'forbidden',
-          reason: `Operation rejected: Cannot execute DDL (${target.verb}) on protected table "${target.name}".`,
+          reason: `Operation rejected: Cannot execute DDL (${target.verb}) on protected object "${target.name}".`,
         };
       }
       if (target.operation === 'dml') {
@@ -112,7 +113,7 @@ function classifyStatement(sql) {
         if (target.name.toLowerCase() !== 'system_config') {
           return {
             kind: 'forbidden',
-            reason: `Operation rejected: Direct modification of protected system table "${target.name}" is not permitted.`,
+            reason: `Operation rejected: Direct modification of protected object "${target.name}" is not permitted.`,
           };
         }
       }
