@@ -18,9 +18,10 @@ import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_INSERT, 
 import { SQLITE_ROW } from './utils.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
-import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, migrateDashboardCardsTable, queryAll, isInternalTable, isProtectedObject, logDDL, sweepCaptureTriggers, extractTargetTables } from './schema.js';
+import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, migrateDashboardCardsTable, migrateDocumentsTable, queryAll, isInternalTable, isProtectedObject, logDDL, sweepCaptureTriggers, extractTargetTables } from './schema.js';
 import { runCompaction, queryActiveContextJson } from './compaction.js';
 import { materializeToolResult } from './materialize.js';
+import { upsertDocument, searchDocuments } from './documents.js';
 
 /**
  * Live Event Stream for real-time UI streaming (tokens, tool execution, ReAct steps).
@@ -1128,6 +1129,26 @@ export async function bootSqliteAgent(config = {}) {
           results.unshift({ title: data.Heading || query, url: data.AbstractURL, snippet: data.AbstractText.slice(0, 300) });
         }
         const payload = { query, results: results.slice(0, 10) };
+
+        // T16: auto-ingest — one corpus document per result (the derived
+        // index is app state; a corpus failure must not break the tool
+        // result, and a rolled-back turn rolls this back with it).
+        for (const r of payload.results) {
+          // Per-result isolation: one bad snippet must not abort the batch.
+          if (r && r.url && r.snippet && r.snippet.trim()) {
+            try {
+              await upsertDocument(sqlite3, db, {
+                source: 'web-search',
+                sourceRef: r.url,
+                title: (r.title && r.title.trim()) || r.url,
+                content: r.snippet,
+              });
+            } catch (e) {
+              console.warn('[search_web] T16 auto-ingest skipped a result (non-fatal):', e.message);
+            }
+          }
+        }
+
         agentEventStream.emit('tool_result', {
           tool: 'search_web',
           query,
@@ -1228,6 +1249,24 @@ export async function bootSqliteAgent(config = {}) {
 
         const text = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8000);
         const payload = { url, status: respStatus, title: html.match(/<title>(.*?)<\/title>/i)?.[1] || '(no title)', content: text, truncated: html.length > 8000 };
+
+        // T16: auto-ingest — the fetched page becomes a corpus document
+        // (upsert on URL: re-fetching refreshes it). Non-fatal by design.
+        try {
+          if (text) {
+            await upsertDocument(sqlite3, db, {
+              source: 'web-fetch',
+              sourceRef: url,
+              // A whitespace-only <title> would fail upsertDocument's
+              // non-empty check; fall back to the URL.
+              title: (payload.title && payload.title.trim()) || url,
+              content: text,
+            });
+          }
+        } catch (e) {
+          console.warn('[fetch_url] T16 auto-ingest failed (non-fatal):', e.message);
+        }
+
         agentEventStream.emit('tool_result', {
           tool: 'fetch_url',
           url,
@@ -1279,6 +1318,73 @@ export async function bootSqliteAgent(config = {}) {
     }
   );
 
+  // 8c. Register async UDF: search_documents (T16: FTS5 BM25 keyword search)
+  await sqlite3.create_function(
+    db, 'search_documents', -1, SQLITE_UTF8, null,
+    async (context, args) => {
+      const query = args.length > 0 ? sqlite3.value_text(args[0]) : null;
+      const limit = args.length > 1 ? sqlite3.value_text(args[1]) : null;
+      agentEventStream.emit('tool_call', {
+        name: 'search_documents',
+        arguments: { query, limit: limit || undefined },
+      });
+      try {
+        if (!query || !query.trim()) {
+          const res = { error: 'Empty search query' };
+          agentEventStream.emit('tool_result', { tool: 'search_documents', query, error: res.error, result: res });
+          sqlite3.result_text(context, JSON.stringify(res));
+          return;
+        }
+        const results = await searchDocuments(sqlite3, db, query.trim(), limit);
+        const res = { query: query.trim(), count: results.length, results };
+        agentEventStream.emit('tool_result', { tool: 'search_documents', query, result: res });
+        sqlite3.result_text(context, JSON.stringify(res));
+      } catch (e) {
+        console.error('[search_documents]', e);
+        const res = { error: `Full-text search failed: ${e.message}` };
+        agentEventStream.emit('tool_result', { tool: 'search_documents', query, error: res.error, result: res });
+        sqlite3.result_text(context, JSON.stringify(res));
+      }
+    }
+  );
+
+  // 8d. Register async UDF: ingest_document (T16: explicit corpus ingestion)
+  await sqlite3.create_function(
+    db, 'ingest_document', -1, SQLITE_UTF8, null,
+    async (context, args) => {
+      const title = args.length > 0 ? sqlite3.value_text(args[0]) : null;
+      const content = args.length > 1 ? sqlite3.value_text(args[1]) : null;
+      const source = args.length > 2 ? sqlite3.value_text(args[2]) : null;
+      const sourceRef = args.length > 3 ? sqlite3.value_text(args[3]) : null;
+      agentEventStream.emit('tool_call', {
+        name: 'ingest_document',
+        arguments: { title, source: source || undefined, source_ref: sourceRef || undefined },
+      });
+      try {
+        const out = await upsertDocument(sqlite3, db, {
+          source,
+          sourceRef,
+          title,
+          content,
+        });
+        const res = {
+          ingested: true,
+          id: out.id,
+          updated: out.updated,
+          source: (source && source.trim()) || 'user',
+          source_ref: (sourceRef && sourceRef.trim()) || null,
+        };
+        agentEventStream.emit('tool_result', { tool: 'ingest_document', title, result: res });
+        sqlite3.result_text(context, JSON.stringify(res));
+      } catch (e) {
+        console.error('[ingest_document]', e);
+        const res = { error: e.message };
+        agentEventStream.emit('tool_result', { tool: 'ingest_document', title, error: res.error, result: res });
+        sqlite3.result_text(context, JSON.stringify(res));
+      }
+    }
+  );
+
   // 9. T9 migration: add messages.in_context BEFORE SCHEMA_SQL — the T9
   // agent_think trigger references the column, and CREATE TRIGGER fails on a
   // missing column. (No-op on fresh brains: the table doesn't exist yet and
@@ -1287,6 +1393,16 @@ export async function bootSqliteAgent(config = {}) {
     await migrateMessagesTable(sqlite3, db);
   } catch (e) {
     console.warn('[harness] migrateMessagesTable failed (non-fatal):', e.message);
+  }
+
+  // 9a. T16 migration: a pre-existing USER table named `documents` with a
+  // different shape must be renamed before SCHEMA_SQL — the FTS5 sync
+  // triggers reference new.title/new.content and CREATE TRIGGER fails on a
+  // missing column.
+  try {
+    await migrateDocumentsTable(sqlite3, db);
+  } catch (e) {
+    console.warn('[harness] migrateDocumentsTable failed (non-fatal):', e.message);
   }
 
   // 9b. Initialize schema

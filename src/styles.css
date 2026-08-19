@@ -2702,3 +2702,183 @@ footer {
     color: var(--text-primary);
   }
 }
+
+/* =====================================================================
+   T16: Documents corpus pane (FTS5 full-text search)
+   ===================================================================== */
+
+.accordion-count {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0 0.4rem;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  vertical-align: middle;
+}
+
+.documents-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.35rem 0.5rem 0.5rem;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.document-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.32rem 0.45rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  transition: all 0.15s ease;
+}
+
+.document-item:hover {
+  background: var(--bg-elevated);
+  border-color: var(--border-hover);
+}
+
+.document-item-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.document-item-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.document-item-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.document-item-meta {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 0.1rem;
+}
+
+.document-source-badge {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.08rem 0.32rem;
+  border-radius: 3px;
+  border: 1px solid var(--border-default);
+  color: var(--text-muted);
+  background: var(--bg-base);
+  margin-top: 0.05rem;
+}
+
+.document-source-web-fetch {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.document-source-web-search {
+  color: var(--yellow);
+  border-color: var(--yellow);
+  background: var(--yellow-subtle);
+}
+
+.btn-document-delete {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.3rem;
+  height: 1.3rem;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.15s ease;
+}
+
+.document-item:hover .btn-document-delete {
+  opacity: 1;
+}
+
+.btn-document-delete:hover {
+  background: var(--red-subtle);
+  color: var(--red);
+}
+
+.document-add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.35rem 0.5rem 0;
+}
+
+.document-add-form.hidden {
+  display: none;
+}
+
+.document-add-form input[type="text"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.3rem 0.45rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  outline: none;
+}
+
+.document-add-form input[type="text"]:focus {
+  border-color: var(--accent);
+}
+
+.document-add-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 3.2rem;
+  padding: 0.3rem 0.45rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  outline: none;
+}
+
+.document-add-form textarea:focus {
+  border-color: var(--accent);
+}
+
+.document-add-actions {
+  display: flex;
+  gap: 0.3rem;
+}

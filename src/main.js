@@ -38,6 +38,8 @@ import {
   initScratchpad, parseScratchpad, runScratchpad, rewindToBeforeScratchpad,
 } from './scratchpad.js';
 import { initSessionsUi, populateSessionDropdown } from './sessions-ui.js';
+import { initDocumentsUi } from './documents-ui.js';
+import * as documentsLib from './documents.js';
 import { ICONS } from './icons.js';
 import './styles.css';
 
@@ -326,6 +328,14 @@ async function bootAgent() {
       await explorerUi.initExplorerUi(agent);
     } catch (e) {
       console.warn('[main] T8 explorer init failed (non-fatal):', e);
+    }
+
+    // T16: Documents corpus pane (FTS5 full-text search)
+    try {
+      window.__agent.documents = documentsLib;
+      await initDocumentsUi({ getAgent: () => agent });
+    } catch (e) {
+      console.warn('[main] T16 documents init failed (non-fatal):', e);
     }
 
     // T24: SQL Autocomplete & Bang-Mode Visual Morphing
