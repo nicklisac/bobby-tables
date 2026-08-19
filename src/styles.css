@@ -38,6 +38,8 @@ html[data-theme="dark"] {
   --purple-subtle:   rgba(168, 85, 247, 0.12);
   --purple-glow:     rgba(168, 85, 247, 0.28);
 
+  --blue:            #3b82f6;
+
   --green:           #10b981;
   --green-subtle:    rgba(16, 185, 129, 0.12);
 
@@ -81,6 +83,8 @@ html[data-theme="light"] {
   --purple:          #7e22ce;
   --purple-subtle:   rgba(126, 34, 206, 0.10);
   --purple-glow:     rgba(126, 34, 206, 0.20);
+
+  --blue:            #2563eb;
 
   --green:           #059669;
   --green-subtle:    rgba(5, 150, 105, 0.10);
@@ -756,8 +760,8 @@ header h1.app-title {
   align-items: center;
 }
 
-.section-view .explorer-section-icon,
-.section-system-view .explorer-section-icon { color: var(--purple); }
+.section-view .explorer-section-icon { color: var(--purple); }
+.section-system-view .explorer-section-icon { color: var(--blue); }
 .section-system .explorer-section-icon { color: var(--yellow); }
 
 .explorer-count-badge {
