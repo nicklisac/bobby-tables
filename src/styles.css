@@ -1325,6 +1325,71 @@ header h1.app-title {
   max-height: 120px;
 }
 
+/* BUG-009: collapsible tool-call chip (an assistant row that requested a tool) */
+.message.assistant.toolcall-only {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  max-width: 90%;
+}
+.toolcall-chip {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  padding: 0.35rem 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+.toolcall-chip + .toolcall-chip {
+  margin-top: 0.35rem;
+}
+.toolcall-chip summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  list-style: none;
+  color: var(--text-primary);
+  user-select: none;
+}
+.toolcall-chip summary::-webkit-details-marker { display: none; }
+.toolcall-chevron {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  flex-shrink: 0;
+}
+.toolcall-chip[open] .toolcall-chevron { transform: rotate(90deg); }
+.toolcall-icon { display: inline-flex; color: var(--accent); flex-shrink: 0; }
+.toolcall-name { font-weight: 600; color: var(--accent); flex-shrink: 0; }
+.toolcall-summary {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.toolcall-args {
+  margin-top: 0.4rem;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 0.4rem 0.5rem;
+}
+.toolcall-args pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+
 /* T17: Approval Widget (human-in-the-loop write approval) */
 .approval-widget {
   align-self: flex-start;

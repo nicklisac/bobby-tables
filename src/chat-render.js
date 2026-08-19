@@ -322,6 +322,72 @@ function renderToolContent(content, toolCallId = null, querySql = '') {
   return `<div class="tool-detail">${escapeHtml(String(parsed))}</div>`;
 }
 
+// ── BUG-009: Tool-call chip ─────────────────────────────────────────
+//
+// An assistant row that requested a tool has content = '' and tool_calls =
+// <JSON array>. renderMessages used to show it as '[empty]'. Instead render a
+// collapsible chip: the tool name (always visible) + a one-line summary,
+// expandable to the full arguments. The tool RESULT renders as its own row
+// below (role = 'tool'), so the turn reads user → [tool call] → [result] → answer.
+
+function parseToolCalls(raw) {
+  if (raw === null || raw === undefined || raw === '') return [];
+  let arr = raw;
+  if (typeof arr === 'string') {
+    try { arr = JSON.parse(arr); } catch { return []; }
+  }
+  return Array.isArray(arr) ? arr : [];
+}
+
+function toolCallIcon(name) {
+  switch (name) {
+    case 'execute_sql':     return ICONS.terminal({ size: 12 });
+    case 'search_web':      return ICONS.search({ size: 12 });
+    case 'fetch_url':       return ICONS.link({ size: 12 });
+    case 'materialize':     return ICONS.sparkles({ size: 12 });
+    case 'ingest_document': return ICONS.package({ size: 12 });
+    default:                return ICONS.terminal({ size: 12 });
+  }
+}
+
+// arguments arrives in two shapes (a JSON object or a JSON-encoded STRING —
+// both occur in the wild); normalize to a value for display + summary.
+function normalizeArgs(args) {
+  if (typeof args === 'string') {
+    try { return JSON.parse(args); } catch { return args; }
+  }
+  return args;
+}
+
+function toolCallSummary(name, args) {
+  const a = normalizeArgs(args);
+  if (a && typeof a === 'object') {
+    return a.query || a.url || a.table_name || a.title || a.content || '';
+  }
+  return a ? String(a) : '';
+}
+
+function renderToolCallChip(call) {
+  const name = call?.function?.name || 'tool';
+  const args = call?.function?.arguments;
+  const summary = toolCallSummary(name, args);
+  const normalized = normalizeArgs(args);
+  const argsDisplay = (normalized === undefined || normalized === null || normalized === '')
+    ? '(no arguments)'
+    : (typeof normalized === 'string' ? normalized : JSON.stringify(normalized, null, 2));
+  return `
+    <details class="toolcall-chip">
+      <summary>
+        <span class="toolcall-chevron">▸</span>
+        <span class="toolcall-icon">${toolCallIcon(name)}</span>
+        <span class="toolcall-name">${escapeHtml(name)}</span>
+        ${summary ? `<span class="toolcall-summary" title="${escapeHtml(summary)}">${escapeHtml(summary)}</span>` : ''}
+      </summary>
+      <div class="toolcall-args"><pre>${escapeHtml(argsDisplay)}</pre></div>
+    </details>
+  `;
+}
+
 // ── T9: Scratchpad Rendering ────────────────────────────────────────
 //
 // Scratchpad result rows are assistant rows whose content is a JSON envelope:
@@ -532,7 +598,7 @@ async function renderMessages() {
     // turn consumes DISTINCT approval rows instead of re-matching the first.
     let currentTurnId = null;
     let consumedApprovalIdx = new Set();
-    rows.forEach(([id, role, content, , toolCallId, createdAt]) => {
+    rows.forEach(([id, role, content, toolCalls, toolCallId, createdAt]) => {
       if (role === 'system') return;
       if (role === 'user' && !/^!/.test(String(content)) && id !== currentTurnId) {
         currentTurnId = id;
@@ -577,7 +643,25 @@ async function renderMessages() {
           contentDiv.innerHTML = renderScratchpadResult(env);
           div.appendChild(contentDiv);
         } else {
-          div.textContent = content || '[empty]';
+          // BUG-009: an assistant row that requested a tool has empty content +
+          // a tool_calls array. Show a collapsible chip (tool name + expandable
+          // args) instead of '[empty]'; the tool RESULT renders as its own row
+          // below. A row with both content and a call keeps the bubble + chip.
+          const calls = parseToolCalls(toolCalls);
+          const hasContent = content !== null && content !== undefined && String(content).trim() !== '';
+          if (calls.length > 0) {
+            if (!hasContent) div.classList.add('toolcall-only');
+            const chipDiv = document.createElement('div');
+            chipDiv.innerHTML = calls.map(renderToolCallChip).join('');
+            div.appendChild(chipDiv);
+            if (hasContent) {
+              const textDiv = document.createElement('div');
+              textDiv.textContent = content;
+              div.appendChild(textDiv);
+            }
+          } else {
+            div.textContent = content || '[empty]';
+          }
         }
       }
 
@@ -656,6 +740,46 @@ export { renderMessages, updateTokenUsage };
 
 // ── Event Stream Handling ───────────────────────────────────────────
 
+/**
+ * Strip the JSON envelope the system prompt forces the model to emit
+ * ({"content": ..., "tool_calls": ...}) from live-streaming text so the user
+ * sees the response, not the raw payload. The accumulated text is PARTIAL
+ * JSON, so this scans for the "content" key and unescapes its (possibly
+ * incomplete) string value instead of JSON.parse. Returns '' while the
+ * envelope's content value hasn't started (e.g. tool-call envelopes).
+ */
+function extractDisplayText(raw) {
+  if (raw === undefined || raw === null) return '';
+  const text = String(raw).trim().replace(/^```(?:json)?\s*/i, '');
+  if (!text.startsWith('{')) return String(raw);
+  const key = text.match(/"content"\s*:\s*"/);
+  if (!key) return '';
+  let i = key.index + key[0].length;
+  const simple = { n: '\n', t: '\t', r: '\r', '"': '"', '\\': '\\', '/': '/' };
+  let out = '';
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '\\') {
+      const next = text[i + 1];
+      if (next === undefined) break; // incomplete escape at stream edge
+      if (next === 'u') {
+        const hex = text.slice(i + 2, i + 6);
+        if (hex.length < 4) break;
+        out += String.fromCharCode(parseInt(hex, 16));
+        i += 6;
+      } else {
+        out += simple[next] !== undefined ? simple[next] : next;
+        i += 2;
+      }
+      continue;
+    }
+    if (ch === '"') break; // closing quote
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
 function handleAgentEvent(event) {
   if (!event || !event.type) return;
 
@@ -682,7 +806,8 @@ function handleAgentEvent(event) {
         messagesEl.appendChild(activeStreamingBubble);
       }
       activeStreamingBubble.classList.add('streaming');
-      activeStreamingBubble.textContent = event.accumulated !== undefined ? event.accumulated : event.token;
+      const raw = event.accumulated !== undefined ? event.accumulated : event.token;
+      activeStreamingBubble.textContent = extractDisplayText(raw);
       scrollChatToBottom();
       break;
     }
