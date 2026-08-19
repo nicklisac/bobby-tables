@@ -991,10 +991,11 @@ export async function bootSqliteAgent(config = {}) {
           const sessRows = await queryAll(sqlite3, db, `SELECT value FROM session_context WHERE key = 'active_session_id'`);
           const sessId = sessRows.length ? sessRows[0][0] : 'default';
           // The current turn's user row is the one that fired the cascade.
-          // (session_context.current_turn_id is stamped by the agent_turn_init
-          // trigger, but SQLite fires same-type triggers in REVERSE creation
-          // order, so agent_think — the cascade — runs first and that value is
-          // still the PREVIOUS turn's id here. Compute it directly instead.)
+          // T27 fixed the root cause (agent_turn_init is now created last, so
+          // it fires FIRST and session_context.current_turn_id holds the
+          // CURRENT turn's id here) — but we still compute it directly: it's
+          // correct by construction, independent of trigger firing order, and
+          // keeps T17 right even if that empirically-pinned order ever wobbles.
           // Exclude scratchpad rows (content starting with '!'): they suppress
           // the cascade and never fire the UDF, and chat-render tracks the turn
           // as the latest non-'!' user row — keep the two in agreement so the

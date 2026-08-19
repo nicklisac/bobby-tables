@@ -580,21 +580,7 @@ INSERT OR IGNORE INTO sample_data (id, name, category, value) VALUES
   (8, 'Gizmo R',   'Accessories',   8.99);
 
 -- =====================================================================
--- 6. TRIGGER 0: Turn Init (T3)
---    Fires on user-row insert, BEFORE agent_think (created first → fires
---    first). Stamps session_context.current_turn_id so capture triggers can
---    attribute every data change of the turn to it.
--- =====================================================================
-DROP TRIGGER IF EXISTS agent_turn_init;
-CREATE TRIGGER agent_turn_init
-AFTER INSERT ON messages
-WHEN NEW.role = 'user'
-BEGIN
-    UPDATE session_context SET value = CAST(NEW.id AS TEXT) WHERE key = 'current_turn_id';
-END;
-
--- =====================================================================
--- 7. TRIGGER 1: Thinking Phase (session-scoped)
+-- 6. Thinking Phase (session-scoped)
 --    Fires when user or tool message is inserted into the active session.
 --    Calls ask_llm with session-scoped context → inserts assistant response.
 --    T3: suppressed while session_context.suppress_cascade = '1' (the
@@ -639,7 +625,7 @@ BEGIN
 END;
 
 -- =====================================================================
--- 8. TRIGGER 2: Acting Phase (session-scoped)
+-- 7. Acting Phase (session-scoped)
 --    Fires when assistant message with tool_calls is inserted.
 --    Executes the tool → inserts tool result into same session.
 --    T3: suppressed while session_context.suppress_cascade = '1' — same gate
@@ -683,6 +669,28 @@ BEGIN
             ELSE json_object('error', 'Unknown tool: ' || json_extract(NEW.tool_calls, '$[0].function.name'))
         END,
         json_extract(NEW.tool_calls, '$[0].id');
+END;
+
+-- =====================================================================
+-- 8. Turn Init (T3) — created LAST on purpose (T27).
+--    SQLite fires same-type (AFTER INSERT ON messages) triggers in
+--    REVERSE creation order, so this trigger — created after the
+--    Thinking and Acting triggers — fires FIRST on a user-row insert:
+--    it stamps session_context.current_turn_id BEFORE the cascade runs,
+--    so the cap_* capture triggers attribute every data change of the
+--    turn to the CURRENT turn (not the previous one).
+--    The original "created first → fires first" assumption was backwards:
+--    the cascade ran first and current_turn_id stayed stale for the whole
+--    turn (off-by-one-turn changeset attribution; a session's first turn
+--    stamped 0 and was never rewindable). The T27 probe/spec
+--    (tests/specs/t27-trigger-order.spec.mjs) guards this ordering.
+-- =====================================================================
+DROP TRIGGER IF EXISTS agent_turn_init;
+CREATE TRIGGER agent_turn_init
+AFTER INSERT ON messages
+WHEN NEW.role = 'user'
+BEGIN
+    UPDATE session_context SET value = CAST(NEW.id AS TEXT) WHERE key = 'current_turn_id';
 END;
 `;
 

@@ -31,6 +31,13 @@ export async function runRewindUiProbe() {
     R.M = M;
 
     // Step 1: simulate a captured DML on turn M.
+    // The manual stamp below is DELIBERATE controlled setup: this probe tests
+    // the rewind MECHANISM (button → confirm → replay → marker → consume) in
+    // isolation, with a known turn id. It does NOT test that the stamp is
+    // correct during a real cascade — that end-to-end attribution is T27's
+    // territory (tests/specs/t27-trigger-order.spec.mjs). Caution: this very
+    // stamp is what let T27's bug (stale current_turn_id during the cascade)
+    // pass T3's verification unnoticed.
     await exec(`UPDATE session_context SET value = ? WHERE key = 'current_turn_id'`, [String(M)]);
     R.tpBefore = (await q(`SELECT COUNT(*) FROM test_products`))[0][0];
     await exec(`INSERT INTO test_products (name, price, quantity) VALUES ('Rewind UI Test', 1.0, 1)`);
