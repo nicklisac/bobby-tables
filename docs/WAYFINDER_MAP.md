@@ -62,7 +62,7 @@ A fresh session resumes from **this map alone** — destination, philosophy, and
 graph TD
     T1[Ticket 1: Session Management & Schema Refactor - DONE] --> T2[Ticket 2: Context Compaction - DONE]
     T2 --> T14[Ticket 14: Dynamic Skills Table]
-    T2 --> T23[Ticket 23: SQL-Native Context Metrics & Compaction Views]
+    T264 --> T23[Ticket 23: SQL-Native Compaction Budget View - re-scoped]
     T1 --> T3[Ticket 3: Rolling Rewind, Savepoints & Stop Button - DONE]
     T1 --> T9[Ticket 9: Direct SQL Scratchpad !SQL / !!SQL - DONE]
     T3 --> T9
@@ -369,16 +369,22 @@ graph TD
 
 ---
 
-### Ticket 23: SQL-Native Context Metrics & Compaction Views (`v_context_metrics` / `v_compaction_candidates`)
+### Ticket 23: SQL-Native Compaction Budget View (`v_compaction_candidates`)
 * **Label:** `wayfinder:task` (AFK)
-* **Status:** Open (Frontier)
-* **Question:** How should running token/character totals, turn boundaries, active context statistics, and compaction candidate watermarks be computed in pure relational SQL views using window functions (`SUM(LENGTH(content)) OVER (...)`), eliminating ad-hoc JavaScript calculations in `compaction.js` and `main.js`?
-* **Design notes (2026-08-15):**
-  * **Core Philosophy:** Push context calculations into SQLite views rather than running loops in JS.
-  * **Views to Create:**
-    * `v_context_metrics`: Scoped to the active session (`session_context.active_session_id`), computes running character lengths, token approximations (chars / 4), cumulative turn counts, and role indicators across `messages` using SQLite window functions.
-    * `v_compaction_candidates`: Computes safe pair-safe turn-boundary watermark candidates based on the configured effective context window (from `system_config`), 85% threshold, and tail retention formula directly in SQL.
-  * **Benefits:** Single query for JS compaction runner, instant UI token counters, and clean scalability for multi-session and subsession tabs.
+* **Status:** Open (Frontier) — **re-scoped 2026-08-18** (scope cut ~80% by T26.4 + T26.5)
+* **Question (re-scoped):** With `v_turn_boundaries` (T26.4) already providing the per-row + window token/turn metrics, and `planCompaction` / `estimateActiveContextTokens` (T26.5 sub2) already reading it, the remaining work is to push the **pure-arithmetic compaction budget** (effective window → 85% threshold → tail-keep budget → summary cap) into a `v_compaction_candidates` view and point the UI context-fill indicator at it — while the model→window heuristic stays in JS.
+* **Re-scope (2026-08-18):** the original premise ("eliminate ad-hoc JS token calculations in `compaction.js`/`main.js`") is ~80% done:
+  * ✅ **`v_context_metrics` is redundant — do NOT build it.** T26.4's `v_turn_boundaries` already computes, scoped to the active session (post-watermark, `in_context = 1`): `est_tokens` (chars÷4), `cum_tokens_head`, `cum_tokens_tail`, `total_tokens`, `is_turn_start`, `next/prev_turn_start_id`, `prev_id` — i.e. exactly the "running token/char totals + turn boundaries + role indicators" the ticket asked for.
+  * ✅ **Compaction cut-row selection is already SQL.** `planCompaction` (T26.5 sub2) picks the watermark in one query over `v_turn_boundaries` (largest id with `cum_tokens_tail >= keepBudget`) — the pair-safe JS walk is gone. `estimateActiveContextTokens` reads `SUM(est_tokens)` from the view.
+  * **Remaining (the ticket now):**
+    1. **`v_compaction_candidates`** — given the **resolved effective window**, emit the derived budgets in SQL: `threshold_tokens = window * 0.85`, `tail_budget` (the 60% ceiling), `summary_cap` (the 25% cap), plus the candidate watermark rows. The runner reads the chosen candidate instead of calling `tailBudget()` / `summaryCap()` in JS.
+    2. **UI context-fill indicator** — `main.js`'s status-bar `~Xk / Yk token threshold` reads `total_tokens` + the threshold from the view instead of re-deriving in JS.
+  * **Explicitly OUT of scope (not worth it):**
+    * A separate `v_context_metrics` view (redundant with `v_turn_boundaries`; fold any future extra field, e.g. a cumulative turn *count*, into `v_turn_boundaries`).
+    * SQL-ifying `lookupCloudWindow(model)` — the model-name→window-size resolution is a **JS heuristic lookup table**, not relational; it must stay in JS. The view takes the **resolved** window as input.
+  * **Open decision (how the resolved window reaches SQL):** `resolveContextWindow` (user override → `lookupCloudWindow` → 128000 fallback) is JS control flow. To keep the budget math in SQL, the resolved window must be available in SQL — either **pass it as a bound parameter** to a candidate query (leaning: no new write, no staleness) or **persist it to `system_config` at boot** and have the view read it.
+* **Original design notes (2026-08-15, superseded by the re-scope above):** proposed `v_context_metrics` (running char/token totals + turn counts via window functions) + `v_compaction_candidates` (pair-safe watermark candidates from the effective window, 85% threshold, tail-retention formula). Benefits: single query for the compaction runner, instant UI counters, multi-session scalability.
+* **Dependencies:** T26.4 (`v_turn_boundaries`) + T26.5 sub2 (compaction consumes it) — both DONE. Unblocked.
 
 ---
 
