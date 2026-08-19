@@ -855,6 +855,12 @@ export async function bootSqliteAgent(config = {}) {
 
         let { content, toolCalls, promptTokens, completionTokens } = result;
 
+        // T29 follow-up: LLM completions commonly carry trailing newlines. Trim
+        // the content at the source so the stored assistant row (and the chat
+        // bubble) has no leading/trailing whitespace. Preserves null/undefined
+        // for tool-call-only turns (no prose content).
+        if (typeof content === 'string') content = content.trim();
+
         // If the model returned JSON in content instead of using native tool_calls, parse it
         if (!toolCalls && content) {
           let parsed = null;

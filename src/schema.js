@@ -21,6 +21,7 @@ import {
   stripSqlLiterals as stripSqlCommentsAndStrings,
   execParams,
   queryAll,
+  queryValue,
 } from './utils.js';
 
 export {
@@ -1540,6 +1541,19 @@ export async function migrateMessagesTable(sqlite3, db) {
   if (!cols.has('rewound')) {
     console.warn('[schema] messages.rewound missing — adding (T3 chat rewind)');
     await execParams(sqlite3, db, `ALTER TABLE messages ADD COLUMN rewound INTEGER DEFAULT 0`);
+  }
+  // T29 follow-up: one-time cleanup — trim leading/trailing whitespace from
+  // pre-existing message content. New inserts are trimmed at their source in JS
+  // (user input in main.js, LLM completions in the ask_llm UDF); this catches
+  // rows written before that. Only rows that actually need trimming are touched,
+  // so this is a cheap no-op once the data is clean.
+  const ws = `char(9) || char(10) || char(13) || char(32)`;
+  const dirty = await queryValue(sqlite3, db,
+    `SELECT COUNT(*) FROM messages WHERE content IS NOT NULL AND content != trim(content, ${ws})`);
+  if (dirty > 0) {
+    console.warn(`[schema] trimming whitespace on ${dirty} pre-existing message(s)`);
+    await execParams(sqlite3, db,
+      `UPDATE messages SET content = trim(content, ${ws}) WHERE content IS NOT NULL AND content != trim(content, ${ws})`);
   }
 }
 

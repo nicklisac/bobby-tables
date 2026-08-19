@@ -103,6 +103,23 @@ test.describe('T29 — chat rendering & UI tidying', () => {
     expect((await scratch.first().textContent()).includes('!SELECT 1'), 'raw !SQL preserved').toBe(true);
   });
 
+  test('M3: leading/trailing whitespace in content renders no stray empty line', async ({ page }) => {
+    test.setTimeout(45_000);
+    await seedConfig(page, seedCfg);
+    await bootPage(page);
+    // Seeded straight via SQL (bypasses the JS input/LLM trim) so this
+    // exercises the renderMarkdown trim: marked emits a trailing newline after
+    // the last block, which would otherwise render as an empty line at the
+    // bottom of the bubble.
+    await seedMessages(page, [[991050, 'assistant', '\n\nhello there\n\n']]);
+    const bubble = page.locator('#messages .message.assistant').filter({ has: page.locator('.md') }).first();
+    await bubble.waitFor({ timeout: 15_000 });
+    const kids = await bubble.locator('.md').evaluate((el) =>
+      [...el.childNodes].map((n) => (n.nodeType === 3 ? 'text' : n.tagName)));
+    expect(kids, 'the .md block holds only the <p> — no whitespace text nodes').toEqual(['P']);
+    await expect(bubble.locator('.md p')).toHaveText('hello there');
+  });
+
   test('S1: search_web results are polished + query terms highlighted; long snippets clamp', async ({ page }) => {
     test.setTimeout(45_000);
     await seedConfig(page, seedCfg);
@@ -197,7 +214,7 @@ test.describe('T29 — chat rendering & UI tidying', () => {
     const before = widths['btn-toggle-config'];
     await cfg.hover();
     await expect(cfg.locator('.btn-label')).toHaveCSS('opacity', '1');
-    await page.waitForTimeout(250); // let the max-width transition settle
+    await page.waitForTimeout(400); // let the max-width transition settle (0.3s ease)
     const after = await cfg.evaluate((el) => Math.round(el.getBoundingClientRect().width));
     expect(after, `button widens on hover (${before} -> ${after})`).toBeGreaterThan(before + 10);
 

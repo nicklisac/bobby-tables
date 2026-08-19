@@ -1854,7 +1854,8 @@ a.search-result-title:hover { text-decoration: underline; text-underline-offset:
   overflow: hidden;
   margin: 0;
   white-space: nowrap;
-  transition: max-width 0.18s ease, opacity 0.14s ease;
+  /* ~60% of the original speed (0.18s/0.14s) on request — slower, smoother. */
+  transition: max-width 0.3s ease, opacity 0.23s ease;
 }
 #header-actions .btn-header:hover .btn-label,
 #header-actions .btn-header:focus-visible .btn-label {

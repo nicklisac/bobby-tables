@@ -38,9 +38,14 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   }
 });
 
-/** Parse markdown → sanitized HTML string (safe to innerHTML). */
+/**
+ * Parse markdown → sanitized HTML string (safe to innerHTML). `marked` emits a
+ * trailing newline after the last block; `.trim()` drops it so the `.md` block
+ * has no trailing text node (which would otherwise render as an empty line at
+ * the bottom of the bubble whenever the block's white-space is pre-wrap).
+ */
 function renderMarkdown(text) {
-  return DOMPurify.sanitize(marked.parse(String(text ?? '')));
+  return DOMPurify.sanitize(marked.parse(String(text ?? '')).trim());
 }
 
 function escapeRegex(s) {
