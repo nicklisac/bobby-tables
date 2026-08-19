@@ -76,7 +76,8 @@ graph TD
     T1 --> T13[Ticket 13: Tool-Output Materialization - DONE]
     T1 --> T14
     T1 --> T15[Ticket 15: Durable Semantic Memory]
-    T1 --> T17[Ticket 17: Human-in-the-Loop Approvals]
+    T1 --> T17[Ticket 17: Human-in-the-Loop Approvals - DONE]
+    T17 --> T27[Ticket 27: Trigger firing order — stale current_turn_id (bug)]
     T1 --> T18[Ticket 18: Self-Rendering Reactive Views]
     T1 --> T19[Ticket 19: Persona & Prompt Presets]
 
@@ -103,8 +104,9 @@ graph TD
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T21,T24,T25,T261,T262,T263,T264,T265 done;
-    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T26 frontier;
+    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T17,T21,T24,T25,T261,T262,T263,T264,T265 done;
+    class T14,T15,T16,T18,T19,T20,T22,T23,T26 frontier;
+    class T27 blocked;
 ```
 
 ---
@@ -312,7 +314,7 @@ graph TD
 
 ### Ticket 17: Human-in-the-Loop Approval Queue (`tool_approvals`)
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** 🟡 IN PROGRESS (claimed 2026-08-18, branch `t17-approval-queue`)
+* **Status:** ✅ COMPLETE (2026-08-18, branch `t17-approval-queue`)
 * **Question:** How should destructive tools and database write operations insert into a relational `tool_approvals` table with status `'pending'`, pausing the cascade until the user clicks an [Approve] or [Reject] button in the UI, replacing synchronous JS `window.confirm()` with pure-SQL state management?
 * **Design notes (2026-08-15):** 
   * Replaces the interim JS `window.confirm()` popup in `run_dynamic_sql` with a durable, auditable SQL table: `tool_approvals (id INTEGER PRIMARY KEY, turn_id INTEGER, session_id TEXT, tool_name TEXT, payload TEXT, status TEXT CHECK(status IN ('pending', 'approved', 'rejected')), created_at DATETIME)`.
@@ -332,6 +334,10 @@ graph TD
   * **Schema:** `tool_approvals (id INTEGER PRIMARY KEY, turn_id INTEGER, session_id TEXT, tool_name TEXT, payload TEXT, status TEXT CHECK(status IN ('pending','approved','rejected')), created_at DATETIME, decided_at DATETIME)` — added to `INTERNAL_TABLES` (T21); boot invariant covers it; cartridge export includes it automatically (VACUUM INTO).
   * **Decision path:** click → JS `UPDATE tool_approvals SET status=?, decided_at=? WHERE id=?` (classified nested by `udfDepth` → bypasses entryQueue) → resolves the UDF's promise → UDF resumes in the parked cascade.
   * **Verification plan:** (1) re-entry probe (go/no-go for A); (2) e2e probe — fake-LLM turn requesting a write → pending widget → **approve** (SQL executes in the same turn; tool row + approval row committed) / **reject** (D4 error row; agent adapts) / **Stop-while-pending** (D6 path) / reload re-render of decided widgets; (3) AGY review pass (quota checked OK 2026-08-18).
+* **Resolution (2026-08-18):** Built & verified per DESIGN LOCKED. Build units: `src/schema.js` (`tool_approvals` table `(id PK AUTOINCREMENT, turn_id, session_id REFERENCES sessions ON DELETE CASCADE, tool_name, payload, status CHECK IN ('pending','approved','rejected') DEFAULT 'pending', created_at, decided_at)` + `idx_tool_approvals_session`; added to `INTERNAL_TABLES` (T21 boundary — the agent can't write it, no capture triggers, never rewound); added to `deleteSession`'s cleanup list); `src/harness.js` (`pendingApprovals` Map (approvalId→resolve); `settleApproval()` = synchronous map take-out → `markApprovalDecided()` (an `UPDATE … WHERE id=? AND status='pending'`) → resolve → emit `approval_decided`; `requestStop()` resolves all pending as `'stopped'` WITHOUT a DB write; `run_dynamic_sql` replaces the interim `window.confirm()` with: insert a `'pending'` row INSIDE the turn savepoint → emit `approval_request` → `await` a promise (JSPI parks the cascade fiber on it) → on resume execute the SQL (approve) or return the D4 error (reject/stop); the `'stopped'` path records `'rejected'` on resume because the UDF is the cascade's writer and the row is still `'pending'`); **turn_id computed directly** — see the trigger-order bug below); `src/chat-render.js` (`renderApprovalWidget()`; `approval_request`/`approval_decided` event handlers; [Approve]/[Reject] click delegation → `settleApproval`; boot re-render matches `tool_approvals` to the transcript by turn_id + exact SQL payload, with the `consumed` set scoped per turn); `src/styles.css` (`.approval-widget` / `.approval-btn` / `.approval-decided`).
+  * **Verified:** re-entry probe ([ticket-17-reentry-probe.mjs](file:///home/nick/Documents/projects/web-sql-agent/docs/prototypes/ticket-17-reentry-probe.mjs)) **3/3 GO** (a re-entry `UPDATE` + `SELECT` mid-suspension complete; the outer query resumes; `integrity_check` ok). E2E probe ([ticket-17-approval-e2e-probe.mjs](file:///home/nick/Documents/projects/web-sql-agent/docs/prototypes/ticket-17-approval-e2e-probe.mjs)) **GO** — fake-LLM, 3 real cascades in a throwaway session: **APPROVE** (SQL executes in the same turn; tool row + approval row committed; data changed) / **REJECT** (D4 error row; data untouched) / **STOP-while-pending** (row recorded `'rejected'`; turn ends via the stop sentinel; completed work kept); `integrity_check` ok. Re-render probe (post-reload) **GO** — all 3 decided widgets render as static audit records at the correct transcript positions (no buttons, correct SQL + decided state + timestamp). Full Playwright suite **20/20**.
+  * **AGY review (2026-08-18, job `agy-1787108181-4125869`):** the JSPI suspension + in-place resume is sound, savepoint/transaction integrity is sound, and the race safety (double-click / Stop-vs-click / concurrent approvals) is robust via the synchronous map take-out + the `status='pending'` DB gate. **Three findings, all fixed + re-verified (E2E GO, re-render GO, 20/20):** (1) the turn_id query now excludes scratchpad rows (`content NOT LIKE '!%'`) so it stays in agreement with chat-render's turn tracking; (2) chat-render's `consumed` set was lifted to turn scope so repeated identical SQL across several assistant messages in one turn consumes DISTINCT approval rows (no double-render); (3) `settleApproval` re-arms the resolver if the DB write throws, so a UI retry isn't a silent no-op.
+  * **Pre-existing bug discovered during verification (NOT introduced by T17) — tracked as Ticket 27:** SQLite fires same-type triggers in **REVERSE creation order**. The schema creates `agent_turn_init` (stamps `session_context.current_turn_id`) BEFORE `agent_think` (the cascade) on the assumption "created first → fires first"; in reality `agent_think` fires first, so during the cascade `current_turn_id` still holds the **previous** turn's id. T17 works around it by computing the turn id directly in the UDF; the system-wide consequence (the `cap_*` capture triggers stamp `turn_changesets` with the previous turn's id → off-by-one-turn changeset attribution, likely affecting T3 rewind) is Ticket 27.
 
 ---
 
@@ -591,6 +597,24 @@ graph TD
   * Output-equality: for a seeded DB, each refactored subsystem returns the same data as before (no behavior change).
   * `npm run build` + 26.1 persistence test green.
 * **Rationale:** this is where the ticket's actual value ("push everything into SQLite") is delivered. 26.4 without 26.5 is dead code; 26.5 without 26.4 has nothing to consume. Doing it last, one subsystem at a time, keeps each step independently verifiable.
+
+---
+
+### Ticket 27: Trigger Firing Order — `current_turn_id` Is Stale During the Cascade (off-by-one-turn changeset attribution)
+* **Label:** `wayfinder:bug` (HITL)
+* **Status:** 🔴 OPEN (discovered during T17 verification, 2026-08-18)
+* **Depends on:** — (independent; affects T3 rewind + T17)
+* **Question:** SQLite fires same-type triggers in **REVERSE creation order**, so `agent_think` (the cascade) runs BEFORE `agent_turn_init` (the turn stamp). How do we make `session_context.current_turn_id` hold the CURRENT turn's user-row id *during* the cascade, so the `cap_*` capture triggers stamp `turn_changesets` with the correct turn?
+* **The bug (empirically confirmed 2026-08-18):** `schema.js` creates `agent_turn_init` (section 6) BEFORE `agent_think` (section 7) with the comment "created first → fires first". SQLite actually fires same-type (AFTER INSERT) triggers in **reverse** creation order (verified in-browser: a trigger created second fires first). So on a user-row INSERT, `agent_think` (the whole ReAct cascade, including tool UDFs and their data DML) runs BEFORE `agent_turn_init` stamps `current_turn_id`. Consequences:
+  * The `cap_*` capture triggers (which read `session_context.current_turn_id` at DML time) stamp `turn_changesets` with the **previous** turn's user-row id (or `0`/`''` on a session's first turn) — off-by-one-turn changeset attribution.
+  * T3 rewind (undoes a turn via its changesets) is likely targeting the wrong turn's changeset — **needs verification**.
+  * T17's approval rows would have carried the wrong `turn_id`; T17 works around it by computing `MAX(id) FROM messages WHERE session_id=? AND role='user' AND content NOT LIKE '!%'` directly in the UDF.
+* **Candidate fixes (to be decided):**
+  * **(A)** Recreate `agent_turn_init` AFTER `agent_think` (so it fires first). Requires a drop+recreate at boot (a migration for existing brains) and verification that nothing compensates for the current (buggy) order.
+  * **(B)** Stamp `current_turn_id` from JS at turn start (main.js, before the user-row INSERT) instead of a trigger — explicit, order-independent; must handle the T3 re-insert dance and the scratchpad's negative ids.
+  * **(C)** Have the `cap_*` capture triggers compute the turn id directly (latest non-scratchpad user row), mirroring T17's workaround.
+* **Acceptance:** a probe runs two consecutive turns each performing a data write and asserts each turn's `turn_changesets` rows carry THAT turn's user-row id (not the previous turn's); T3 rewind undoes the correct turn; T17's direct computation stays consistent.
+* **Note:** T17 ships with a local workaround (computing turn_id directly). This ticket fixes the root cause so every `current_turn_id` consumer (capture triggers, rewind) is correct.
 
 ---
 

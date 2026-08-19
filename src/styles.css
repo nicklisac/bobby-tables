@@ -1325,6 +1325,109 @@ header h1.app-title {
   max-height: 120px;
 }
 
+/* T17: Approval Widget (human-in-the-loop write approval) */
+.approval-widget {
+  align-self: flex-start;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-left: 3px solid var(--yellow);
+  border-radius: 4px;
+  padding: 0.45rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-width: 90%;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.approval-widget.decided {
+  border-left-color: var(--green);
+  opacity: 0.85;
+}
+
+.approval-widget.decided[data-decided="rejected"] {
+  border-left-color: var(--red);
+}
+
+.approval-sql code {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  overflow-x: auto;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 120px;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.approval-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.3rem 0.7rem;
+  border-radius: 4px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.12s ease-out, color 0.12s ease-out;
+}
+
+.approval-btn.approve {
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.approval-btn.approve:hover:not(:disabled) {
+  background: var(--green);
+  color: #fff;
+}
+
+.approval-btn.reject {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.approval-btn.reject:hover:not(:disabled) {
+  background: var(--red);
+  color: #fff;
+}
+
+.approval-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.approval-decided {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.approval-decided.approved { color: var(--green); }
+.approval-decided.rejected { color: var(--red); }
+
+.approval-time {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
 /* Tool & Scratchpad Result Messages */
 .message.tool,
 .message.tool_result {
@@ -1341,7 +1444,8 @@ header h1.app-title {
 }
 
 .message.tool .message-label,
-.message.tool_result .message-label {
+.message.tool_result .message-label,
+.approval-widget .message-label {
   font-family: var(--font-mono);
   font-size: 0.62rem;
   font-weight: 600;

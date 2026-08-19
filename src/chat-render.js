@@ -11,7 +11,7 @@
 
 import { escapeHtml, queryAll, SQLITE_ROW } from './utils.js';
 import { getRewindableScratchpadTurns, getSessionTokenUsage } from './schema.js';
-import { getEventStream } from './harness.js';
+import { getEventStream, settleApproval } from './harness.js';
 import { globalSchemaIndex } from './sql-autocomplete.js';
 import { renderExplorer, openCreateViewModal } from './explorer-ui.js';
 import { setBusy } from './grid-ui.js';
@@ -370,6 +370,38 @@ function renderScratchpadResult(env) {
   return html;
 }
 
+// ── T17: Approval Widget ────────────────────────────────────────────
+//
+// Human-in-the-loop approval for agent writes. The LIVE widget renders from
+// the 'approval_request' event (the cascade is parked on a JSPI suspension
+// inside run_dynamic_sql); [Approve]/[Reject] call settleApproval, which
+// records the row and resumes the parked UDF in place. After the decision —
+// and on boot re-render — the widget is a static audit record.
+
+function renderApprovalWidget({ approvalId, sql, status, decidedAt }) {
+  const decided = !!status && status !== 'pending';
+  const div = document.createElement('div');
+  div.className = `message approval-widget${decided ? ' decided' : ''}`;
+  div.dataset.approvalId = approvalId;
+  if (decided) div.dataset.decided = status;
+  const label = decided
+    ? (status === 'approved' ? 'Write Approved' : 'Write Rejected')
+    : 'Approval Required';
+  div.innerHTML = `
+    <div class="message-label">${ICONS.shield({ size: 12 })} <span>${label}</span></div>
+    <div class="approval-sql"><code>${escapeHtml(sql || '')}</code></div>
+    ${decided
+      ? `<div class="approval-decided ${status}">${status === 'approved'
+            ? `${ICONS.check({ size: 12 })} <span>Approved</span>`
+            : `${ICONS.alertTriangle({ size: 12 })} <span>Rejected</span>`}${decidedAt ? ` <span class="approval-time">· ${escapeHtml(String(decidedAt))}</span>` : ''}</div>`
+      : `<div class="approval-actions">
+           <button type="button" class="approval-btn approve" data-approval-id="${approvalId}">${ICONS.check({ size: 12 })} <span>Approve</span></button>
+           <button type="button" class="approval-btn reject" data-approval-id="${approvalId}">${ICONS.alertTriangle({ size: 12 })} <span>Reject</span></button>
+         </div>`}
+  `;
+  return div;
+}
+
 // ── Message Rendering ───────────────────────────────────────────────
 
 async function renderMessages() {
@@ -431,6 +463,36 @@ async function renderMessages() {
     console.warn('[main] compactions query failed (non-fatal):', e);
   }
 
+  // T17: approval records for this session — rendered as static audit widgets
+  // at the tool call's position (matched by turn_id + exact SQL payload).
+  const approvalsByTurn = new Map(); // turnId -> [ {approvalId, sql, status, decidedAt} ] (id order)
+  try {
+    for (const [apprId, turnId, payload, status, decidedAt] of await queryAll(agent.sqlite3, agent.db,
+      `SELECT id, turn_id, payload, status, decided_at FROM tool_approvals
+       WHERE session_id = ? ORDER BY id ASC`, [sessionId])) {
+      if (!approvalsByTurn.has(turnId)) approvalsByTurn.set(turnId, []);
+      approvalsByTurn.get(turnId).push({ approvalId: apprId, sql: payload, status, decidedAt });
+    }
+  } catch (e) {
+    console.warn('[chat-render] tool_approvals query failed (non-fatal):', e);
+  }
+
+  // T17: execute_sql calls per assistant message (from v_tool_call_queries) —
+  // the join key between the transcript and the approval rows.
+  const execSqlCallsByMessage = new Map(); // messageId -> [querySql, ...] (call order)
+  try {
+    for (const [msgId, q] of await queryAll(agent.sqlite3, agent.db,
+      `SELECT message_id, query_sql FROM v_tool_call_queries
+       WHERE session_id = ? AND tool_name = 'execute_sql'
+         AND query_sql IS NOT NULL AND query_sql <> ''
+       ORDER BY message_id ASC, call_index ASC`, [sessionId])) {
+      if (!execSqlCallsByMessage.has(msgId)) execSqlCallsByMessage.set(msgId, []);
+      execSqlCallsByMessage.get(msgId).push(q);
+    }
+  } catch (e) {
+    console.warn('[chat-render] execute_sql calls query failed (non-fatal):', e);
+  }
+
   messagesEl.innerHTML = '';
   const visibleRows = rows.filter(([id, role]) => role !== 'system');
   if (visibleRows.length === 0) {
@@ -461,8 +523,19 @@ async function renderMessages() {
     welcomeDiv.querySelector('.welcome-config-btn')?.addEventListener('click', () => ctx.onConfigClick());
     messagesEl.appendChild(welcomeDiv);
   } else {
+    // T17: turn tracking — a non-scratchpad user row starts an agent turn; its
+    // id is the turn_id stamped on that turn's approval rows by the UDF.
+    // consumedApprovalIdx is scoped to the CURRENT turn (reset on each new user
+    // row) so a repeated identical SQL across several assistant messages in one
+    // turn consumes DISTINCT approval rows instead of re-matching the first.
+    let currentTurnId = null;
+    let consumedApprovalIdx = new Set();
     rows.forEach(([id, role, content, , toolCallId, createdAt]) => {
       if (role === 'system') return;
+      if (role === 'user' && !/^!/.test(String(content)) && id !== currentTurnId) {
+        currentTurnId = id;
+        consumedApprovalIdx = new Set();
+      }
       const div = document.createElement('div');
       div.className = `message ${role}`;
       if (createdAt) {
@@ -528,6 +601,24 @@ async function renderMessages() {
       }
 
       messagesEl.appendChild(div);
+
+      // T17: static approval records at the tool call's position — the
+      // assistant bubble that requested the write matches its tool_approvals
+      // rows (turn_id + exact SQL payload). Ordered consumption handles a
+      // repeated identical SQL within one turn.
+      if (role === 'assistant' && currentTurnId !== null) {
+        const calls = execSqlCallsByMessage.get(id);
+        const turnApprovals = approvalsByTurn.get(currentTurnId);
+        if (calls && turnApprovals) {
+          for (const q of calls) {
+            const i = turnApprovals.findIndex((a, j) => !consumedApprovalIdx.has(j) && a.sql === q);
+            if (i !== -1) {
+              consumedApprovalIdx.add(i);
+              messagesEl.appendChild(renderApprovalWidget(turnApprovals[i]));
+            }
+          }
+        }
+      }
 
       // T2: compaction divider at the watermark position (the summarized prefix
       // ends here; the visible tail starts at the next message).
@@ -626,6 +717,40 @@ function handleAgentEvent(event) {
 
       statusBar.textContent = `Executing tool: ${event.name || 'tool'}…`;
       if (statusLed) statusLed.className = 'status-led led-busy';
+      break;
+    }
+
+    case 'approval_request': {
+      // T17: the agent requested a write — the cascade is parked on a JSPI
+      // suspension. Replace the tool indicator (the tool is WAITING, not
+      // executing) with the approval widget at the tool call's position.
+      if (activeToolIndicator) {
+        activeToolIndicator.remove();
+        activeToolIndicator = null;
+      }
+      messagesEl.appendChild(renderApprovalWidget({
+        approvalId: event.approvalId,
+        sql: event.sql,
+        status: 'pending',
+      }));
+      scrollChatToBottom();
+      statusBar.textContent = '⏸ Awaiting your approval…';
+      if (statusLed) statusLed.className = 'status-led led-busy';
+      break;
+    }
+
+    case 'approval_decided': {
+      // T17: the decision landed — flip the live widget to a static record.
+      const widget = messagesEl.querySelector(`.approval-widget[data-approval-id="${event.approvalId}"]`);
+      if (widget && !widget.dataset.decided) {
+        const sql = widget.querySelector('.approval-sql code')?.textContent || '';
+        widget.replaceWith(renderApprovalWidget({
+          approvalId: event.approvalId,
+          sql,
+          status: event.decision,
+          decidedAt: event.decidedAt,
+        }));
+      }
       break;
     }
 
@@ -749,6 +874,26 @@ function startEventStreamListener() {
     const sql = btn.dataset.sql;
     if (sql) {
       openCreateViewModal(sql);
+    }
+  });
+
+  // T17: approval widget [Approve]/[Reject] buttons. settleApproval takes the
+  // resolver out of the map synchronously (a racing double-click or Stop
+  // no-ops), records the row, and resumes the parked UDF.
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.approval-btn');
+    if (!btn) return;
+    const agent = ctx.getAgent();
+    if (!agent) return;
+    const approvalId = parseInt(btn.dataset.approvalId, 10);
+    const decision = btn.classList.contains('approve') ? 'approved' : 'rejected';
+    const widget = btn.closest('.approval-widget');
+    if (widget) widget.querySelectorAll('.approval-btn').forEach(b => { b.disabled = true; });
+    try {
+      await settleApproval(agent.sqlite3, agent.db, approvalId, decision);
+    } catch (err) {
+      console.error('[main] approval settle failed:', err);
+      if (widget) widget.querySelectorAll('.approval-btn').forEach(b => { b.disabled = false; });
     }
   });
 }

@@ -110,6 +110,15 @@ export function requestStop() {
   if (currentAbort) {
     try { currentAbort.abort(); } catch { /* already aborted */ }
   }
+  // T17: a pending approval can't be aborted by the fetch signal (no fetch is
+  // in flight — the UDF is parked on the approval promise). Resolve it as
+  // 'stopped': the UDF resumes, records the rejection, returns an error
+  // result, and the next ask_llm returns the stop sentinel (T3 graceful
+  // stop — completed work kept).
+  for (const [id, resolve] of Array.from(pendingApprovals)) {
+    pendingApprovals.delete(id);
+    resolve('stopped');
+  }
 }
 
 export function endTurn() {
@@ -139,6 +148,72 @@ function turnSignalWith(timeoutMs) {
   return (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function')
     ? AbortSignal.any(signals)
     : signals[0];
+}
+
+// ── T17: Human-in-the-loop approvals ─────────────────────────────────
+// Pending approval resolvers: approvalId -> resolve(decision). The
+// run_dynamic_sql UDF suspends on the promise (JSPI parks the cascade
+// fiber); the decision paths below resolve it and the UDF resumes IN PLACE
+// — same turn, same savepoint, tool row lands in the original turn.
+//
+// Decision paths (exactly one wins — the map take-out is synchronous):
+//   settleApproval()  — the UI's [Approve]/[Reject] click. Runs the row
+//                       UPDATE from the event loop WHILE the UDF is
+//                       suspended: the T26.1 gate classifies it nested
+//                       (udfDepth > 0 spans the UDF's suspension), so it
+//                       bypasses the entryQueue and re-enters wasm safely
+//                       (verified by the ticket-17 re-entry probe).
+//   requestStop()     — the Stop button. Resolves 'stopped' WITHOUT a DB
+//                       write; the UDF records the rejection on resume
+//                       (it is the cascade's writer and the row is still
+//                       'pending'). The next ask_llm then returns the stop
+//                       sentinel → T3 graceful stop (completed work kept).
+const pendingApprovals = new Map();
+
+/** CURRENT_TIMESTAMP-shaped UTC now ('YYYY-MM-DD HH:MM:SS'). */
+function approvalNow() {
+  return new Date().toISOString().slice(0, 19).replace('T', ' ');
+}
+
+/**
+ * Record a decision on the approval row. Gated on status='pending' so a
+ * double-click / racing decision is a no-op at the DB level (the map
+ * take-out already makes it unreachable — belt and braces). Returns the
+ * timestamp written, so the caller's event carries the SAME value as the row.
+ */
+async function markApprovalDecided(sqlite3, db, approvalId, decision) {
+  const now = approvalNow();
+  for await (const stmt of sqlite3.statements(
+    db,
+    `UPDATE tool_approvals SET status = ?, decided_at = ? WHERE id = ? AND status = 'pending'`
+  )) {
+    sqlite3.bind_collection(stmt, [decision, now, approvalId]);
+    await sqlite3.step(stmt);
+  }
+  return now;
+}
+
+/**
+ * UI decision path: settle a pending approval ('approved' | 'rejected').
+ * Takes the resolver out of the map FIRST (synchronous — a racing Stop or
+ * double-click finds it gone and no-ops), then records the row, then
+ * resumes the parked UDF.
+ */
+export async function settleApproval(sqlite3, db, approvalId, decision) {
+  const resolve = pendingApprovals.get(approvalId);
+  if (!resolve) return; // already decided (double-click or Stop won the race)
+  pendingApprovals.delete(approvalId);
+  let decidedAt;
+  try {
+    decidedAt = await markApprovalDecided(sqlite3, db, approvalId, decision);
+  } catch (e) {
+    // Re-arm the resolver so the UI's retry isn't a silent no-op — the UDF is
+    // still parked and the row is still 'pending' (the UPDATE threw).
+    pendingApprovals.set(approvalId, resolve);
+    throw e;
+  }
+  resolve(decision);
+  agentEventStream.emit('approval_decided', { approvalId, decision, decidedAt });
 }
 
 // ── T2: Reactive compaction — context-length 400 detection ───────────
@@ -898,6 +973,8 @@ export async function bootSqliteAgent(config = {}) {
           }
 
           if (!allowDml) {
+            // D3: allow_dml = 0 is a hard kill switch — refuse before any
+            // approval is offered. Approval is per-op, layered on top.
             const res = {
               error: 'Database write operations are disabled in system_config (allow_dml = 0).',
             };
@@ -906,12 +983,55 @@ export async function bootSqliteAgent(config = {}) {
             return;
           }
 
-          // Permission popup for the user
-          const userApproved = (typeof window !== 'undefined' && typeof window.confirm === 'function')
-            ? window.confirm(`Agent requests permission to execute write SQL:\n\n${sql.trim()}\n\nAllow execution?`)
-            : true;
+          // T17: human-in-the-loop approval. Insert a durable 'pending' row,
+          // emit the request, and SUSPEND the cascade (JSPI parks this fiber
+          // on the promise) until the UI's decision path resolves it. The row
+          // lives inside the turn savepoint — RELEASE commits it with the
+          // turn. Replaces the interim window.confirm().
+          const sessRows = await queryAll(sqlite3, db, `SELECT value FROM session_context WHERE key = 'active_session_id'`);
+          const sessId = sessRows.length ? sessRows[0][0] : 'default';
+          // The current turn's user row is the one that fired the cascade.
+          // (session_context.current_turn_id is stamped by the agent_turn_init
+          // trigger, but SQLite fires same-type triggers in REVERSE creation
+          // order, so agent_think — the cascade — runs first and that value is
+          // still the PREVIOUS turn's id here. Compute it directly instead.)
+          // Exclude scratchpad rows (content starting with '!'): they suppress
+          // the cascade and never fire the UDF, and chat-render tracks the turn
+          // as the latest non-'!' user row — keep the two in agreement so the
+          // boot re-render matches.
+          const turnRows = await queryAll(sqlite3, db,
+            `SELECT MAX(id) FROM messages WHERE session_id = ? AND role = 'user' AND content NOT LIKE '!%'`, [sessId]);
+          const turnId = turnRows.length && turnRows[0][0] != null ? parseInt(turnRows[0][0], 10) : 0;
 
-          if (!userApproved) {
+          for await (const stmt of sqlite3.statements(db,
+            `INSERT INTO tool_approvals (turn_id, session_id, tool_name, payload, status) VALUES (?, ?, 'execute_sql', ?, 'pending')`)) {
+            sqlite3.bind_collection(stmt, [turnId, sessId, sql]);
+            await sqlite3.step(stmt);
+          }
+          let approvalId = 0;
+          for await (const stmt of sqlite3.statements(db, `SELECT last_insert_rowid()`)) {
+            if (await sqlite3.step(stmt) === SQLITE_ROW) approvalId = sqlite3.row(stmt)[0];
+          }
+
+          agentEventStream.emit('approval_request', {
+            approvalId, sql, turnId, sessionId: sessId,
+          });
+          const decision = await new Promise((resolve) => {
+            pendingApprovals.set(approvalId, resolve);
+          });
+          pendingApprovals.delete(approvalId);
+
+          if (decision === 'stopped') {
+            // D6: the Stop button resolved us without a DB write — record the
+            // rejection here (the UDF is the cascade's writer; the row is
+            // still 'pending'). The next ask_llm returns the stop sentinel.
+            const decidedAt = await markApprovalDecided(sqlite3, db, approvalId, 'rejected');
+            agentEventStream.emit('approval_decided', {
+              approvalId, decision: 'rejected', decidedAt,
+            });
+          }
+          if (decision !== 'approved') {
+            // D4: the tool row carries the rejection; the agent adapts in-turn.
             const res = { error: 'Permission denied: user rejected the database write operation.' };
             agentEventStream.emit('tool_result', { tool: 'execute_sql', query: sql, error: res.error, result: res });
             sqlite3.result_text(context, JSON.stringify(res));
@@ -920,11 +1040,6 @@ export async function bootSqliteAgent(config = {}) {
 
           // If DDL, log to turn_ddl_log for rewind undo
           if (isDDL) {
-            const sessRows = await queryAll(sqlite3, db, `SELECT value FROM session_context WHERE key = 'active_session_id'`);
-            const sessId = sessRows.length ? sessRows[0][0] : 'default';
-            const turnRows = await queryAll(sqlite3, db, `SELECT value FROM session_context WHERE key = 'current_turn_id'`);
-            const turnId = turnRows.length && turnRows[0][0] !== '' ? parseInt(turnRows[0][0], 10) : 0;
-
             await logDDL(sqlite3, db, {
               turnId,
               sessionId: sessId,

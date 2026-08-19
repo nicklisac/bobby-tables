@@ -221,7 +221,30 @@ CREATE TABLE IF NOT EXISTS compactions (
 CREATE INDEX IF NOT EXISTS idx_compactions_session ON compactions(session_id, seq);
 
 -- =====================================================================
--- 4e. v_active_context (T2: the LLM's working context)
+-- 4e. Tool Approvals (T17: human-in-the-loop approval queue)
+--
+-- Durable, auditable approval records for agent write operations.
+-- run_dynamic_sql inserts a 'pending' row and suspends the cascade (JSPI
+-- parks the fiber on a promise) until the UI's decision path settles it.
+-- Rows live INSIDE the turn savepoint: RELEASE commits them with the turn,
+-- ROLLBACK TO purges them (a tab close during pending discards the turn —
+-- same as today's mid-turn close). Internal table: no capture triggers,
+-- never rewound, agent cannot write it (T21 boundary).
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS tool_approvals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    turn_id     INTEGER,
+    session_id  TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+    tool_name   TEXT,
+    payload     TEXT,   -- the exact SQL the agent requested
+    status      TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    decided_at  DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_tool_approvals_session ON tool_approvals(session_id, id);
+
+-- =====================================================================
+-- 4f. v_active_context (T2: the LLM's working context)
 --
 -- [system row (id=0, if present)] + [latest rolling summary rendered as a
 -- synthetic user row, tau-style "Previous conversation summary:" wrapper]
@@ -274,7 +297,7 @@ WHERE m.session_id = a.session_id
 ORDER BY ctx_order ASC;
 
 -- =====================================================================
--- 4f. Dashboard Cards (T11: 3-pane workstation — right-pane grid)
+-- 4g. Dashboard Cards (T11: 3-pane workstation — right-pane grid)
 --
 -- UI state for the 3x3 reactive canvas, GLOBAL to the brain (no session_id —
 -- the grid is a workstation view over the DATA, not a conversation artifact;
@@ -309,7 +332,7 @@ CREATE TABLE IF NOT EXISTS dashboard_cards (
 );
 
 -- =====================================================================
--- 4g. SQL-native subsystem views (T26.4)
+-- 4h. SQL-native subsystem views (T26.4)
 --
 -- The "push everything into SQLite" views: schema introspection,
 -- compaction token/boundary metrics, tool-call extraction, grid
@@ -756,7 +779,7 @@ export async function renameSession(sqlite3, db, sessionId, newName) {
  */
 export async function deleteSession(sqlite3, db, sessionId) {
   if (sessionId === 'default') throw new Error('Cannot delete default session');
-  for (const table of ['messages', 'compactions', 'turn_changesets', 'turn_ddl_log']) {
+  for (const table of ['messages', 'compactions', 'turn_changesets', 'turn_ddl_log', 'tool_approvals']) {
     try {
       await execParams(sqlite3, db, `DELETE FROM ${table} WHERE session_id = ?`, [sessionId]);
     } catch { /* table might not exist in early migrations */ }
@@ -878,6 +901,7 @@ export const INTERNAL_TABLES = new Set([
   'turn_changesets',
   'turn_ddl_log',
   'compactions',
+  'tool_approvals', // T17: approval queue = agent state / audit log
   'dashboard_cards', // T11: grid = UI state, not data state — no capture triggers,
                      // never rewound, and no data_change events for card CRUD
 ]);
