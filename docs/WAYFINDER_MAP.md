@@ -73,7 +73,7 @@ graph TD
     T1 --> T11[Ticket 11: 3-Pane Layout & Grid Engine - DONE]
     T11 --> T12[Ticket 12: Dynamic Grid Canvas, Drag-to-Move, Resize & Chat Pinning - DONE]
     T11 --> T25[Ticket 25: Professional Workstation UI & Design System Overhaul - DONE]
-    T25 --> T26
+    T25 --> T26[Ticket 26: Codebase Compaction, Module Split & SQL-Native Migration - DONE]
     T1 --> T13[Ticket 13: Tool-Output Materialization - DONE]
     T1 --> T14
     T1 --> T15[Ticket 15: Durable Semantic Memory]
@@ -105,8 +105,8 @@ graph TD
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T17,T21,T24,T25,T261,T262,T263,T264,T265,T27 done;
-    class T14,T15,T16,T18,T19,T20,T22,T23,T26 frontier;
+    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T17,T21,T24,T25,T26,T261,T262,T263,T264,T265,T27 done;
+    class T14,T15,T16,T18,T19,T20,T22,T23 frontier;
 ```
 
 ---
@@ -441,7 +441,7 @@ graph TD
 
 ### Ticket 26: Codebase Compaction, Module Splitting & SQL-Native Migration
 * **Label:** `wayfinder:task` (AFK/HITL)
-* **Status:** 🔁 RE-SCOPED (2026-08-17) — **second attempt at Ticket 26.** The first attempt (branch `sql-refactor`) is **SCRAPPED** (never merged). Re-planned as sub-tickets **26.1 → 26.5** below. Full post-mortem: [RETROSPECTIVE_TICKET_26.md](file:///home/nick/Documents/projects/web-sql-agent/docs/archive/RETROSPECTIVE_TICKET_26.md).
+* **Status:** ✅ COMPLETE (2026-08-18) — all five sub-tickets (**26.1 → 26.5**) resolved and merged to `main`; the parent's scope (guardrails, transaction rules, shared utils + module split, SQL-native views, subsystem harmonization) is fully delivered through them. History: 🔁 RE-SCOPED (2026-08-17) — **second attempt at Ticket 26.** The first attempt (branch `sql-refactor`) is **SCRAPPED** (never merged). Re-planned as sub-tickets **26.1 → 26.5** below. Full post-mortem: [RETROSPECTIVE_TICKET_26.md](file:///home/nick/Documents/projects/web-sql-agent/docs/archive/RETROSPECTIVE_TICKET_26.md).
 * **Where to look for clues (do NOT re-land the branch as-is):** the scrapped attempt is preserved for reference — branch **`sql-refactor`** (commit `cfa67c9`, still on the remote) has the full diff of what was tried (the `utils.js` helpers, the `scratchpad.js`/`chat-render.js` split, the view SQL drafts, the session-savepoint wrappers). The session's uncommitted WIP (BUG-010/011/012 fixes + VFS instrumentation + this re-scope) is in **`stash@{0}`** (`git stash list` → `git stash show -p stash@{0}`). Mine these for *ideas and working code*, but treat every transaction-pattern, migration, and vendor-VFS change in them as **guilty until proven safe** — they are what caused the bug. The 26.1 harness is the gate that decides what survives.
 * **Question (re-scoped):** How do we deliver Ticket 26's legitimate scope — shared utilities, `main.js` modularization, and SQL-native views replacing JS loops — **safely**: guardrails first, small independently-mergeable increments, transaction patterns that cannot re-trigger the BUG-012 no-op commit, and only what we can actually verify?
 * **Why the first attempt was scrapped (summary — detail in the retrospective):**
