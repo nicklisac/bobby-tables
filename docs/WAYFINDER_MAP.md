@@ -97,14 +97,14 @@ graph TD
     T261 --> T262[T26.2 Transaction-pattern rules + upstream bug report - DONE]
     T262 --> T263[T26.3 Shared utils + module split (pure move) - DONE]
     T263 --> T264[T26.4 SQL-native views (actually created) - DONE]
-    T264 --> T265[T26.5 Subsystem harmonization (consume the views)]
+    T264 --> T265[T26.5 Subsystem harmonization (consume the views) - DONE]
 
     classDef done fill:#238636,stroke:#2ea043,color:#fff;
     classDef frontier fill:#1f6feb,stroke:#58a6ff,color:#fff;
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
-    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T21,T24,T25,T261,T262,T263,T264 done;
-    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T26,T265 frontier;
+    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T21,T24,T25,T261,T262,T263,T264,T265 done;
+    class T14,T15,T16,T17,T18,T19,T20,T22,T23,T26 frontier;
 ```
 
 ---
