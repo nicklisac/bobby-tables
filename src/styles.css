@@ -1271,38 +1271,8 @@ header h1.app-title {
   50%      { opacity: 1; transform: scale(1.2); }
 }
 
-/* Tool Execution Indicator */
-.tool-indicator {
-  align-self: flex-start;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  border-left: 3px solid var(--yellow);
-  border-radius: 4px;
-  padding: 0.45rem 0.75rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  max-width: 90%;
-  animation: fadeIn 0.15s ease-out;
-}
-
-.tool-indicator-header {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  font-size: 0.72rem;
-  font-weight: 500;
-  color: var(--text-primary);
-}
-
-.tool-indicator-header code {
-  font-family: var(--font-mono);
-  color: var(--accent);
-  background: var(--accent-subtle);
-  padding: 0.1rem 0.35rem;
-  border-radius: 3px;
-}
-
+/* T28: the transient "Executing …" indicator is gone — tool calls render
+   the real chip in a running state (see .toolcall-chip.running below). */
 .tool-spinner {
   width: 12px;
   height: 12px;
@@ -1314,20 +1284,6 @@ header h1.app-title {
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
-
-.tool-indicator .tool-detail {
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  color: var(--text-muted);
-  background: var(--bg-base);
-  padding: 0.3rem 0.5rem;
-  border-radius: 4px;
-  border: 1px solid var(--border-subtle);
-  overflow-x: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 120px;
-}
 
 /* BUG-009: collapsible tool-call chip (an assistant row that requested a tool) */
 .message.assistant.toolcall-only {
@@ -1401,6 +1357,21 @@ header h1.app-title {
   max-height: 240px;
   overflow: auto;
 }
+/* T28: the LIVE (running) tool-call chip — the real chip with a spinner in
+   the header, rendered as soon as the LLM emits the call (Part B). The
+   yellow left border marks "in flight", matching the old tool-indicator. */
+.toolcall-chip.running { border-left-color: var(--yellow); }
+.toolcall-chip .toolcall-spinner { width: 11px; height: 11px; }
+/* T28: the turn-end re-render must be a visual no-op (Part A). Swapped-in
+   nodes carry no-anim PERMANENTLY (they are static until the next re-render
+   replaces them with fresh nodes) so they never replay the .message fadeIn —
+   the 150ms whole-pane fade was the perceived "blink". Probed 2026-08-19:
+   toggling a class on #messages around replaceChildren does NOT work — the
+   animation starts the moment the suppression is removed, even in the same
+   task. Live-appended nodes (streaming bubble, running chip, result bubble)
+   carry no no-anim and still animate in. */
+.message.no-anim,
+.welcome-card.no-anim { animation: none; }
 
 /* T17: Approval Widget (human-in-the-loop write approval) */
 .approval-widget {

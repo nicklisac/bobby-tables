@@ -51,8 +51,17 @@ const statusLed     = document.getElementById('status-led');
 
 // Active streaming UI elements
 let activeStreamingBubble = null;
-let activeToolIndicator = null;
+// T28: live tool-call chips. liveChipGroup is the .message wrapper for the
+// current burst of id-bearing tool_call events (the LLM parse loop emits the
+// whole batch back-to-back); liveChips maps tcId → running <details> element.
+let liveChipGroup = null;
+const liveChips = new Map();
 let isStreamListenerAttached = false;
+
+// T28: a pane is "pinned to the bottom" when it is within this many px of the
+// bottom; the turn-end re-render keeps it pinned, otherwise it preserves the
+// absolute scrollTop (a user reading history is not yanked).
+const SCROLL_PIN_THRESHOLD = 80;
 
 // ── Processing State ────────────────────────────────────────────────
 
@@ -375,8 +384,11 @@ function renderToolCallChip(call) {
   const argsDisplay = (normalized === undefined || normalized === null || normalized === '')
     ? '(no arguments)'
     : (typeof normalized === 'string' ? normalized : JSON.stringify(normalized, null, 2));
+  // T28: data-tc-id keys the chip to its tool_call id — the live (running)
+  // chip and the re-rendered chip share the id, so the turn-end re-render can
+  // restore the expanded state and the chip set is a visual no-op.
   return `
-    <details class="toolcall-chip">
+    <details class="toolcall-chip" data-tc-id="${escapeHtml(call?.id || '')}">
       <summary>
         <span class="toolcall-chevron">▸</span>
         <span class="toolcall-icon">${toolCallIcon(name)}</span>
@@ -571,7 +583,24 @@ async function renderMessages() {
     console.warn('[chat-render] execute_sql calls query failed (non-fatal):', e);
   }
 
-  messagesEl.innerHTML = '';
+  // T28 Part A: capture the pane state the swap must preserve.
+  // (1) scroll — pinned-to-bottom (within the threshold) vs absolute offset;
+  // (2) expanded state — which tool-call chips are open, keyed by tc-id.
+  const chatContainer = document.getElementById('chat-container');
+  const wasPinned = chatContainer
+    ? (chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight) < SCROLL_PIN_THRESHOLD
+    : true;
+  const prevScrollTop = chatContainer ? chatContainer.scrollTop : 0;
+  const openChipIds = new Set(
+    [...messagesEl.querySelectorAll('details.toolcall-chip[open]')]
+      .map((el) => el.dataset.tcId)
+      .filter(Boolean)
+  );
+
+  // Build the ENTIRE new pane into a fragment, then swap it in with ONE
+  // replaceChildren() — no innerHTML='' wipe, no per-bubble appends to the
+  // live pane, so the pane is never observed empty mid-rebuild.
+  const fragment = document.createDocumentFragment();
   const visibleRows = rows.filter(([id, role]) => role !== 'system');
   if (visibleRows.length === 0) {
     const welcomeDiv = document.createElement('div');
@@ -599,7 +628,7 @@ async function renderMessages() {
       </p>
     `;
     welcomeDiv.querySelector('.welcome-config-btn')?.addEventListener('click', () => ctx.onConfigClick());
-    messagesEl.appendChild(welcomeDiv);
+    fragment.appendChild(welcomeDiv);
   } else {
     // T17: turn tracking — a non-scratchpad user row starts an agent turn; its
     // id is the turn_id stamped on that turn's approval rows by the UDF.
@@ -696,7 +725,7 @@ async function renderMessages() {
         }
       }
 
-      messagesEl.appendChild(div);
+      fragment.appendChild(div);
 
       // T17: static approval records at the tool call's position — the
       // assistant bubble that requested the write matches its tool_approvals
@@ -710,7 +739,7 @@ async function renderMessages() {
             const i = turnApprovals.findIndex((a, j) => !consumedApprovalIdx.has(j) && a.sql === q);
             if (i !== -1) {
               consumedApprovalIdx.add(i);
-              messagesEl.appendChild(renderApprovalWidget(turnApprovals[i]));
+              fragment.appendChild(renderApprovalWidget(turnApprovals[i]));
             }
           }
         }
@@ -722,12 +751,33 @@ async function renderMessages() {
         const divider = document.createElement('div');
         divider.className = 'compaction-divider';
         divider.textContent = '— context compacted —';
-        messagesEl.appendChild(divider);
+        fragment.appendChild(divider);
       }
     });
   }
 
-  scrollChatToBottom();
+  // T28 Part A: the swap. Swapped-in nodes are marked no-anim (permanently —
+  // they are static until the next re-render) so they never replay the
+  // .message fadeIn: the perceived "whole UI blink" was the 150ms fade
+  // replaying on every bubble, not an empty frame (the old wipe+rebuild was
+  // one synchronous task). Probed: toggling a class on #messages around
+  // replaceChildren does not work — the animation starts the moment the
+  // suppression is removed, even in the same task.
+  fragment.querySelectorAll('.message, .welcome-card').forEach((el) => el.classList.add('no-anim'));
+  messagesEl.replaceChildren(fragment);
+
+  // Restore the captured state.
+  for (const tcId of openChipIds) {
+    const chip = [...messagesEl.querySelectorAll('details.toolcall-chip')]
+      .find((el) => el.dataset.tcId === tcId);
+    if (chip) chip.open = true;
+  }
+  if (chatContainer) {
+    chatContainer.scrollTop = wasPinned
+      ? chatContainer.scrollHeight
+      : prevScrollTop;
+  }
+
   await updateTokenUsage();
   // T8: keep the left-pane DB Explorer current (tables, views, row counts, DDL).
   // BUG-008: AWAIT it. A fire-and-forget renderExplorer runs its getDatabaseCatalog
@@ -790,6 +840,33 @@ function extractDisplayText(raw) {
   return out;
 }
 
+/**
+ * T28 Part B: settle (drop `running` + spinner from) the live chip whose
+ * result just landed. The execute_tool trigger runs the batch's UDFs
+ * SEQUENTIALLY in json_each (call) order, so the oldest running chip is the
+ * match; a tool-name match first guards against a chip whose result never
+ * arrives (an unknown tool inserts its error row without a UDF call, so no
+ * tool_result event is ever emitted for it).
+ */
+function settleLiveChip(event) {
+  if (!liveChips.size) return;
+  let entry = null;
+  for (const [tcId, chip] of liveChips) {
+    if (!chip.isConnected) { liveChips.delete(tcId); continue; }
+    if (chip.dataset.tcName === event.tool) { entry = [tcId, chip]; break; }
+  }
+  if (!entry) {
+    for (const [tcId, chip] of liveChips) {
+      if (chip.isConnected) { entry = [tcId, chip]; break; }
+    }
+  }
+  if (!entry) return;
+  const [tcId, chip] = entry;
+  chip.classList.remove('running');
+  chip.querySelector('.toolcall-spinner')?.remove();
+  liveChips.delete(tcId);
+}
+
 function handleAgentEvent(event) {
   if (!event || !event.type) return;
 
@@ -833,22 +910,36 @@ function handleAgentEvent(event) {
         activeStreamingBubble = null;
       }
 
-      // Show tool execution indicator
-      if (!activeToolIndicator) {
-        activeToolIndicator = document.createElement('div');
-        activeToolIndicator.className = 'tool-indicator';
-        const argStr = typeof event.arguments === 'object' && event.arguments !== null
-          ? (event.arguments.query || event.arguments.url || JSON.stringify(event.arguments))
-          : String(event.arguments || '');
-
-        activeToolIndicator.innerHTML = `
-          <div class="tool-indicator-header">
-            <span class="tool-spinner"></span>
-            <span>Executing <code>${escapeHtml(event.name || 'tool')}</code></span>
-          </div>
-          ${argStr ? `<div class="tool-detail">${escapeHtml(argStr)}</div>` : ''}
-        `;
-        messagesEl.appendChild(activeToolIndicator);
+      // T28 Part B: the id-bearing emission (the LLM parse loop, one per call
+      // in the batch) renders the REAL chip in a running state — the same
+      // markup renderMessages() produces, so the turn-end re-render is a
+      // visual no-op. The per-UDF emissions (no id) only drive the status
+      // bar below — that dedupes the double emission per call.
+      if (event.id && !liveChips.has(event.id)) {
+        let group = liveChipGroup;
+        if (!group || !group.isConnected) {
+          // Mirror renderMessages' structure exactly:
+          // .message.assistant.toolcall-only > div > details.toolcall-chip…
+          group = document.createElement('div');
+          group.className = 'message assistant toolcall-only';
+          const chipDiv = document.createElement('div');
+          group.appendChild(chipDiv);
+          messagesEl.appendChild(group);
+          liveChipGroup = group;
+        }
+        const chipDiv = group.querySelector(':scope > div');
+        chipDiv.insertAdjacentHTML('beforeend', renderToolCallChip({
+          id: event.id,
+          type: 'function',
+          function: { name: event.name, arguments: event.arguments },
+        }));
+        const chip = chipDiv.lastElementChild;
+        chip.classList.add('running');
+        chip.dataset.tcName = event.name || '';
+        const spinner = document.createElement('span');
+        spinner.className = 'tool-spinner toolcall-spinner';
+        chip.querySelector('summary').appendChild(spinner);
+        liveChips.set(event.id, chip);
         scrollChatToBottom();
       }
 
@@ -858,18 +949,16 @@ function handleAgentEvent(event) {
     }
 
     case 'approval_request': {
-      // T17: the agent requested a write — the cascade is parked on a JSPI
-      // suspension. Replace the tool indicator (the tool is WAITING, not
-      // executing) with the approval widget at the tool call's position.
-      if (activeToolIndicator) {
-        activeToolIndicator.remove();
-        activeToolIndicator = null;
-      }
+      // T17 + T28: the agent requested a write — the cascade is parked on a
+      // JSPI suspension. KEEP the running chip (the tool is waiting, not
+      // gone) and insert the widget below it; the decision flips the widget
+      // to its static record and the chip settles on tool_result.
       messagesEl.appendChild(renderApprovalWidget({
         approvalId: event.approvalId,
         sql: event.sql,
         status: 'pending',
       }));
+      liveChipGroup = null;
       scrollChatToBottom();
       statusBar.textContent = '⏸ Awaiting your approval…';
       if (statusLed) statusLed.className = 'status-led led-busy';
@@ -892,11 +981,9 @@ function handleAgentEvent(event) {
     }
 
     case 'tool_result': {
-      // Remove tool execution indicator
-      if (activeToolIndicator) {
-        activeToolIndicator.remove();
-        activeToolIndicator = null;
-      }
+      // T28 Part B: settle the matching running chip, then append the output.
+      settleLiveChip(event);
+      liveChipGroup = null;
 
       // Render tool result bubble immediately
       const div = document.createElement('div');
@@ -938,10 +1025,10 @@ function handleAgentEvent(event) {
         activeStreamingBubble.classList.remove('streaming');
         activeStreamingBubble = null;
       }
-      if (activeToolIndicator) {
-        activeToolIndicator.remove();
-        activeToolIndicator = null;
-      }
+      // T28: the turn-end re-render replaces the pane (and corrects any chip
+      // that never settled, e.g. an unknown tool's) — just drop the live refs.
+      liveChipGroup = null;
+      liveChips.clear();
       break;
     }
 
@@ -950,10 +1037,8 @@ function handleAgentEvent(event) {
         activeStreamingBubble.classList.remove('streaming');
         activeStreamingBubble = null;
       }
-      if (activeToolIndicator) {
-        activeToolIndicator.remove();
-        activeToolIndicator = null;
-      }
+      liveChipGroup = null;
+      liveChips.clear();
       statusBar.textContent = `⚠ ${event.error || 'Agent execution error'}`;
       statusBar.style.color = '#f85149';
       break;
@@ -1043,5 +1128,6 @@ export { startEventStreamListener };
  */
 export function resetStreamingState() {
   activeStreamingBubble = null;
-  activeToolIndicator = null;
+  liveChipGroup = null;
+  liveChips.clear();
 }
