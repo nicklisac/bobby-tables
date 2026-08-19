@@ -669,6 +669,36 @@ CREATE TRIGGER agent_think
 AFTER INSERT ON messages
 WHEN NEW.role IN ('user', 'tool')
   AND (SELECT COALESCE(value, '0') FROM session_context WHERE key = 'suppress_cascade') != '1'
+  -- BUG-019: a tool row continues the cascade only when EVERY sibling call of
+  -- the assistant message that produced it has its result row. Single-call
+  -- messages: the just-inserted row is the only sibling → no-op (fires as
+  -- before). N-call batches: fires exactly once — on the LAST result row — so
+  -- the LLM sees all N results in one context (the standard OpenAI pairing).
+  -- User rows / NULL tool_call_id: the id-match subquery is empty → fires.
+  AND NOT EXISTS (
+      SELECT 1
+      FROM messages a
+      CROSS JOIN json_each(CASE WHEN json_valid(a.tool_calls) THEN a.tool_calls ELSE '[]' END) tc
+      WHERE a.session_id = NEW.session_id
+        AND a.role = 'assistant'
+        AND a.tool_calls IS NOT NULL
+        AND a.id IN (
+            SELECT m2.id
+            FROM messages m2
+            CROSS JOIN json_each(CASE WHEN json_valid(m2.tool_calls) THEN m2.tool_calls ELSE '[]' END) tc2
+            WHERE m2.session_id = NEW.session_id
+              AND m2.role = 'assistant'
+              AND m2.tool_calls IS NOT NULL
+              AND json_extract(tc2.value, '$.id') = NEW.tool_call_id
+        )
+        AND json_extract(tc.value, '$.id') IS NOT NULL
+        AND NOT EXISTS (
+            SELECT 1 FROM messages t
+            WHERE t.session_id = NEW.session_id
+              AND t.role = 'tool'
+              AND t.tool_call_id = json_extract(tc.value, '$.id')
+        )
+  )
 BEGIN
     INSERT INTO messages (session_id, role, content, tool_calls, prompt_tokens, completion_tokens)
     SELECT
@@ -702,7 +732,10 @@ END;
 -- =====================================================================
 -- 7. Acting Phase (session-scoped)
 --    Fires when assistant message with tool_calls is inserted.
---    Executes the tool → inserts tool result into same session.
+--    Executes EVERY tool call in the array → one tool result row per call,
+--    in array order (BUG-019: the old $[0]-only body silently dropped calls
+--    2..N when the model batched parallel calls — the orphans the boot
+--    repair later filled with "Turn interrupted" placeholders).
 --    T3: suppressed while session_context.suppress_cascade = '1' — same gate
 --    as agent_think. Required for T1 forking: forkSession copies messages
 --    (including assistant rows with tool_calls) with the cascade suppressed;
@@ -719,55 +752,56 @@ BEGIN
     SELECT
         NEW.session_id,
         'tool',
-        CASE json_extract(NEW.tool_calls, '$[0].function.name')
+        CASE json_extract(tc.value, '$.function.name')
             WHEN 'execute_sql' THEN
                 run_dynamic_sql(COALESCE(
-                    json_extract(NEW.tool_calls, '$[0].function.arguments.query'),
-                    json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.query')))
+                    json_extract(tc.value, '$.function.arguments.query'),
+                    json_extract(json_extract(tc.value, '$.function.arguments'), '$.query')))
             WHEN 'search_web' THEN
                 search_web(COALESCE(
-                    json_extract(NEW.tool_calls, '$[0].function.arguments.query'),
-                    json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.query')))
+                    json_extract(tc.value, '$.function.arguments.query'),
+                    json_extract(json_extract(tc.value, '$.function.arguments'), '$.query')))
             WHEN 'fetch_url' THEN
                 fetch_url(COALESCE(
-                    json_extract(NEW.tool_calls, '$[0].function.arguments.url'),
-                    json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.url')))
+                    json_extract(tc.value, '$.function.arguments.url'),
+                    json_extract(json_extract(tc.value, '$.function.arguments'), '$.url')))
             WHEN 'materialize' THEN
                 materialize(
                     COALESCE(
-                        json_extract(NEW.tool_calls, '$[0].function.arguments.table_name'),
-                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.table_name')),
+                        json_extract(tc.value, '$.function.arguments.table_name'),
+                        json_extract(json_extract(tc.value, '$.function.arguments'), '$.table_name')),
                     COALESCE(
-                        json_extract(NEW.tool_calls, '$[0].function.arguments.tool_call_id'),
-                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.tool_call_id'))
+                        json_extract(tc.value, '$.function.arguments.tool_call_id'),
+                        json_extract(json_extract(tc.value, '$.function.arguments'), '$.tool_call_id'))
                 )
             WHEN 'search_documents' THEN
                 search_documents(
                     COALESCE(
-                        json_extract(NEW.tool_calls, '$[0].function.arguments.query'),
-                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.query')),
+                        json_extract(tc.value, '$.function.arguments.query'),
+                        json_extract(json_extract(tc.value, '$.function.arguments'), '$.query')),
                     COALESCE(
-                        json_extract(NEW.tool_calls, '$[0].function.arguments.limit'),
-                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.limit'))
+                        json_extract(tc.value, '$.function.arguments.limit'),
+                        json_extract(json_extract(tc.value, '$.function.arguments'), '$.limit'))
                 )
             WHEN 'ingest_document' THEN
                 ingest_document(
                     COALESCE(
-                        json_extract(NEW.tool_calls, '$[0].function.arguments.title'),
-                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.title')),
+                        json_extract(tc.value, '$.function.arguments.title'),
+                        json_extract(json_extract(tc.value, '$.function.arguments'), '$.title')),
                     COALESCE(
-                        json_extract(NEW.tool_calls, '$[0].function.arguments.content'),
-                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.content')),
+                        json_extract(tc.value, '$.function.arguments.content'),
+                        json_extract(json_extract(tc.value, '$.function.arguments'), '$.content')),
                     COALESCE(
-                        json_extract(NEW.tool_calls, '$[0].function.arguments.source'),
-                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.source')),
+                        json_extract(tc.value, '$.function.arguments.source'),
+                        json_extract(json_extract(tc.value, '$.function.arguments'), '$.source')),
                     COALESCE(
-                        json_extract(NEW.tool_calls, '$[0].function.arguments.source_ref'),
-                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.source_ref'))
+                        json_extract(tc.value, '$.function.arguments.source_ref'),
+                        json_extract(json_extract(tc.value, '$.function.arguments'), '$.source_ref'))
                 )
-            ELSE json_object('error', 'Unknown tool: ' || json_extract(NEW.tool_calls, '$[0].function.name'))
+            ELSE json_object('error', 'Unknown tool: ' || json_extract(tc.value, '$.function.name'))
         END,
-        json_extract(NEW.tool_calls, '$[0].id');
+        json_extract(tc.value, '$.id')
+    FROM json_each(NEW.tool_calls) tc;
 END;
 
 -- =====================================================================
