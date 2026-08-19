@@ -126,6 +126,11 @@ export function initPaneResizers() {
     setLeftPaneCollapsed(false);
     document.getElementById('section-db-explorer')?.classList.add('is-open');
   });
+  document.getElementById('rail-sec-documents')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    setLeftPaneCollapsed(false);
+    document.getElementById('section-documents')?.classList.add('is-open');
+  });
   document.getElementById('rail-sec-sessions')?.addEventListener('click', (e) => {
     e.preventDefault();
     setLeftPaneCollapsed(false);

@@ -51,7 +51,8 @@ INSERT OR IGNORE INTO system_config (key, value) VALUES
      || char(10) || char(10)
      || 'Your memory, session state, and conversation history are stored directly in SQLite tables (messages, sessions, turn_changesets).'
      || char(10) || '- You use SQL queries to inspect schemas, explore data, and verify facts before answering.'
-     || char(10) || '- You have tools to execute SQL queries, search the web, fetch web pages, and materialize JSON outputs into permanent SQLite tables.'
+     || char(10)       || '- You have tools to execute SQL queries, search the web, fetch web pages, and materialize JSON outputs into permanent SQLite tables.'
+      || char(10) || '- Fetched pages and web search results are automatically stored as searchable documents. Use search_documents (BM25 full-text search) to find them later, and ingest_document to store any text as a document.'
      || char(10) || char(10)
      || 'Guidelines:'
      || char(10) || '1. Check the schema and query tables directly rather than guessing table structures or column names.'
@@ -87,6 +88,12 @@ INSERT OR IGNORE INTO tools (name, schema) VALUES
   ),
   ('materialize',
     '{"type":"function","function":{"name":"materialize","description":"Materialize raw JSON output from a prior tool call into a permanent, queryable SQLite table. Useful for storing web search results, fetched web page data, or external API responses so they can be queried with SQL.","parameters":{"type":"object","properties":{"table_name":{"type":"string","description":"The name for the new SQLite table to create (must be a valid identifier that does not already exist)"},"tool_call_id":{"type":"string","description":"Optional: the specific tool_call_id whose result should be materialized. If omitted, uses the most recent tool output in the session."}},"required":["table_name"]}}}'
+  ),
+  ('search_documents',
+    '{"type":"function","function":{"name":"search_documents","description":"Full-text keyword search (BM25 ranking) over the document corpus: fetched web pages, web search results, and any text stored via ingest_document. Returns ranked matches with highlighted snippets. Use this to recall previously fetched or stored content.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"FTS5 query: plain words (implicit AND), phrases in double quotes, AND/OR/NOT operators, and prefix* terms"},"limit":{"type":"integer","description":"Maximum number of results (default 10, max 50)"}},"required":["query"]}}}'
+  ),
+  ('ingest_document',
+    '{"type":"function","function":{"name":"ingest_document","description":"Store a text document in the searchable corpus (indexed with FTS5 full-text search). Re-ingesting the same source_ref updates the existing document instead of duplicating it.","parameters":{"type":"object","properties":{"title":{"type":"string","description":"Short title for the document"},"content":{"type":"string","description":"The full text content to index"},"source":{"type":"string","description":"Optional origin label (defaults to user)"},"source_ref":{"type":"string","description":"Optional dedup key (e.g. a URL). Re-ingesting the same source+source_ref updates the document."}},"required":["title","content"]}}}'
   );
 
 -- =====================================================================
@@ -319,20 +326,80 @@ ORDER BY ctx_order ASC;
 -- state). Cartridge export (T10) includes it automatically (page-level
 -- backup / VACUUM INTO).
 -- =====================================================================
-CREATE TABLE IF NOT EXISTS dashboard_cards (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    title      TEXT NOT NULL,
-    sql        TEXT NOT NULL,
-    row        INTEGER NOT NULL DEFAULT 0 CHECK(row >= 0),
-    col        INTEGER NOT NULL DEFAULT 0 CHECK(col >= 0 AND col <= 2),
-    row_span   INTEGER NOT NULL DEFAULT 1 CHECK(row_span >= 1),
-    col_span   INTEGER NOT NULL DEFAULT 1 CHECK(col_span >= 1 AND col_span <= 3),
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
+ CREATE TABLE IF NOT EXISTS dashboard_cards (
+     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+     title      TEXT NOT NULL,
+     sql        TEXT NOT NULL,
+     row        INTEGER NOT NULL DEFAULT 0 CHECK(row >= 0),
+     col        INTEGER NOT NULL DEFAULT 0 CHECK(col >= 0 AND col <= 2),
+     row_span   INTEGER NOT NULL DEFAULT 1 CHECK(row_span >= 1),
+     col_span   INTEGER NOT NULL DEFAULT 1 CHECK(col_span >= 1 AND col_span <= 3),
+     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+ );
 
--- =====================================================================
--- 4h. SQL-native subsystem views (T26.4)
+ -- =====================================================================
+ -- 4i. Documents + FTS5 index (T16: in-browser full-text search)
+ --
+ -- The document corpus: text the agent (or user) wants to full-text search
+ -- later. Sources: 'web-fetch' (fetch_url auto-ingest, source_ref = URL),
+ -- 'web-search' (search_web auto-ingest, one doc per result, source_ref =
+ -- URL), 'user' (explicit ingest_document / UI add). GLOBAL to the brain
+ -- (no session_id — the corpus is a property of the database, like the data
+ -- itself; it persists across session switches and fork/delete).
+ --
+ -- documents + documents_fts are in INTERNAL_TABLES (below): the corpus is
+ -- DERIVED INDEX STATE, not user data state — no capture triggers, no agent
+ -- DML via execute_sql (T21 boundary), never rewound. Ingestion happens
+ -- through the app's flows only (fetch_url / search_web side effects, the
+ -- ingest_document tool, the Documents UI). Cartridge export (T10) includes
+ -- it automatically (page-level backup / VACUUM INTO).
+ --
+ -- documents_fts is an EXTERNAL-CONTENT FTS5 index over documents
+ -- (content='documents', content_rowid='id'): the index stores only the
+  -- inverted structure, the rows stay in the documents table. The three sync
+ -- triggers below keep it consistent (the standard FTS5 external-content
+ -- pattern — the 'delete' command removes a row's postings). DROP+CREATE
+ -- (not IF NOT EXISTS) so existing brains self-heal at boot.
+ -- =====================================================================
+ CREATE TABLE IF NOT EXISTS documents (
+     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+     source     TEXT NOT NULL,
+     source_ref TEXT,
+     title      TEXT NOT NULL,
+     content    TEXT NOT NULL,
+     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+ );
+
+ CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_source_ref ON documents(source, source_ref);
+
+ CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+     title, content,
+     content='documents', content_rowid='id'
+ );
+
+ DROP TRIGGER IF EXISTS documents_fts_ai;
+ CREATE TRIGGER documents_fts_ai AFTER INSERT ON documents BEGIN
+     INSERT INTO documents_fts(rowid, title, content)
+     VALUES (new.id, new.title, new.content);
+ END;
+
+ DROP TRIGGER IF EXISTS documents_fts_ad;
+ CREATE TRIGGER documents_fts_ad AFTER DELETE ON documents BEGIN
+     INSERT INTO documents_fts(documents_fts, rowid, title, content)
+     VALUES ('delete', old.id, old.title, old.content);
+ END;
+
+ DROP TRIGGER IF EXISTS documents_fts_au;
+ CREATE TRIGGER documents_fts_au AFTER UPDATE ON documents BEGIN
+     INSERT INTO documents_fts(documents_fts, rowid, title, content)
+     VALUES ('delete', old.id, old.title, old.content);
+     INSERT INTO documents_fts(rowid, title, content)
+     VALUES (new.id, new.title, new.content);
+ END;
+
+ -- =====================================================================
+ -- 4h. SQL-native subsystem views (T26.4)
 --
 -- The "push everything into SQLite" views: schema introspection,
 -- compaction token/boundary metrics, tool-call extraction, grid
@@ -666,6 +733,30 @@ BEGIN
                         json_extract(NEW.tool_calls, '$[0].function.arguments.tool_call_id'),
                         json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.tool_call_id'))
                 )
+            WHEN 'search_documents' THEN
+                search_documents(
+                    COALESCE(
+                        json_extract(NEW.tool_calls, '$[0].function.arguments.query'),
+                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.query')),
+                    COALESCE(
+                        json_extract(NEW.tool_calls, '$[0].function.arguments.limit'),
+                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.limit'))
+                )
+            WHEN 'ingest_document' THEN
+                ingest_document(
+                    COALESCE(
+                        json_extract(NEW.tool_calls, '$[0].function.arguments.title'),
+                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.title')),
+                    COALESCE(
+                        json_extract(NEW.tool_calls, '$[0].function.arguments.content'),
+                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.content')),
+                    COALESCE(
+                        json_extract(NEW.tool_calls, '$[0].function.arguments.source'),
+                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.source')),
+                    COALESCE(
+                        json_extract(NEW.tool_calls, '$[0].function.arguments.source_ref'),
+                        json_extract(json_extract(NEW.tool_calls, '$[0].function.arguments'), '$.source_ref'))
+                )
             ELSE json_object('error', 'Unknown tool: ' || json_extract(NEW.tool_calls, '$[0].function.name'))
         END,
         json_extract(NEW.tool_calls, '$[0].id');
@@ -911,7 +1002,11 @@ export const INTERNAL_TABLES = new Set([
   'compactions',
   'tool_approvals', // T17: approval queue = agent state / audit log
   'dashboard_cards', // T11: grid = UI state, not data state — no capture triggers,
-                     // never rewound, and no data_change events for card CRUD
+                      // never rewound, and no data_change events for card CRUD
+  'documents', // T16: FTS5 corpus = derived index state — no capture triggers,
+               // no agent DML, never rewound (ingest flows own it)
+  'documents_fts', // T16: the FTS5 virtual table itself (shadow tables are
+                   // covered by EXPLICIT_SHADOW_REGEX / virtualTableParents)
 ]);
 
 const INTERNAL_TABLES_LOWER = new Set(
@@ -1368,6 +1463,25 @@ export async function migrateTurnTables(sqlite3, db) {
  * Migration: existing databases have `row <= 2` CHECK constraints on `dashboard_cards`.
  * Migrate to unlimited row expansion so cards can be placed in lower grid zones.
  */
+/**
+ * Migration (T16): if a pre-existing USER table named `documents` lacks the
+ * app's `title`/`content` columns, rename it out of the way — the FTS5
+ * external-content pointer (content='documents') and the sync triggers
+ * (new.title / new.content) must land on the app's shape, and CREATE TRIGGER
+ * fails on a missing column. MUST run before SCHEMA_SQL (like
+ * migrateMessagesTable). A same-named table that already has title+content
+ * is adopted as-is (compatible shape).
+ */
+export async function migrateDocumentsTable(sqlite3, db) {
+  const rows = await queryAll(sqlite3, db, `PRAGMA table_info(documents)`);
+  if (!rows.length) return; // fresh brain — SCHEMA_SQL creates it
+  const cols = new Set(rows.map(([, name]) => name));
+  if (cols.has('title') && cols.has('content')) return;
+  const legacy = `documents_legacy_${Date.now()}`;
+  console.warn(`[schema] User table 'documents' lacks the app's title/content shape — renaming to '${legacy}' (T16)`);
+  await execParams(sqlite3, db, `ALTER TABLE documents RENAME TO ${legacy}`);
+}
+
 export async function migrateDashboardCardsTable(sqlite3, db) {
   try {
     const rows = await queryAll(sqlite3, db, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dashboard_cards'`);
