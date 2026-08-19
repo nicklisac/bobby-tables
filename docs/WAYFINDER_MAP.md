@@ -83,6 +83,7 @@ graph TD
     T1 --> T15[Ticket 15: Durable Semantic Memory]
     T1 --> T17[Ticket 17: Human-in-the-Loop Approvals - DONE]
     T27[Ticket 27: Trigger firing order — stale current_turn_id - DONE]
+    T28[Ticket 28: Chat Pane — Live Tool-Call Chips & Blink-Free Re-render]
     T1 --> T18[Ticket 18: Self-Rendering Reactive Views]
     T1 --> T19[Ticket 19: Persona & Prompt Presets]
 
@@ -110,7 +111,7 @@ graph TD
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
     class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T16,T17,T21,T24,T25,T26,T261,T262,T263,T264,T265,T27 done;
-    class T14,T15,T18,T19,T20,T22,T23 frontier;
+    class T14,T15,T18,T19,T20,T22,T23,T28 frontier;
 ```
 
 ---
@@ -641,6 +642,29 @@ graph TD
   * **(C)** Have the `cap_*` capture triggers compute the turn id directly (latest non-scratchpad user row), mirroring T17's workaround.
 * **Acceptance:** a probe runs two consecutive turns each performing a data write and asserts each turn's `turn_changesets` rows carry THAT turn's user-row id (not the previous turn's); T3 rewind undoes the correct turn; T17's direct computation stays consistent.
 * **Note:** T17 ships with a local workaround (computing turn_id directly). This ticket fixes the root cause so every `current_turn_id` consumer (capture triggers, rewind) is correct.
+
+---
+
+### Ticket 28: Chat Pane Rendering — Live Tool-Call Chips & Blink-Free Re-render
+* **Label:** `wayfinder:task` (AFK)
+* **Status:** Open (Frontier)
+* **Depends on:** — (independent; interacts with T4 event stream, T17 approval widget, BUG-009 chip, T3 turn wrapper)
+* **Question:** How should the chat pane render tool calls **live** during a turn (a chip with a running state, not a transient spinner) and how should `renderMessages()` swap the pane **without a visible blink** (no empty frame, scroll + expanded state preserved) — so the mid-turn view matches the post-turn view and the turn-end re-render becomes a visual no-op?
+* **Reported (2026-08-19, user):** "overall the renderMessages() feels clunky. I can see the whole UI blink and it feels weird." Companion observation: mid-turn the chat shows only tool OUTPUTS — the call chips appear only when the turn-end re-render lands.
+* **Context (mechanism, verified in code 2026-08-19):**
+  * **The blink:** `renderMessages()` (chat-render.js:483) runs ~6 async DB queries, then `messagesEl.innerHTML = ''` (chat-render.js:574) **wipes the visible pane** and rebuilds every bubble from scratch → ≥1 frame of empty pane (the flash) plus state resets (expanded `<details>` chips collapse, scroll jumps back to bottom). It fires on every turn end (main.js:633 `finally`), session switch, boot, and rewind — so the clunk is frequent.
+  * **The live gap:** the mid-turn event path (`handleAgentEvent`, chat-render.js:793) renders a **transient** "Executing `<tool>`" spinner on `tool_call` (825-858) and removes it on `tool_result` (894-919), appending the permanent output bubble. The chips (`.toolcall-chip` via `renderToolCallChip`, chat-render.js:370) exist **only** in `renderMessages()` — so calls "pop in" at turn end. (Pre-BUG-009 the streaming bubble painted the raw tool-call JSON mid-turn — that is the user's memory of "seeing the calls live"; BUG-009 replaced it with the transient spinner + chip-on-rerender.)
+  * **Related:** BUG-019 (parallel tool calls, fixed 2026-08-19) means a batched turn now emits N `tool_call`/`tool_result` event pairs — the live path must handle N chips, not one.
+* **Design (direction locked 2026-08-19, user-confirmed "do both"):**
+  * **Part A — state-preserving swap in `renderMessages`:** build the entire new pane into a `DocumentFragment`, then `messagesEl.replaceChildren(fragment)` — ONE DOM mutation, no empty frame. Before the swap, capture and restore after: (1) **scroll** — pinned-to-bottom (within a threshold of the bottom) vs absolute `scrollTop`; stay pinned if pinned, otherwise preserve the offset; (2) **expanded state** — which tool-call chips / `<details>` are open, keyed by **tool_call id** (both live and re-rendered chips carry `data-tc-id`; machine-generated calls always have an id — the harness mints one, harness.js:876). Applies to every `renderMessages` trigger (turn end, session switch, boot, rewind). DB-is-source-of-truth full-rebuild semantics are unchanged — only the swap stops being visible.
+  * **Part B — live chips:** the `tool_call` handler renders the real chip via `renderToolCallChip` with a `running` modifier (spinner in the chip header) instead of the plain `.tool-indicator`; `tool_result` settles the matching chip (drop `running`) and appends the output bubble as today. Chip creation keys on the **id-bearing** emission (the LLM-parse loop, harness.js:889-902, carries `id`); the per-UDF emissions (harness.js:944/1132/1205/1324/1360/1392 — no `id`) drive the status bar only — this dedupes the double emission per call. **T17 interaction:** `approval_request` (chat-render.js:860) currently removes the indicator and appends the widget — with live chips, KEEP the running chip and insert the widget below it; the decision flips the widget to its static record (existing behavior) and the chip settles on `tool_result`. **End state:** the turn-end re-render (Part A) is a visual no-op — same chips, same open state, same scroll.
+* **Acceptance (specs, red→green per the BUG-012 discipline):**
+  * **Spec A (blink-free swap):** (1) across a fake-LLM turn and its turn-end re-render, `#messages` is never observed empty (rAF-sampled child count stays > 0 through the swap); (2) a chip expanded before turn end is still expanded after; (3) scroll: pinned-to-bottom stays pinned, and a user scrolled up is not yanked (offset preserved within tolerance); (4) session switch preserves the same invariants.
+  * **Spec B (live chips):** (1) single-call turn: the chip is in the DOM in `running` state BEFORE the `tool_result` event, settled after; (2) 3-parallel-call turn (reuse the BUG-019 fake-LLM shape): 3 chips appear as the calls emit, each settling with its own result; (3) after the turn-end re-render the chip set + open state are unchanged (no pop-in); (4) write-SQL turn: the approval widget appears below the running chip, and the chip settles after approval + result.
+  * Full suite green; AGY review pass (sign-off standard).
+* **Next steps:** write Spec A + Spec B (red where applicable) → Part A (fragment swap + state capture/restore in `renderMessages`) → Part B (live chip in `handleAgentEvent` + T17 interaction) → green → full suite → AGY review → merge.
+* **Branch:** `t28-chat-live-render`
+* **Out of scope (this ticket):** reconciliation/diff-based rendering (stable DOM↔DB identity matching with targeted patches) — the locked approach is invisible full-rebuild, not incremental DOM; streaming-token render changes; status-bar restyling.
 
 ---
 
