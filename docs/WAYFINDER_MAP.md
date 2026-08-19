@@ -77,7 +77,7 @@ graph TD
     T1 --> T14
     T1 --> T15[Ticket 15: Durable Semantic Memory]
     T1 --> T17[Ticket 17: Human-in-the-Loop Approvals - DONE]
-    T17 --> T27[Ticket 27: Trigger firing order — stale current_turn_id (bug)]
+    T27[Ticket 27: Trigger firing order — stale current_turn_id (bug)]
     T1 --> T18[Ticket 18: Self-Rendering Reactive Views]
     T1 --> T19[Ticket 19: Persona & Prompt Presets]
 
@@ -105,8 +105,7 @@ graph TD
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
     class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T17,T21,T24,T25,T261,T262,T263,T264,T265 done;
-    class T14,T15,T16,T18,T19,T20,T22,T23,T26 frontier;
-    class T27 blocked;
+    class T14,T15,T16,T18,T19,T20,T22,T23,T26,T27 frontier;
 ```
 
 ---
@@ -602,8 +601,12 @@ graph TD
 
 ### Ticket 27: Trigger Firing Order — `current_turn_id` Is Stale During the Cascade (off-by-one-turn changeset attribution)
 * **Label:** `wayfinder:bug` (HITL)
-* **Status:** 🔴 OPEN (discovered during T17 verification, 2026-08-18)
+* **Status:** 🟡 IN PROGRESS (claimed 2026-08-18, branch `t27-trigger-order`) — discovered during T17 verification
 * **Depends on:** — (independent; affects T3 rewind + T17)
+* **Next steps (2026-08-18):**
+  1. Confirm the T3-rewind consequence end-to-end. Code analysis so far: `cap_*` stamps the PREVIOUS turn's id (first turn → `0`), so per-bubble ⟲ is off-by-one-turn and a session's first-turn changes are never rewindable. T3's rewind probe passed only because it manually stamped `current_turn_id` before its DML — it masked the bug.
+  2. Decide the fix (grilling): (A) recreate `agent_turn_init` after `agent_think`/`execute_tool` — root cause, no migration (triggers drop+create at boot), leans on the empirically-verified reverse-creation firing order; (B) JS pre-allocates the user-row id and stamps before the INSERT — order-independent but invasive (turn lifecycle, re-insert dance, scratchpad); (C) `cap_*` compute the turn id directly — patches one consumer class, leaves the root cause, needs a scratchpad negative-id case.
+  3. Implement + acceptance probe (two consecutive write-turns each stamp their own id; T3 rewind undoes the correct turn; T17's direct computation stays consistent). AGY review before commit.
 * **Question:** SQLite fires same-type triggers in **REVERSE creation order**, so `agent_think` (the cascade) runs BEFORE `agent_turn_init` (the turn stamp). How do we make `session_context.current_turn_id` hold the CURRENT turn's user-row id *during* the cascade, so the `cap_*` capture triggers stamp `turn_changesets` with the correct turn?
 * **The bug (empirically confirmed 2026-08-18):** `schema.js` creates `agent_turn_init` (section 6) BEFORE `agent_think` (section 7) with the comment "created first → fires first". SQLite actually fires same-type (AFTER INSERT) triggers in **reverse** creation order (verified in-browser: a trigger created second fires first). So on a user-row INSERT, `agent_think` (the whole ReAct cascade, including tool UDFs and their data DML) runs BEFORE `agent_turn_init` stamps `current_turn_id`. Consequences:
   * The `cap_*` capture triggers (which read `session_context.current_turn_id` at DML time) stamp `turn_changesets` with the **previous** turn's user-row id (or `0`/`''` on a session's first turn) — off-by-one-turn changeset attribution.
