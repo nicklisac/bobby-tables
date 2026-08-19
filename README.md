@@ -4,9 +4,13 @@ Bobby Tables is a browser-based data analysis tool and SQL assistant. It runs on
 
 Instead of orchestrating the conversation entirely in JavaScript, the conversation history, tool calls, dashboard state, and execution loop live inside the SQLite database itself.
 
+> 🔍 **Want to see how it works?** Open the interactive architecture explorer — a guided, step-by-step tour of the trigger cascade, every table and view, time travel, and the JSPI stack. In the app, click the **[?]** button in the header.
+
 ---
 
 ## How It Works
+
+![Tables architecture — the trigger cascade](public/architecture-hero.svg)
 
 The host JavaScript handles browser I/O and network requests. The agent's control flow is driven by SQLite triggers:
 

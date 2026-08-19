@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 440" font-family="'Geist Mono','JetBrains Mono','SF Mono',Menlo,Consolas,monospace">
+  <defs>
+    <linearGradient id="topline" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0d9488"/>
+      <stop offset="0.5" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#445466"/>
+    </marker>
+    <marker id="arrowp" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#a855f7"/>
+    </marker>
+  </defs>
+
+  <!-- card -->
+  <rect x="1" y="1" width="1198" height="438" rx="16" fill="#090e13" stroke="#1e2a38" stroke-width="1.5"/>
+  <rect x="1" y="1" width="1198" height="4" rx="2" fill="url(#topline)"/>
+
+  <!-- title -->
+  <text x="48" y="60" fill="#14b8a6" font-size="30" font-weight="700">Tables</text>
+  <text x="150" y="60" fill="#7e91a6" font-size="22">— the agent's harness is a database</text>
+  <text x="48" y="92" fill="#55697d" font-size="15">SQLite WASM + JSPI  ·  triggers drive the ReAct loop  ·  100% in the browser</text>
+
+  <!-- loop arrows -->
+  <line x1="250" y1="208" x2="285" y2="208" stroke="#445466" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="480" y1="208" x2="515" y2="208" stroke="#445466" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="710" y1="208" x2="745" y2="208" stroke="#445466" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="940" y1="208" x2="975" y2="208" stroke="#445466" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- nodes -->
+  <g>
+    <rect x="60" y="170" width="190" height="76" rx="10" fill="#15202c" stroke="#2a3a4a" stroke-width="1.5"/>
+    <text x="155" y="202" fill="#f0fdfa" font-size="18" font-weight="600" text-anchor="middle">user INSERT</text>
+    <text x="155" y="226" fill="#7e91a6" font-size="13" text-anchor="middle">messages</text>
+  </g>
+  <g>
+    <rect x="290" y="170" width="190" height="76" rx="10" fill="#0f2027" stroke="#0d9488" stroke-width="2"/>
+    <text x="385" y="200" fill="#f0fdfa" font-size="18" font-weight="600" text-anchor="middle">agent_think</text>
+    <rect x="330" y="208" width="110" height="22" rx="11" fill="#0d9488" fill-opacity="0.15" stroke="#0d9488" stroke-width="1"/>
+    <text x="385" y="223" fill="#14b8a6" font-size="12" font-weight="600" text-anchor="middle">JSPI &#9208; LLM</text>
+  </g>
+  <g>
+    <rect x="520" y="170" width="190" height="76" rx="10" fill="#15202c" stroke="#2a3a4a" stroke-width="1.5"/>
+    <text x="615" y="202" fill="#f0fdfa" font-size="18" font-weight="600" text-anchor="middle">assistant INSERT</text>
+    <text x="615" y="226" fill="#7e91a6" font-size="13" text-anchor="middle">+ tool_calls</text>
+  </g>
+  <g>
+    <rect x="750" y="170" width="190" height="76" rx="10" fill="#15202c" stroke="#2a3a4a" stroke-width="1.5"/>
+    <text x="845" y="202" fill="#f0fdfa" font-size="18" font-weight="600" text-anchor="middle">execute_tool</text>
+    <text x="845" y="226" fill="#7e91a6" font-size="13" text-anchor="middle">run UDF</text>
+  </g>
+  <g>
+    <rect x="980" y="170" width="190" height="76" rx="10" fill="#15202c" stroke="#2a3a4a" stroke-width="1.5"/>
+    <text x="1075" y="202" fill="#f0fdfa" font-size="18" font-weight="600" text-anchor="middle">tool INSERT</text>
+    <text x="1075" y="226" fill="#7e91a6" font-size="13" text-anchor="middle">result</text>
+  </g>
+
+  <!-- loop-back -->
+  <path d="M1075 246 C 1075 332, 385 332, 385 246" fill="none" stroke="#a855f7" stroke-width="2" stroke-dasharray="6 7" marker-end="url(#arrowp)"/>
+  <text x="730" y="322" fill="#a855f7" font-size="13" text-anchor="middle">loop — think &#8594; act &#8594; observe — until a final answer with no tool calls</text>
+
+  <!-- stat chips -->
+  <g>
+    <rect x="60" y="356" width="340" height="52" rx="10" fill="#0f1720" stroke="#1e2a38" stroke-width="1.5"/>
+    <text x="82" y="388" fill="#14b8a6" font-size="20" font-weight="700">100%</text>
+    <text x="150" y="388" fill="#7e91a6" font-size="14">in the browser — no server</text>
+  </g>
+  <g>
+    <rect x="430" y="356" width="340" height="52" rx="10" fill="#0f1720" stroke="#1e2a38" stroke-width="1.5"/>
+    <text x="452" y="388" fill="#14b8a6" font-size="20" font-weight="700">0</text>
+    <text x="478" y="388" fill="#7e91a6" font-size="14">lines of JS in the control flow</text>
+  </g>
+  <g>
+    <rect x="800" y="356" width="340" height="52" rx="10" fill="#0f1720" stroke="#1e2a38" stroke-width="1.5"/>
+    <text x="822" y="388" fill="#14b8a6" font-size="20" font-weight="700">1</text>
+    <text x="848" y="388" fill="#7e91a6" font-size="14">.sqlite3 file = the whole harness</text>
+  </g>
+</svg>

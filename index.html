@@ -68,6 +68,13 @@
             <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
           </svg><span class="btn-bracket">]</span>
         </button>
+        <button type="button" id="btn-architecture" class="btn-header" title="How Tables works — explore the architecture">
+          <span class="btn-bracket">[</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-header">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg><span class="btn-bracket">]</span>
+        </button>
         <input type="file" id="csv-file-input" accept=".csv,text/csv,text/comma-separated-values,.tsv,.txt" style="display:none;" />
       </div>
     </header>
@@ -576,6 +583,28 @@
             <button type="submit" id="config-apply" class="btn-primary">[Apply &amp; Reboot]</button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <div id="architecture-modal" class="modal-backdrop arch-modal hidden" role="dialog" aria-modal="true" aria-labelledby="arch-modal-title">
+      <div class="arch-modal-card">
+        <div class="modal-header">
+          <div class="modal-header-title-wrap">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-modal-title">
+              <circle cx="12" cy="12" r="10"></circle>
+              <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+              <line x1="12" y1="17" x2="12.01" y2="17"></line>
+            </svg>
+            <h3 id="arch-modal-title">How Tables works</h3>
+          </div>
+          <button type="button" class="modal-close-btn" id="arch-modal-close" title="Close (Esc)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+        <iframe id="arch-iframe" class="arch-iframe" src="" title="Tables architecture explorer"></iframe>
       </div>
     </div>
   </div>

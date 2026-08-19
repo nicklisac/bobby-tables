@@ -60,6 +60,10 @@ const btnToggleConfig   = document.getElementById('btn-toggle-config');
 const configModal       = document.getElementById('config-modal');
 const configCancel      = document.getElementById('config-cancel');
 const configCloseBtn    = document.getElementById('config-close-btn');
+const btnArchitecture   = document.getElementById('btn-architecture');
+const archModal         = document.getElementById('architecture-modal');
+const archCloseBtn      = document.getElementById('arch-modal-close');
+const archIframe        = document.getElementById('arch-iframe');
 
 let agent = null;
 let activeSessionId = 'default';
@@ -213,6 +217,45 @@ if (configModal) {
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && configModal && !configModal.classList.contains('hidden')) {
     closeConfigModal();
+  }
+});
+
+// ── Architecture modal ([?] — how it works) ─────────────────────────
+// Opens the self-contained public/architecture.html in a full-screen
+// iframe. The theme is passed as a query param so the page matches the
+// app's current day/night mode.
+
+function archTheme() {
+  return (document.documentElement.getAttribute('data-theme') || 'dark');
+}
+
+function openArchModal() {
+  if (archIframe) archIframe.src = '/architecture.html?theme=' + archTheme();
+  if (archModal) archModal.classList.remove('hidden');
+  if (btnArchitecture) btnArchitecture.classList.add('is-active');
+}
+
+function closeArchModal() {
+  if (archModal) archModal.classList.add('hidden');
+  if (btnArchitecture) btnArchitecture.classList.remove('is-active');
+  if (archIframe) archIframe.src = '';
+}
+
+if (btnArchitecture) {
+  btnArchitecture.addEventListener('click', () => {
+    if (archModal && !archModal.classList.contains('hidden')) closeArchModal();
+    else openArchModal();
+  });
+}
+if (archCloseBtn) archCloseBtn.addEventListener('click', closeArchModal);
+if (archModal) {
+  archModal.addEventListener('click', (e) => {
+    if (e.target === archModal) closeArchModal();
+  });
+}
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && archModal && !archModal.classList.contains('hidden')) {
+    closeArchModal();
   }
 });
 

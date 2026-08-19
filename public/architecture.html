@@ -1,0 +1,978 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tables — How It Works (Architecture)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    /* ── Theme tokens (mirrors src/styles.css) ───────────────── */
+    :root {
+      --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-mono: 'Geist Mono', 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+    }
+    html[data-theme="dark"] {
+      --bg-base: #090e13; --bg-surface: #0f1720; --bg-elevated: #15202c;
+      --bg-overlay: #1b2938; --bg-input: #080c10;
+      --border-subtle: rgba(255,255,255,0.08); --border-default: rgba(255,255,255,0.15);
+      --border-hover: rgba(255,255,255,0.32);
+      --text-primary: #f0fdfa; --text-secondary: #c8d6e5; --text-muted: #7e91a6; --text-faint: #445466;
+      --accent: #0d9488; --accent-hover: #14b8a6; --accent-subtle: rgba(13,148,136,0.12); --accent-glow: rgba(13,148,136,0.28);
+      --purple: #a855f7; --purple-subtle: rgba(168,85,247,0.12);
+      --blue: #3b82f6; --blue-subtle: rgba(59,130,246,0.12);
+      --green: #10b981; --green-subtle: rgba(16,185,129,0.12);
+      --yellow: #f59e0b; --yellow-subtle: rgba(245,158,11,0.12);
+      --red: #ef4444; --red-subtle: rgba(239,68,68,0.12);
+      --code-bg: #080c10; --shadow: 0 12px 40px rgba(0,0,0,0.35);
+    }
+    html[data-theme="light"] {
+      --bg-base: #fbfbf9; --bg-surface: #ffffff; --bg-elevated: #ffffff;
+      --bg-overlay: #f4f4f0; --bg-input: #f8f8f5;
+      --border-subtle: rgba(0,0,0,0.08); --border-default: rgba(0,0,0,0.15);
+      --border-hover: rgba(0,0,0,0.30);
+      --text-primary: #134e4a; --text-secondary: #334155; --text-muted: #64748b; --text-faint: #94a3b8;
+      --accent: #0d9488; --accent-hover: #0f766e; --accent-subtle: rgba(13,148,136,0.10); --accent-glow: rgba(13,148,136,0.20);
+      --purple: #7e22ce; --purple-subtle: rgba(126,34,206,0.10);
+      --blue: #2563eb; --blue-subtle: rgba(37,99,235,0.10);
+      --green: #059669; --green-subtle: rgba(5,150,105,0.10);
+      --yellow: #d97706; --yellow-subtle: rgba(217,119,6,0.10);
+      --red: #dc2626; --red-subtle: rgba(220,38,38,0.10);
+      --code-bg: #f8f8f5; --shadow: 0 12px 40px rgba(0,0,0,0.08);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    * { scrollbar-width: thin; scrollbar-color: var(--border-default) transparent; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+    html { scroll-behavior: smooth; }
+    body {
+      background: var(--bg-base); color: var(--text-primary);
+      font-family: var(--font-sans); line-height: 1.65; font-size: 15px;
+      -webkit-font-smoothing: antialiased; transition: background .2s ease, color .2s ease;
+    }
+    code, pre, .mono { font-family: var(--font-mono); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-hover); text-decoration: underline; }
+
+    /* ── Top bar ─────────────────────────────────────────────── */
+    .topbar {
+      position: sticky; top: 0; z-index: 50;
+      display: flex; align-items: center; gap: 1rem;
+      padding: 0.7rem 1.4rem;
+      background: color-mix(in srgb, var(--bg-base) 82%, transparent);
+      backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .topbar .brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 600; letter-spacing: -0.01em; }
+    .topbar .brand .logo { color: var(--accent); display: inline-flex; }
+    .topbar .brand .sub { color: var(--text-muted); font-weight: 400; font-size: 0.8rem; }
+    .topnav { display: flex; gap: 0.15rem; margin-left: auto; flex-wrap: wrap; }
+    .topnav a {
+      font-family: var(--font-mono); font-size: 0.72rem; font-weight: 500;
+      color: var(--text-muted); padding: 0.35rem 0.6rem; border-radius: 6px;
+      border: 1px solid transparent; white-space: nowrap;
+    }
+    .topnav a:hover { color: var(--text-primary); background: var(--bg-elevated); text-decoration: none; }
+    .topnav a.active { color: var(--accent); background: var(--accent-subtle); border-color: var(--accent); }
+    .theme-btn {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      background: var(--bg-surface); border: 1px solid var(--border-default);
+      color: var(--text-secondary); padding: 0.35rem 0.7rem; border-radius: 6px;
+      font-family: var(--font-mono); font-size: 0.72rem; cursor: pointer; transition: all .15s;
+    }
+    .theme-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── Layout ──────────────────────────────────────────────── */
+    main { max-width: 1080px; margin: 0 auto; padding: 2.2rem 1.4rem 5rem; }
+    section { padding: 3.2rem 0 1rem; scroll-margin-top: 70px; }
+    section + section { border-top: 1px solid var(--border-subtle); }
+    .kicker {
+      font-family: var(--font-mono); font-size: 0.7rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.14em; color: var(--accent);
+      display: inline-flex; align-items: center; gap: 0.5rem; margin-bottom: 0.7rem;
+    }
+    .kicker .num { color: var(--text-faint); }
+    h2 { font-size: 1.7rem; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 0.6rem; }
+    .lede { font-size: 1.02rem; color: var(--text-secondary); max-width: 70ch; margin-bottom: 1.6rem; }
+    .lede strong { color: var(--text-primary); font-weight: 600; }
+    .repo-link { margin: -0.6rem 0 1.6rem; }
+    .repo-link a {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-secondary);
+      background: var(--bg-surface); border: 1px solid var(--border-default);
+      padding: 0.4rem 0.85rem; border-radius: 20px; transition: all .15s;
+    }
+    .repo-link a:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+    .repo-link a svg { color: var(--text-primary); flex-shrink: 0; }
+    .repo-link a:hover svg { color: var(--accent); }
+    p { color: var(--text-secondary); margin-bottom: 0.9rem; max-width: 78ch; }
+    p strong { color: var(--text-primary); }
+    .inline-code {
+      font-family: var(--font-mono); font-size: 0.86em;
+      background: var(--bg-elevated); border: 1px solid var(--border-subtle);
+      padding: 0.08em 0.4em; border-radius: 5px; color: var(--accent-hover);
+    }
+    html[data-theme="light"] .inline-code { color: var(--accent); }
+
+    .card {
+      background: var(--bg-surface); border: 1px solid var(--border-default);
+      border-radius: 10px; padding: 1.3rem 1.4rem; box-shadow: var(--shadow);
+    }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+    @media (max-width: 780px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+
+    .stat {
+      background: var(--bg-surface); border: 1px solid var(--border-default);
+      border-radius: 10px; padding: 1rem 1.1rem;
+    }
+    .stat .v { font-family: var(--font-mono); font-size: 1.5rem; font-weight: 600; color: var(--accent); }
+    .stat .k { font-size: 0.78rem; color: var(--text-muted); margin-top: 0.2rem; }
+
+    /* ── Code blocks ─────────────────────────────────────────── */
+    pre {
+      background: var(--code-bg); border: 1px solid var(--border-subtle);
+      border-radius: 8px; padding: 0.9rem 1rem; overflow-x: auto;
+      font-size: 0.78rem; line-height: 1.55; color: var(--text-secondary);
+      margin: 0.9rem 0;
+    }
+    pre .c { color: var(--text-faint); }        /* comment */
+    pre .k { color: var(--accent-hover); }      /* keyword */
+    pre .s { color: var(--green); }             /* string */
+    pre .f { color: var(--blue); }              /* function */
+    pre .t { color: var(--purple); }            /* table/type */
+    html[data-theme="light"] pre .k { color: var(--accent); }
+
+    /* ── Hero loop diagram ───────────────────────────────────── */
+    .hero-loop { margin: 1.6rem 0 0.4rem; }
+    .hero-loop svg { width: 100%; height: auto; display: block; }
+    .loop-node { fill: var(--bg-elevated); stroke: var(--border-default); stroke-width: 1.5; }
+    .loop-node.think { stroke: var(--accent); }
+    .loop-label { fill: var(--text-primary); font-family: var(--font-mono); font-size: 15px; font-weight: 600; }
+    .loop-sub { fill: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+    .loop-arrow { stroke: var(--text-faint); stroke-width: 2; fill: none; }
+    .loop-back { stroke: var(--purple); stroke-width: 2; fill: none; stroke-dasharray: 5 8; }
+    .loop-backlabel { fill: var(--purple); font-family: var(--font-mono); font-size: 11px; }
+    .jspi-badge { fill: var(--accent-subtle); stroke: var(--accent); stroke-width: 1; }
+    .jspi-text { fill: var(--accent-hover); font-family: var(--font-mono); font-size: 10px; font-weight: 600; }
+
+    /* ── Tracer (section 2) ──────────────────────────────────── */
+    .tracer { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+    .tracer > * { min-width: 0; }
+    @media (max-width: 860px) { .tracer { grid-template-columns: 1fr; } }
+    .tracer-steps { display: flex; flex-direction: column; gap: 0.5rem; }
+    .tstep {
+      display: flex; gap: 0.7rem; align-items: flex-start;
+      background: var(--bg-surface); border: 1px solid var(--border-subtle);
+      border-radius: 8px; padding: 0.7rem 0.8rem; cursor: pointer; transition: all .15s;
+    }
+    .tstep:hover { border-color: var(--border-hover); }
+    .tstep.active { border-color: var(--accent); background: var(--accent-subtle); }
+    .tstep .dot {
+      width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-family: var(--font-mono); font-size: 0.7rem; font-weight: 600;
+      background: var(--bg-elevated); color: var(--text-muted); border: 1px solid var(--border-default);
+    }
+    .tstep.active .dot { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .tstep .tt { font-size: 0.86rem; font-weight: 600; color: var(--text-secondary); }
+    .tstep.active .tt { color: var(--text-primary); }
+    .tstep .tg { font-family: var(--font-mono); font-size: 0.68rem; color: var(--accent); }
+    .tracer-detail { display: flex; flex-direction: column; gap: 0.9rem; }
+    .tracer-detail .panel { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: 10px; padding: 1rem 1.1rem; }
+    .tracer-detail .panel h4 { font-size: 0.72rem; font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); margin-bottom: 0.5rem; }
+    /* Pin the demo box so it doesn't resize as steps change */
+    .tracer-detail #t-note { height: 96px; overflow-y: auto; }
+    .tracer-detail #t-sql { height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+    .live-wrap { height: 176px; overflow-y: auto; }
+    .tracer-controls { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+    .tbtn {
+      font-family: var(--font-mono); font-size: 0.74rem; font-weight: 500;
+      background: var(--bg-surface); border: 1px solid var(--border-default);
+      color: var(--text-secondary); padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; transition: all .15s;
+    }
+    .tbtn:hover { border-color: var(--accent); color: var(--accent); }
+    .tbtn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .tbtn.primary:hover { background: var(--accent-hover); }
+    .tbtn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .stepline { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); margin-left: auto; }
+
+    /* live messages table */
+    .live-table { width: 100%; border-collapse: collapse; font-size: 0.74rem; table-layout: fixed; }
+    .live-table th { text-align: left; font-family: var(--font-mono); font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint); padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--border-default); overflow: hidden; }
+    .live-table td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border-subtle); color: var(--text-secondary); vertical-align: top; word-break: break-word; overflow-wrap: anywhere; }
+    .live-table th:nth-child(1), .live-table td:nth-child(1) { width: 34px; }
+    .live-table th:nth-child(2), .live-table td:nth-child(2) { width: 92px; }
+    .live-table tr.new td { animation: rowin .4s ease; }
+    @keyframes rowin { from { background: var(--accent-subtle); } to { background: transparent; } }
+    .role-pill { font-family: var(--font-mono); font-size: 0.66rem; font-weight: 600; padding: 0.1rem 0.4rem; border-radius: 4px; }
+    .role-user { background: var(--accent-subtle); color: var(--accent-hover); }
+    .role-assistant { background: var(--blue-subtle); color: var(--blue); }
+    .role-tool { background: var(--yellow-subtle); color: var(--yellow); }
+    html[data-theme="light"] .role-user, html[data-theme="light"] .role-assistant, html[data-theme="light"] .role-tool { color: var(--text-primary); }
+    .live-empty { color: var(--text-faint); font-style: italic; font-size: 0.78rem; padding: 0.6rem 0.2rem; }
+
+    /* ── Brain map (section 3) ───────────────────────────────── */
+    .cat-legend { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1.1rem; }
+    .cat-chip {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-secondary);
+      background: var(--bg-surface); border: 1px solid var(--border-default);
+      padding: 0.3rem 0.6rem; border-radius: 20px; cursor: pointer; transition: all .15s;
+    }
+    .cat-chip:hover { border-color: var(--border-hover); }
+    .cat-chip.active { border-color: var(--accent); color: var(--text-primary); background: var(--accent-subtle); }
+    .cat-chip .sw { width: 9px; height: 9px; border-radius: 2px; }
+    .brain-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; align-items: start; }
+    @media (max-width: 860px) { .brain-wrap { grid-template-columns: 1fr; } }
+    .brain-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+    @media (max-width: 520px) { .brain-grid { grid-template-columns: 1fr; } }
+    .bnode {
+      text-align: left; background: var(--bg-surface); border: 1px solid var(--border-default);
+      border-left: 3px solid var(--nc, var(--border-default)); border-radius: 8px;
+      padding: 0.6rem 0.7rem; cursor: pointer; transition: all .15s;
+    }
+    .bnode:hover { border-color: var(--border-hover); transform: translateY(-1px); }
+    .bnode.active { background: var(--bg-elevated); box-shadow: 0 0 0 1px var(--nc, var(--accent)); }
+    .bnode .bn { font-family: var(--font-mono); font-size: 0.8rem; font-weight: 600; color: var(--text-primary); }
+    .bnode .bt { font-family: var(--font-mono); font-size: 0.62rem; color: var(--nc, var(--text-muted)); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 0.15rem; }
+    .bnode.dim { opacity: 0.32; }
+    .brain-detail { position: sticky; top: 74px; }
+    .brain-detail .bd-empty { color: var(--text-faint); font-style: italic; }
+    .bd-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.7rem; }
+    .bd-head .bd-name { font-family: var(--font-mono); font-size: 1.05rem; font-weight: 600; color: var(--text-primary); }
+    .bd-tag { font-family: var(--font-mono); font-size: 0.62rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; padding: 0.15rem 0.5rem; border-radius: 4px; }
+    .bd-sec { margin-bottom: 0.9rem; }
+    .bd-sec h5 { font-family: var(--font-mono); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); margin-bottom: 0.3rem; }
+    .bd-sec p { font-size: 0.86rem; margin-bottom: 0; }
+
+    /* ── Time travel (section 4) ─────────────────────────────── */
+    .tt-visual { margin: 1rem 0; }
+    .tt-visual svg { width: 100%; height: auto; display: block; }
+    .tt-msg { fill: var(--bg-elevated); stroke: var(--border-default); stroke-width: 1; }
+    .tt-msg.sum { fill: var(--purple-subtle); stroke: var(--purple); }
+    .tt-wm { stroke: var(--accent); stroke-width: 2.5; }
+    .tt-wm-label { fill: var(--accent-hover); font-family: var(--font-mono); font-size: 11px; font-weight: 600; }
+    .tt-label { fill: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+    .tt-turn { fill: var(--bg-elevated); stroke: var(--border-default); stroke-width: 1; }
+    .tt-turn.past { fill: var(--red-subtle); stroke: var(--red); }
+    .tt-turn.cur { fill: var(--accent-subtle); stroke: var(--accent); }
+    .tt-turn-label { fill: var(--text-secondary); font-family: var(--font-mono); font-size: 10px; }
+    .tt-arrow { stroke: var(--text-faint); stroke-width: 1.5; fill: none; }
+
+    /* ── Boundary (section 5) ────────────────────────────────── */
+    .boundary { display: grid; grid-template-columns: 1fr auto 1fr; gap: 0; align-items: stretch; border: 1px solid var(--border-default); border-radius: 10px; overflow: hidden; }
+    @media (max-width: 720px) { .boundary { grid-template-columns: 1fr; } .wall { display: none; } }
+    .b-side { padding: 1.1rem 1.2rem; }
+    .b-side.safe { background: var(--green-subtle); }
+    .b-side.danger { background: var(--red-subtle); }
+    .b-side h4 { font-size: 0.78rem; font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.7rem; }
+    .b-side.safe h4 { color: var(--green); }
+    .b-side.danger h4 { color: var(--red); }
+    .b-side ul { list-style: none; display: flex; flex-direction: column; gap: 0.35rem; }
+    .b-side li { font-family: var(--font-mono); font-size: 0.76rem; color: var(--text-secondary); padding: 0.3rem 0.55rem; background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 5px; }
+    .wall { width: 2px; background: repeating-linear-gradient(var(--border-default) 0 8px, transparent 8px 16px); position: relative; }
+    .wall .wall-tag {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      background: var(--bg-base); border: 1px solid var(--border-default); border-radius: 20px;
+      font-family: var(--font-mono); font-size: 0.62rem; color: var(--text-muted); padding: 0.25rem 0.6rem; white-space: nowrap;
+    }
+
+    /* ── Stack (section 6) ───────────────────────────────────── */
+    .stack { display: flex; flex-direction: column; gap: 0.5rem; margin: 1rem 0; }
+    .stack-layer {
+      display: flex; align-items: center; gap: 0.9rem;
+      background: var(--bg-surface); border: 1px solid var(--border-default);
+      border-radius: 8px; padding: 0.85rem 1rem;
+    }
+    .stack-layer .sl-num { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-faint); }
+    .stack-layer .sl-name { font-family: var(--font-mono); font-size: 0.86rem; font-weight: 600; color: var(--text-primary); }
+    .stack-layer .sl-desc { font-size: 0.8rem; color: var(--text-muted); margin-left: auto; text-align: right; }
+    @media (max-width: 620px) { .stack-layer { flex-direction: column; align-items: flex-start; gap: 0.2rem; } .stack-layer .sl-desc { text-align: left; margin-left: 0; } }
+    .stack-layer.jspi { border-color: var(--accent); background: var(--accent-subtle); }
+    .stack-layer.jspi .sl-name { color: var(--accent-hover); }
+
+    footer { max-width: 1080px; margin: 0 auto; padding: 2rem 1.4rem 3rem; border-top: 1px solid var(--border-subtle); color: var(--text-faint); font-size: 0.78rem; font-family: var(--font-mono); }
+    footer a { color: var(--text-muted); }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+        </svg>
+      </span>
+      <span>Tables</span>
+      <span class="sub">/ how it works</span>
+    </div>
+    <nav class="topnav" id="topnav">
+      <a href="#idea">Idea</a>
+      <a href="#loop">The Loop</a>
+      <a href="#brain">The Harness</a>
+      <a href="#time">Time Travel</a>
+      <a href="#boundary">Boundary</a>
+      <a href="#stack">The Stack</a>
+    </nav>
+    <button type="button" class="theme-btn" id="theme-toggle" title="Toggle day / night">
+      <span id="theme-icon"></span><span id="theme-label">Night</span>
+    </button>
+  </div>
+
+  <main>
+    <!-- ══════════════ 1. THE BIG IDEA ══════════════ -->
+    <section id="idea">
+      <div class="kicker"><span class="num">01</span> The big idea</div>
+      <h2>The agent's harness is a database.</h2>
+      <p class="lede">
+        Most LLM agents hide their memory and control flow in a JavaScript object or a server.
+        Tables does the opposite: the <strong>entire agent — its memory, its tool calls, its
+        dashboards, and the loop that drives it — lives inside an in-browser SQLite database.</strong>
+        You can <span class="inline-code">SELECT * FROM messages</span> and read the agent's whole mind.
+      </p>
+
+      <p class="repo-link">
+        <a href="https://github.com/nicklisac/tables" target="_blank" rel="noopener">
+          <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          <span>nicklisac/tables on GitHub</span>
+        </a>
+      </p>
+
+      <div class="hero-loop">
+        <svg viewBox="0 0 1000 250" role="img" aria-label="The trigger cascade loop">
+          <defs>
+            <marker id="ah-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" fill="var(--text-faint)"></path>
+            </marker>
+          </defs>
+          <!-- arrows between nodes -->
+          <line class="loop-arrow" x1="168" y1="95" x2="205" y2="95" marker-end="url(#ah-gray)"></line>
+          <line class="loop-arrow" x1="392" y1="95" x2="429" y2="95" marker-end="url(#ah-gray)"></line>
+          <line class="loop-arrow" x1="618" y1="95" x2="655" y2="95" marker-end="url(#ah-gray)"></line>
+          <line class="loop-arrow" x1="832" y1="95" x2="867" y2="95" marker-end="url(#ah-gray)"></line>
+
+          <!-- node 1: user insert -->
+          <rect class="loop-node" x="12" y="60" width="156" height="70" rx="9"></rect>
+          <text class="loop-label" x="90" y="92" text-anchor="middle">user INSERT</text>
+          <text class="loop-sub" x="90" y="112" text-anchor="middle">messages</text>
+
+          <!-- node 2: agent_think -->
+          <rect class="loop-node think" x="208" y="60" width="182" height="70" rx="9"></rect>
+          <text class="loop-label" x="299" y="90" text-anchor="middle">agent_think</text>
+          <rect class="jspi-badge" x="256" y="98" width="86" height="18" rx="9"></rect>
+          <text class="jspi-text" x="299" y="111" text-anchor="middle">JSPI &#9208; LLM</text>
+
+          <!-- node 3: assistant insert -->
+          <rect class="loop-node" x="432" y="60" width="184" height="70" rx="9"></rect>
+          <text class="loop-label" x="524" y="92" text-anchor="middle">assistant INSERT</text>
+          <text class="loop-sub" x="524" y="112" text-anchor="middle">+ tool_calls</text>
+
+          <!-- node 4: execute_tool -->
+          <rect class="loop-node" x="658" y="60" width="172" height="70" rx="9"></rect>
+          <text class="loop-label" x="744" y="92" text-anchor="middle">execute_tool</text>
+          <text class="loop-sub" x="744" y="112" text-anchor="middle">run UDF</text>
+
+          <!-- node 5: tool insert -->
+          <rect class="loop-node" x="870" y="60" width="120" height="70" rx="9"></rect>
+          <text class="loop-label" x="930" y="92" text-anchor="middle">tool INSERT</text>
+          <text class="loop-sub" x="930" y="112" text-anchor="middle">result</text>
+
+          <!-- loop-back arrow -->
+      <path class="loop-back" d="M930 130 C 930 205, 299 205, 299 130"></path>
+      <text class="loop-backlabel" x="614" y="212" text-anchor="middle">loop — think &#8594; act &#8594; observe — until a final answer with no tool calls</text>
+        </svg>
+      </div>
+
+      <p>
+        The ReAct loop is not a <span class="inline-code">while</span> loop in JavaScript. It is a
+        <strong>cascade of SQLite triggers</strong>. Drop a user message into
+        <span class="inline-code">messages</span> and the database reacts to itself — thinking, acting,
+        observing — until it stops. The only JavaScript that runs is the thin layer that does browser I/O
+        and network requests. Everything else is declarative SQL living in the database.
+      </p>
+    </section>
+
+    <!-- ══════════════ 2. THE LOOP ══════════════ -->
+    <section id="loop">
+      <div class="kicker"><span class="num">02</span> The loop</div>
+      <h2>Trace one turn, step by step.</h2>
+      <p class="lede">
+        Press <strong>play</strong> or click a step. Watch a single user message ripple through the
+        trigger cascade, and watch the <span class="inline-code">messages</span> table fill in as each
+        trigger fires.
+      </p>
+
+      <div class="tracer">
+        <div>
+          <div class="tracer-steps" id="tracer-steps"></div>
+        </div>
+        <div class="tracer-detail">
+          <div class="panel">
+            <div class="tracer-controls">
+              <button type="button" class="tbtn primary" id="t-play">▶ play</button>
+              <button type="button" class="tbtn" id="t-prev">‹ prev</button>
+              <button type="button" class="tbtn" id="t-next">next ›</button>
+              <button type="button" class="tbtn" id="t-reset">reset</button>
+              <span class="stepline" id="t-count"></span>
+            </div>
+          </div>
+          <div class="panel">
+            <h4>What happens</h4>
+            <p id="t-note" style="margin:0;font-size:0.88rem;"></p>
+          </div>
+          <div class="panel">
+            <h4>SQL that runs</h4>
+            <pre id="t-sql" style="margin:0;"></pre>
+          </div>
+          <div class="panel">
+            <h4>Live <span style="color:var(--accent)">messages</span> table</h4>
+            <div class="live-wrap">
+              <table class="live-table">
+                <thead><tr><th>id</th><th>role</th><th>content / tool_calls</th></tr></thead>
+                <tbody id="t-rows"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════ 3. THE BRAIN ══════════════ -->
+    <section id="brain">
+      <div class="kicker"><span class="num">03</span> The harness</div>
+      <h2>Everything is a table.</h2>
+      <p class="lede">
+        Every piece of agent state is a row in a table you can query. Click any object to see what it is,
+        <strong>why it exists</strong>, and the real DDL that creates it. Filter by category to focus.
+      </p>
+
+      <div class="cat-legend" id="cat-legend"></div>
+
+      <div class="brain-wrap">
+        <div class="brain-grid" id="brain-grid"></div>
+        <div class="brain-detail card" id="brain-detail">
+          <p class="bd-empty">← Select an object to inspect it.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════ 4. TIME TRAVEL ══════════════ -->
+    <section id="time">
+      <div class="kicker"><span class="num">04</span> Time travel</div>
+      <h2>Rewind the data. Compact the memory.</h2>
+      <p class="lede">
+        Two independent systems give the agent a sense of time — one for <strong>undoing</strong> what it
+        did to your data, one for <strong>forgetting</strong> what it no longer needs in context.
+      </p>
+
+      <div class="grid2">
+        <div class="card">
+          <h3 style="font-size:1.05rem;margin-bottom:0.4rem;color:var(--red);">⟲ Rewind — undo a turn</h3>
+          <p style="font-size:0.88rem;">
+            Every turn runs inside an atomic <span class="inline-code">SAVEPOINT turn_sp</span>. Per-table
+            <strong>capture triggers</strong> (<span class="inline-code">cap_*</span>) write a pre/post row
+            image for every change into <span class="inline-code">turn_changesets</span>; DDL goes to
+            <span class="inline-code">turn_ddl_log</span> with a pre-image. Click the
+            <span class="inline-code">⟲</span> on any message and the inverse is replayed — data and schema
+            return to that turn, while the conversation is kept. A 20-turn ring buffer bounds the cost.
+          </p>
+          <div class="tt-visual">
+            <svg viewBox="0 -12 520 132" role="img" aria-label="Rewind timeline">
+              <rect class="tt-turn past" x="10"  y="40" width="90" height="40" rx="7"></rect>
+              <rect class="tt-turn past" x="110" y="40" width="90" height="40" rx="7"></rect>
+              <rect class="tt-turn past" x="210" y="40" width="90" height="40" rx="7"></rect>
+              <rect class="tt-turn cur"  x="310" y="40" width="90" height="40" rx="7"></rect>
+              <rect class="tt-turn"      x="410" y="40" width="90" height="40" rx="7"></rect>
+              <text class="tt-turn-label" x="55"  y="64" text-anchor="middle">turn 4</text>
+              <text class="tt-turn-label" x="155" y="64" text-anchor="middle">turn 5</text>
+              <text class="tt-turn-label" x="255" y="64" text-anchor="middle">turn 6</text>
+              <text class="tt-turn-label" x="355" y="64" text-anchor="middle">turn 7</text>
+              <text class="tt-turn-label" x="455" y="64" text-anchor="middle">turn 8</text>
+              <path class="tt-arrow" d="M355 40 C 300 6, 120 6, 55 40"></path>
+              <text class="tt-wm-label" x="205" y="7.5" text-anchor="middle">⟲ replay inverse changesets</text>
+            </svg>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3 style="font-size:1.05rem;margin-bottom:0.4rem;color:var(--purple);">◐ Compact — shrink the context</h3>
+          <p style="font-size:0.88rem;">
+            When token usage nears the model's window, the oldest turns are summarized into a
+            <span class="inline-code">compactions</span> row and a <strong>watermark</strong> advances.
+            The <span class="inline-code">v_active_context</span> view simply stops reading rows below the
+            watermark. The <span class="inline-code">messages</span> table is <strong>never touched</strong> —
+            it stays a complete, immutable audit log.
+          </p>
+          <div class="tt-visual">
+            <svg viewBox="0 0 520 120" role="img" aria-label="Compaction watermark">
+              <rect class="tt-msg sum" x="10" y="40" width="120" height="40" rx="7"></rect>
+              <text class="tt-label" x="70" y="64" text-anchor="middle" style="fill:var(--purple)">summary</text>
+              <rect class="tt-msg" x="140" y="40" width="52" height="40" rx="5"></rect>
+              <rect class="tt-msg" x="198" y="40" width="52" height="40" rx="5"></rect>
+              <rect class="tt-msg" x="256" y="40" width="52" height="40" rx="5"></rect>
+              <rect class="tt-msg" x="314" y="40" width="52" height="40" rx="5"></rect>
+              <rect class="tt-msg" x="372" y="40" width="52" height="40" rx="5"></rect>
+              <rect class="tt-msg" x="430" y="40" width="52" height="40" rx="5"></rect>
+              <line class="tt-wm" x1="133" y1="28" x2="133" y2="92"></line>
+              <text class="tt-wm-label" x="133" y="20" text-anchor="middle">watermark</text>
+              <text class="tt-label" x="300" y="108" text-anchor="middle">rows after the watermark are what the LLM sees</text>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════ 5. THE BOUNDARY ══════════════ -->
+    <section id="boundary">
+      <div class="kicker"><span class="num">05</span> The boundary</div>
+      <h2>The agent can't break its own harness.</h2>
+      <p class="lede">
+        A powerful agent that can run arbitrary SQL could also <span class="inline-code">DROP TABLE
+        messages</span> and destroy itself. Tables draws a hard line: the app's own tables are
+        <strong>protected</strong> from destructive DDL, so the agent can analyze your data without ever
+        corrupting the machinery that runs it.
+      </p>
+
+      <div class="boundary">
+        <div class="b-side safe">
+          <h4>✓ Your data — fully writable</h4>
+          <ul>
+            <li>sample_data</li>
+            <li>any table you create</li>
+            <li>CSV imports</li>
+            <li>materialized tool output</li>
+            <li>your views</li>
+          </ul>
+        </div>
+        <div class="wall"><span class="wall-tag">isProtectedTable()</span></div>
+        <div class="b-side danger">
+          <h4>⛔ The harness — read-only to the agent</h4>
+          <ul>
+            <li>messages · sessions · session_context</li>
+            <li>system_config · tools</li>
+            <li>turn_changesets · turn_ddl_log · compactions</li>
+            <li>tool_approvals · dashboard_cards</li>
+            <li>documents · documents_fts</li>
+          </ul>
+        </div>
+      </div>
+
+      <p style="margin-top:1.1rem;">
+        The guard lives in two places — the agent's <span class="inline-code">run_dynamic_sql</span> and the
+        direct-SQL console's write gate — both call the same
+        <span class="inline-code">isProtectedObject()</span> check. You can still <em>query</em> the harness
+        (that's the whole point); you just can't drop or alter it.
+      </p>
+    </section>
+
+    <!-- ══════════════ 6. THE STACK ══════════════ -->
+    <section id="stack">
+      <div class="kicker"><span class="num">06</span> The stack</div>
+      <h2>Why this is even possible: JSPI.</h2>
+      <p class="lede">
+        The crux of the whole design is a single capability: <strong>a SQL function that can wait on the
+        network and then resume.</strong> That's what JavaScript Promise Integration (JSPI) adds to
+        WebAssembly — and it's what lets an LLM call happen <em>inside</em> a trigger.
+      </p>
+
+      <div class="stack">
+        <div class="stack-layer">
+          <span class="sl-num">1</span>
+          <span class="sl-name">Browser JS</span>
+          <span class="sl-desc">DOM, file I/O, the network — the only imperative layer</span>
+        </div>
+        <div class="stack-layer jspi">
+          <span class="sl-num">2</span>
+          <span class="sl-name">JSPI fibers</span>
+          <span class="sl-desc">suspend a WASM call on a promise, resume when it settles</span>
+        </div>
+        <div class="stack-layer">
+          <span class="sl-num">3</span>
+          <span class="sl-name">SQLite (WASM)</span>
+          <span class="sl-desc">the engine — tables, views, triggers, UDFs</span>
+        </div>
+        <div class="stack-layer">
+          <span class="sl-num">4</span>
+          <span class="sl-name">The harness</span>
+          <span class="sl-desc">agent_think · execute_tool · ask_llm · capture triggers</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <p style="margin-bottom:0.6rem;">
+          When <span class="inline-code">agent_think</span> calls the
+          <span class="inline-code">ask_llm</span> UDF, the UDF makes an HTTP request to your LLM provider.
+          Without JSPI, the WASM module would block the whole browser thread. With JSPI, the fiber
+          <strong>pauses</strong> — the trigger is genuinely suspended mid-statement — and the browser is
+          free to render, stream tokens, and handle clicks. When the LLM's JSON arrives, the fiber
+          <strong>resumes</strong> and the trigger continues, inserting the assistant row and re-triggering
+          the cascade.
+        </p>
+        <pre><span class="c">-- inside the agent_think trigger, this one call suspends the whole WASM fiber:</span>
+<span class="k">SELECT</span> <span class="f">ask_llm</span>(
+    (<span class="k">SELECT</span> <span class="f">json_group_array</span>(<span class="f">json_object</span>(...)) <span class="k">FROM</span> <span class="t">v_active_context</span>),
+    (<span class="k">SELECT</span> <span class="f">json_group_array</span>(<span class="f">json</span>(schema)) <span class="k">FROM</span> <span class="t">tools</span>)
+) <span class="k">AS</span> llm_response;  <span class="c">-- ⏸ fiber parks here while the network round-trip happens</span></pre>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    Tables · Web SQL Agent — a harness in a box. Built on SQLite WASM + JSPI.
+    <span id="back-sep" style="opacity:0.6">·</span> <a id="back-link" href="index.html">← back to the app</a>
+  </footer>
+
+  <script>
+  (function () {
+    'use strict';
+
+    /* When opened inside the app's [?] iframe, hide the "back to the app"
+       link (the parent has a close button) and the day/night toggle (the
+       page inherits the app's theme via the ?theme= param). */
+    try {
+      if (window.self !== window.top) {
+        var bl = document.getElementById('back-link');
+        var bs = document.getElementById('back-sep');
+        var tt = document.getElementById('theme-toggle');
+        if (bl) bl.style.display = 'none';
+        if (bs) bs.style.display = 'none';
+        if (tt) tt.style.display = 'none';
+      }
+    } catch (e) {}
+
+    /* ── Theme ─────────────────────────────────────────────── */
+    var root = document.documentElement;
+    function detectTheme() {
+      var q = new URLSearchParams(location.search).get('theme');
+      if (q === 'dark' || q === 'light') return q;
+      try {
+        var s = localStorage.getItem('bobby-tables-theme');
+        if (s === 'dark' || s === 'light') return s;
+      } catch (e) {}
+      return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    }
+    var SUN = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="1" y1="19.78" x2="3" y2="18.36"></line><line x1="19.78" y1="4.22" x2="18.36" y2="5.64"></line></svg>';
+    var MOON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>';
+    function applyTheme(t) {
+      root.setAttribute('data-theme', t);
+      var icon = document.getElementById('theme-icon');
+      var label = document.getElementById('theme-label');
+      if (icon) icon.innerHTML = t === 'dark' ? MOON : SUN;
+      if (label) label.textContent = t === 'dark' ? 'Night' : 'Day';
+    }
+    applyTheme(detectTheme());
+    document.getElementById('theme-toggle').addEventListener('click', function () {
+      var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      try { localStorage.setItem('bobby-tables-theme', next); } catch (e) {}
+    });
+
+    /* ── Scroll-spy for the top nav ────────────────────────── */
+    var navLinks = Array.prototype.slice.call(document.querySelectorAll('#topnav a'));
+    var sections = navLinks.map(function (a) { return document.querySelector(a.getAttribute('href')); });
+    function setActive(id) {
+      navLinks.forEach(function (a) { a.classList.toggle('active', a.getAttribute('href') === '#' + id); });
+    }
+    if ('IntersectionObserver' in window) {
+      var io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (en) { if (en.isIntersecting) setActive(en.target.id); });
+      }, { rootMargin: '-45% 0px -50% 0px', threshold: 0 });
+      sections.forEach(function (s) { if (s) io.observe(s); });
+    }
+
+    /* ── Section 2: The Loop tracer ────────────────────────── */
+    var STEPS = [
+      {
+        title: 'User message lands', trigger: null,
+        sql: '<span class="k">INSERT INTO</span> <span class="t">messages</span> (session_id, role, content)\n<span class="k">VALUES</span> (<span class="s">\'default\'</span>, <span class="s">\'user\'</span>, <span class="s">\'How many electronics do we have?\'</span>);',
+        note: 'A row is inserted into <code>messages</code>. This single INSERT is all the user does — everything after is the database reacting to it.',
+        add: { role: 'user', content: 'How many electronics do we have?' }
+      },
+      {
+        title: 'agent_turn_init fires', trigger: 'agent_turn_init',
+        sql: '<span class="k">UPDATE</span> <span class="t">session_context</span>\n<span class="k">SET</span> value = <span class="f">CAST</span>(NEW.id <span class="k">AS</span> TEXT)\n<span class="k">WHERE</span> key = <span class="s">\'current_turn_id\'</span>;',
+        note: 'Fires <strong>first</strong> (it is created last — SQLite fires same-type triggers in reverse creation order). It stamps the turn identity so every data change this turn makes is attributed to the right turn for rewind.',
+        add: null
+      },
+      {
+        title: 'agent_think fires — calls the LLM', trigger: 'agent_think',
+        sql: '<span class="k">INSERT INTO</span> <span class="t">messages</span> (role, content, tool_calls, ...)\n<span class="k">SELECT</span> ... <span class="k">FROM</span> (\n  <span class="k">SELECT</span> <span class="f">ask_llm</span>(\n    (<span class="k">SELECT</span> <span class="f">json_group_array</span>(...) <span class="k">FROM</span> <span class="t">v_active_context</span>),\n    (<span class="k">SELECT</span> <span class="f">json_group_array</span>(<span class="f">json</span>(schema)) <span class="k">FROM</span> <span class="t">tools</span>)\n  ) <span class="k">AS</span> llm_response\n);',
+        note: 'Builds the working context from <code>v_active_context</code> (system + latest summary + rows past the watermark) and calls the <code>ask_llm</code> UDF. <strong>JSPI suspends the WASM fiber here</strong> — the trigger is literally paused while the network round-trip happens.',
+        add: null
+      },
+      {
+        title: 'Assistant row lands (with tool calls)', trigger: null,
+        sql: '<span class="c">-- the fiber resumes with the LLM\'s JSON; a row is inserted</span>\nrole = <span class="s">\'assistant\'</span>\ntool_calls = <span class="s">\'[{ execute_sql: SELECT COUNT(*) FROM sample_data WHERE category = "Electronics" }]\'</span>',
+        note: 'The fiber resumes with the LLM\'s structured JSON. An assistant row is inserted carrying <code>tool_calls</code>. No final text yet — the model wants to run a query first.',
+        add: { role: 'assistant', content: '', tool: 'execute_sql · SELECT COUNT(*) …' }
+      },
+      {
+        title: 'execute_tool fires — runs the tool', trigger: 'execute_tool',
+        sql: '<span class="k">INSERT INTO</span> <span class="t">messages</span> (role, content, tool_call_id)\n<span class="k">SELECT</span> <span class="s">\'tool\'</span>,\n  <span class="k">CASE</span> <span class="f">json_extract</span>(NEW.tool_calls, <span class="s">\'$[0].function.name\'</span>)\n    <span class="k">WHEN</span> <span class="s">\'execute_sql\'</span> <span class="k">THEN</span> <span class="f">run_dynamic_sql</span>(...)\n    <span class="k">WHEN</span> <span class="s">\'search_web\'</span> <span class="k">THEN</span> <span class="f">search_web</span>(...)\n    ... <span class="k">END</span>, ...;',
+        note: 'Dispatches on the tool name to the matching UDF — <code>run_dynamic_sql</code>, <code>search_web</code>, <code>fetch_url</code>, <code>materialize</code>, <code>search_documents</code>, <code>ingest_document</code>. The result is written back as a tool row.',
+        add: null
+      },
+      {
+        title: 'Tool row lands', trigger: null,
+        sql: '<span class="c">-- the tool result is now data the agent can see</span>\nrole = <span class="s">\'tool\'</span>\ncontent = <span class="s">\'[{"count": 3}]\'</span>',
+        note: 'The tool result is now a row in <code>messages</code> — visible to the agent on the next think, and to you in the chat pane.',
+        add: { role: 'tool', content: '[{"count": 3}]' }
+      },
+      {
+        title: 'agent_think fires again — the loop', trigger: 'agent_think',
+        sql: '<span class="c">-- same as step 3, but the context now includes the tool result</span>\n<span class="k">SELECT</span> <span class="f">ask_llm</span>( ...) <span class="k">AS</span> llm_response;',
+        note: 'The tool row re-triggers <code>agent_think</code>. This repeats — <strong>think → act → observe → think</strong> — until the model returns a final text answer with no <code>tool_calls</code>. That final assistant row ends the turn.',
+        add: { role: 'assistant', content: 'You have 3 electronics in the catalog.' }
+      }
+    ];
+
+    var cur = 0, playing = null, msgId = 0;
+    var stepsEl = document.getElementById('tracer-steps');
+    var rowsEl = document.getElementById('t-rows');
+    var noteEl = document.getElementById('t-note');
+    var sqlEl = document.getElementById('t-sql');
+    var countEl = document.getElementById('t-count');
+    var playBtn = document.getElementById('t-play');
+
+    // build step list
+    STEPS.forEach(function (s, i) {
+      var d = document.createElement('div');
+      d.className = 'tstep';
+      d.innerHTML = '<div class="dot">' + (i) + '</div><div><div class="tt">' + s.title +
+        '</div>' + (s.trigger ? '<div class="tg">⚡ ' + s.trigger + '</div>' : '') + '</div>';
+      d.addEventListener('click', function () { stopPlay(); cur = i; render(); });
+      stepsEl.appendChild(d);
+    });
+    var stepNodes = Array.prototype.slice.call(stepsEl.children);
+
+    function rolePill(role) {
+      var cls = role === 'user' ? 'role-user' : role === 'assistant' ? 'role-assistant' : 'role-tool';
+      return '<span class="role-pill ' + cls + '">' + role + '</span>';
+    }
+    function render() {
+      stepNodes.forEach(function (n, i) { n.classList.toggle('active', i === cur); });
+      var s = STEPS[cur];
+      noteEl.innerHTML = s.note;
+      sqlEl.innerHTML = s.sql;
+      countEl.textContent = 'step ' + (cur + 1) + ' / ' + STEPS.length;
+
+      // rebuild the live messages table from steps 0..cur
+      var html = '';
+      var id = 0;
+      for (var i = 0; i <= cur; i++) {
+        var a = STEPS[i].add;
+        if (!a) continue;
+        id += 1;
+        var content = a.content ? escapeHtml(a.content) : (a.tool ? '<span style="color:var(--text-muted)">' + escapeHtml(a.tool) + '</span>' : '<span style="color:var(--text-faint)">—</span>');
+        var isNew = (i === cur);
+        html += '<tr' + (isNew ? ' class="new"' : '') + '><td style="color:var(--text-faint)">' + id +
+          '</td><td>' + rolePill(a.role) + '</td><td>' + content + '</td></tr>';
+      }
+      rowsEl.innerHTML = html || '<tr><td colspan="3" class="live-empty">no rows yet — press play</td></tr>';
+      playBtn.disabled = (cur >= STEPS.length - 1 && !playing);
+    }
+    function escapeHtml(str) {
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    function next() { if (cur < STEPS.length - 1) { cur++; render(); } }
+    function prev() { if (cur > 0) { cur--; render(); } }
+    function stopPlay() { if (playing) { clearInterval(playing); playing = null; playBtn.textContent = '▶ play'; } }
+    function startPlay() {
+      if (cur >= STEPS.length - 1) { cur = 0; render(); }
+      playBtn.textContent = '❚❚ pause';
+      playing = setInterval(function () {
+        if (cur >= STEPS.length - 1) { stopPlay(); return; }
+        next();
+        if (cur >= STEPS.length - 1) stopPlay();
+      }, 2200);
+    }
+    playBtn.addEventListener('click', function () { playing ? stopPlay() : startPlay(); });
+    document.getElementById('t-next').addEventListener('click', function () { stopPlay(); next(); });
+    document.getElementById('t-prev').addEventListener('click', function () { stopPlay(); prev(); });
+    document.getElementById('t-reset').addEventListener('click', function () { stopPlay(); cur = 0; render(); });
+    render();
+
+    /* ── Section 3: The Brain map ──────────────────────────── */
+    var CATS = {
+      conversation: { label: 'Conversation', color: 'var(--accent)' },
+      time:         { label: 'Time travel', color: 'var(--purple)' },
+      tools:        { label: 'Tools & memory', color: 'var(--blue)' },
+      dashboard:    { label: 'Dashboard', color: 'var(--green)' },
+      config:       { label: 'Config & catalog', color: 'var(--yellow)' },
+      loop:         { label: 'The loop (triggers)', color: 'var(--red)' }
+    };
+    var BRAIN = [
+      { name: 'messages', type: 'table', cat: 'conversation',
+        what: 'The agent\'s memory. Every user, assistant, and tool message is a row, with token accounting and context-visibility flags.',
+        why: 'It is the single source of truth for the conversation — and the immutable audit log that compaction and rewind never delete from.',
+        ddl: 'CREATE TABLE messages (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  session_id TEXT REFERENCES sessions(id),\n  role TEXT CHECK(role IN (\'system\',\'user\',\'assistant\',\'tool\')),\n  content TEXT, tool_calls TEXT, tool_call_id TEXT,\n  prompt_tokens INTEGER, completion_tokens INTEGER,\n  in_context INTEGER DEFAULT 1,   -- !! scratchpad hides rows (0)\n  rewound INTEGER DEFAULT 0,      -- chat-rewind hides rows (1)\n  created_at DATETIME\n);' },
+      { name: 'sessions', type: 'table', cat: 'conversation',
+        what: 'Partitions conversations. Each session owns its messages, compactions, and changesets.',
+        why: 'Lets you run many independent conversations (and fork one into another) inside the same harness.',
+        ddl: 'CREATE TABLE sessions (\n  id TEXT PRIMARY KEY,\n  name TEXT NOT NULL DEFAULT \'Untitled\',\n  description TEXT,\n  created_at DATETIME, updated_at DATETIME\n);' },
+      { name: 'session_context', type: 'table', cat: 'conversation',
+        what: 'A tiny key/value table the triggers read to know which session is active and what the current turn id is.',
+        why: 'It is the "control registers" of the cascade — active_session_id, current_turn_id, and the suppress_cascade / suppress_capture flags.',
+        ddl: 'CREATE TABLE session_context (\n  key TEXT PRIMARY KEY,\n  value TEXT NOT NULL\n);' },
+      { name: 'v_active_context', type: 'view', cat: 'conversation',
+        what: 'The LLM\'s working context, computed live: the system row + the latest compaction summary (as a synthetic user row) + every in-context message past the watermark.',
+        why: 'agent_think reads this one view to build the prompt. It is where compaction and the private scratchpad take effect — without ever touching messages.',
+        ddl: 'CREATE VIEW v_active_context AS\n  -- [system row id=0]\n  UNION ALL\n  -- [latest summary as synthetic user row]\n  UNION ALL\n  SELECT ... FROM messages m\n  WHERE m.in_context = 1\n    AND m.id > latest.watermark_id\n    AND m.rewound = 0\n  ORDER BY ctx_order;' },
+      { name: 'v_session_summary', type: 'view', cat: 'conversation',
+        what: 'Per-session message counts and token totals, pre-aggregated in SQL.',
+        why: 'Powers the session list and token counters with one query instead of JS loops.',
+        ddl: 'CREATE VIEW v_session_summary AS\nSELECT s.id, s.name, COUNT(m.id) AS message_count,\n  SUM(m.prompt_tokens) + SUM(m.completion_tokens) AS total_tokens, ...' },
+
+      { name: 'turn_changesets', type: 'table', cat: 'time',
+        what: 'Row-level pre/post images of every data change, stamped with the turn that made it. A 20-turn ring buffer.',
+        why: 'This is what makes ⟲ possible — rewind replays the inverse of these images to restore data to a prior turn.',
+        ddl: 'CREATE TABLE turn_changesets (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  turn_id INTEGER, session_id TEXT,\n  table_name TEXT, op TEXT CHECK(op IN (\'I\',\'U\',\'D\')),\n  rowid INTEGER, row_before TEXT, row_after TEXT\n);' },
+      { name: 'turn_ddl_log', type: 'table', cat: 'time',
+        what: 'DDL executed during a turn, with a pre-image ({ create_sql, rows }) so it can be undone.',
+        why: 'Captures DROP TABLE before the drop so rewind can re-create the table and re-insert its rows.',
+        ddl: 'CREATE TABLE turn_ddl_log (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  turn_id INTEGER, session_id TEXT, table_name TEXT,\n  ddl_sql TEXT, pre_image TEXT\n);' },
+      { name: 'compactions', type: 'table', cat: 'time',
+        what: 'Rolling summaries. Each row points at a watermark_id (the last summarized message).',
+        why: 'Holds summaries only — messages are never rewritten. The view just stops reading below the highest watermark.',
+        ddl: 'CREATE TABLE compactions (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  session_id TEXT REFERENCES sessions(id),\n  seq INTEGER, summary TEXT, watermark_id INTEGER,\n  UNIQUE(session_id, seq)\n);' },
+      { name: 'v_turn_boundaries', type: 'view', cat: 'time',
+        what: 'Cumulative token accounting and turn-boundary markers for the visible region, computed with window functions.',
+        why: 'Gives the compaction walk a pair-safe cut point (it never splits a tool-call pair) entirely in SQL.',
+        ddl: 'CREATE VIEW v_turn_boundaries AS\nSELECT id, role, est_tokens,\n  SUM(est_tokens) OVER (ORDER BY id ...) AS cum_tokens_head,\n  (role = \'user\') AS is_turn_start, ... FROM visible;' },
+      { name: 'cap_* capture triggers', type: 'trigger', cat: 'time',
+        what: 'Three triggers per data table (ins / upd / del) that write a pre/post row image into turn_changesets on every change.',
+        why: 'They are the sensors behind rewind. Attached at boot and after every table creation; never attached to protected tables.',
+        ddl: 'CREATE TRIGGER cap_sample_data_upd\nAFTER UPDATE ON sample_data\nWHEN (SELECT value FROM session_context\n      WHERE key=\'suppress_capture\') != \'1\'\nBEGIN\n  INSERT INTO turn_changesets\n    (turn_id, session_id, table_name, op, rowid, row_before, row_after)\n  VALUES (..., \'U\', OLD.rowid, json_object(...OLD...), json_object(...NEW...));\nEND;' },
+
+      { name: 'tools', type: 'table', cat: 'tools',
+        what: 'The tool catalog — one row per tool with its JSON function schema.',
+        why: 'agent_think reads this to tell the LLM what it can do. Add a row to add a capability; the cascade picks it up.',
+        ddl: 'CREATE TABLE tools (\n  name TEXT PRIMARY KEY,\n  schema TEXT NOT NULL  -- OpenAI-style function schema\n);' },
+      { name: 'tool_approvals', type: 'table', cat: 'tools',
+        what: 'A durable, auditable queue for human-in-the-loop approval of agent write operations.',
+        why: 'run_dynamic_sql inserts a pending row and parks the JSPI fiber until the UI approves or rejects — so destructive writes pause for a human.',
+        ddl: 'CREATE TABLE tool_approvals (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  turn_id INTEGER, session_id TEXT, tool_name TEXT,\n  payload TEXT, status TEXT DEFAULT \'pending\'\n    CHECK(status IN (\'pending\',\'approved\',\'rejected\'))\n);' },
+      { name: 'documents', type: 'table', cat: 'tools',
+        what: 'The full-text document corpus: fetched pages, search results, and any stored text.',
+        why: 'Gives the agent a long-term memory it can search later with BM25 — a property of the database, not a session.',
+        ddl: 'CREATE TABLE documents (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  source TEXT, source_ref TEXT, title TEXT, content TEXT,\n  created_at DATETIME\n);' },
+      { name: 'documents_fts', type: 'virtual table', cat: 'tools',
+        what: 'An external-content FTS5 index over documents, kept in sync by three triggers.',
+        why: 'Zero-dependency in-browser full-text search (search_documents) — the index stores only the inverted structure, rows stay in documents.',
+        ddl: 'CREATE VIRTUAL TABLE documents_fts USING fts5(\n  title, content,\n  content=\'documents\', content_rowid=\'id\'\n);' },
+      { name: 'v_tool_call_queries', type: 'view', cat: 'tools',
+        what: 'One row per tool call, expanded from the assistant messages\' tool_calls JSON via json_each.',
+        why: 'Renders tool steps and extracts queries in SQL — no JSON.parse loops in the UI.',
+        ddl: 'CREATE VIEW v_tool_call_queries AS\nSELECT m.id AS message_id, tc.key AS call_index,\n  json_extract(tc.value, \'$.function.name\') AS tool_name, ...\nFROM messages m\nCROSS JOIN json_each(m.tool_calls) tc\nWHERE m.role = \'assistant\';' },
+
+      { name: 'dashboard_cards', type: 'table', cat: 'dashboard',
+        what: 'The right-pane grid. Each card stores a read-only SQL query plus its grid position and span.',
+        why: 'UI state, not data state — so it is never captured for rewind and survives session switches. Cards re-run when their tables change.',
+        ddl: 'CREATE TABLE dashboard_cards (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  title TEXT, sql TEXT,\n  row INTEGER, col INTEGER, row_span INTEGER, col_span INTEGER\n);' },
+      { name: 'v_grid_matrix', type: 'view', cat: 'dashboard',
+        what: 'The grid\'s cell matrix (rows × 3 cols), self-sizing, LEFT JOINed with card spans.',
+        why: 'Makes cell occupancy an O(1) lookup in SQL — the grid engine reads this instead of doing JS overlap math.',
+        ddl: 'CREATE VIEW v_grid_matrix AS\nWITH RECURSIVE rows_axis(n) AS (SELECT 0 UNION ALL ...),\n     cols_axis(n) AS (SELECT 0 UNION ALL ...)\nSELECT r.n AS row, c.n AS col, dc.id AS card_id, ...\nFROM rows_axis r CROSS JOIN cols_axis c\nLEFT JOIN dashboard_cards dc ON ...;' },
+
+      { name: 'system_config', type: 'table', cat: 'config',
+        what: 'Key/value settings: the system prompt, model name, the allow_dml flag, and the effective context window.',
+        why: 'The agent\'s "personality" and limits live here as data — editable via SQL, and carried along in a cartridge export.',
+        ddl: 'CREATE TABLE system_config (\n  key TEXT PRIMARY KEY, value TEXT NOT NULL\n);' },
+      { name: 'v_schema_catalog', type: 'view', cat: 'config',
+        what: 'The full schema — columns, types, PKs, indexes, FKs — in one query, correlating PRAGMA functions with sqlite_master.',
+        why: 'The explorer\'s catalog is a pure decode of this view, so schema introspection is a single SQL read.',
+        ddl: 'CREATE VIEW v_schema_catalog AS\nSELECT m.name AS table_name, m.type, m.sql AS create_sql,\n  (SELECT json_group_array(json_object(...)) FROM pragma_table_info(m.name)) AS columns, ...\nFROM sqlite_master m\nWHERE m.type IN (\'table\',\'view\') AND m.name NOT LIKE \'sqlite_%\';' },
+
+      { name: 'agent_turn_init', type: 'trigger', cat: 'loop',
+        what: 'Fires on a user-row insert (first, by design) and stamps session_context.current_turn_id.',
+        why: 'Attributes every subsequent data change to the correct turn — the foundation of rewind.',
+        ddl: 'CREATE TRIGGER agent_turn_init\nAFTER INSERT ON messages\nWHEN NEW.role = \'user\'\nBEGIN\n  UPDATE session_context\n  SET value = CAST(NEW.id AS TEXT)\n  WHERE key = \'current_turn_id\';\nEND;' },
+      { name: 'agent_think', type: 'trigger', cat: 'loop',
+        what: 'Fires on user/tool inserts. Builds v_active_context and calls ask_llm, inserting the assistant row.',
+        why: 'The "think" step of ReAct. This is where JSPI suspends the fiber for the LLM network call.',
+        ddl: 'CREATE TRIGGER agent_think\nAFTER INSERT ON messages\nWHEN NEW.role IN (\'user\',\'tool\')\n  AND (SELECT value FROM session_context\n       WHERE key=\'suppress_cascade\') != \'1\'\nBEGIN\n  INSERT INTO messages (session_id, role, content, tool_calls, ...)\n  SELECT NEW.session_id, \'assistant\', ... FROM\n    (SELECT ask_llm((SELECT ... FROM v_active_context),\n                    (SELECT ... FROM tools)) AS llm_response);\nEND;' },
+      { name: 'execute_tool', type: 'trigger', cat: 'loop',
+        what: 'Fires on an assistant row with tool_calls. Dispatches to the matching UDF and inserts the tool row.',
+        why: 'The "act" step of ReAct. The tool row it writes re-triggers agent_think — closing the loop.',
+        ddl: 'CREATE TRIGGER execute_tool\nAFTER INSERT ON messages\nWHEN NEW.role = \'assistant\'\n  AND json_array_length(NEW.tool_calls) > 0\nBEGIN\n  INSERT INTO messages (session_id, role, content, tool_call_id)\n  SELECT NEW.session_id, \'tool\',\n    CASE json_extract(NEW.tool_calls,\'$[0].function.name\')\n      WHEN \'execute_sql\' THEN run_dynamic_sql(...)\n      WHEN \'search_web\'  THEN search_web(...)\n      ... END, ...;\nEND;' }
+    ];
+
+    var legendEl = document.getElementById('cat-legend');
+    var gridEl = document.getElementById('brain-grid');
+    var detailEl = document.getElementById('brain-detail');
+    var activeCat = null;
+
+    // legend
+    var allChip = document.createElement('button');
+    allChip.className = 'cat-chip active';
+    allChip.innerHTML = '<span class="sw" style="background:var(--text-muted)"></span>All';
+    allChip.addEventListener('click', function () { setCat(null); });
+    legendEl.appendChild(allChip);
+    Object.keys(CATS).forEach(function (key) {
+      var c = CATS[key];
+      var chip = document.createElement('button');
+      chip.className = 'cat-chip';
+      chip.dataset.cat = key;
+      chip.innerHTML = '<span class="sw" style="background:' + c.color + '"></span>' + c.label;
+      chip.addEventListener('click', function () { setCat(activeCat === key ? null : key); });
+      legendEl.appendChild(chip);
+    });
+
+    function setCat(cat) {
+      activeCat = cat;
+      Array.prototype.forEach.call(legendEl.children, function (chip) {
+        var k = chip.dataset.cat;
+        chip.classList.toggle('active', cat === null ? !k : k === cat);
+      });
+      Array.prototype.forEach.call(gridEl.children, function (node) {
+        node.classList.toggle('dim', cat !== null && node.dataset.cat !== cat);
+      });
+    }
+
+    // nodes
+    BRAIN.forEach(function (b, idx) {
+      var c = CATS[b.cat];
+      var node = document.createElement('button');
+      node.className = 'bnode';
+      node.dataset.cat = b.cat;
+      node.dataset.idx = idx;
+      node.style.setProperty('--nc', c.color);
+      node.innerHTML = '<div class="bn">' + b.name + '</div><div class="bt">' + c.label + ' · ' + b.type + '</div>';
+      node.addEventListener('click', function () { selectBrain(idx); });
+      gridEl.appendChild(node);
+    });
+
+    function selectBrain(idx) {
+      var b = BRAIN[idx];
+      var c = CATS[b.cat];
+      Array.prototype.forEach.call(gridEl.children, function (n) {
+        n.classList.toggle('active', Number(n.dataset.idx) === idx);
+      });
+      detailEl.innerHTML =
+        '<div class="bd-head"><span class="bd-name">' + b.name + '</span>' +
+        '<span class="bd-tag" style="background:' + c.color + '22;color:' + c.color + '">' + b.type + '</span></div>' +
+        '<div class="bd-sec"><h5>What it is</h5><p>' + b.what + '</p></div>' +
+        '<div class="bd-sec"><h5>Why it exists</h5><p>' + b.why + '</p></div>' +
+        '<div class="bd-sec"><h5>DDL</h5><pre style="margin:0">' + highlight(b.ddl) + '</pre></div>';
+    }
+
+    // tiny SQL highlighter for the DDL blocks
+    function highlight(sql) {
+      var esc = String(sql).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      var kw = 'CREATE|TABLE|VIEW|VIRTUAL|TRIGGER|AFTER|INSERT|INTO|SELECT|FROM|WHERE|WHEN|BEGIN|END|UPDATE|SET|VALUES|AND|OR|NOT|NULL|DEFAULT|PRIMARY|KEY|REFERENCES|CHECK|IN|ON|UNION|ALL|AS|CAST|TEXT|INTEGER|DATETIME|UNIQUE|CROSS|JOIN|LEFT|ORDER|BY|OVER|ROWS|BETWEEN|UNBOUNDED|PRECEDING|FOLLOWING|CURRENT|ROW|LIKE|CASE|WHEN|THEN|ELSE|END|USING|FOREIGN';
+      esc = esc.replace(/\b('(?:[^']|'')*')/g, '<span class="s">$1</span>');
+      esc = esc.replace(/(--[^\n]*)/g, '<span class="c">$1</span>');
+      esc = esc.replace(new RegExp('\\b(' + kw + ')\\b', 'g'), '<span class="k">$1</span>');
+      return esc;
+    }
+  })();
+  </script>
+</body>
+</html>
