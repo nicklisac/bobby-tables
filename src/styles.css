@@ -1608,6 +1608,260 @@ header h1.app-title {
   background: var(--purple-subtle);
 }
 
+/* ── T29: Markdown rendering in chat ─────────────────────────── */
+
+/* The .md block overrides the .message pre-wrap so block elements (p, ul,
+   pre, …) lay out normally; first/last children shed their outer margin so the
+   bubble padding is the only breathing room. */
+.message .md {
+  white-space: normal;
+  word-break: break-word;
+}
+.message .md > *:first-child { margin-top: 0; }
+.message .md > *:last-child  { margin-bottom: 0; }
+
+.message .md p { margin: 0.45em 0; }
+
+.message .md h1, .message .md h2, .message .md h3,
+.message .md h4, .message .md h5, .message .md h6 {
+  margin: 0.7em 0 0.35em;
+  line-height: 1.3;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.message .md h1 { font-size: 1.25em; }
+.message .md h2 { font-size: 1.15em; }
+.message .md h3 { font-size: 1.05em; }
+.message .md h4, .message .md h5, .message .md h6 { font-size: 1em; }
+
+.message .md ul, .message .md ol {
+  margin: 0.45em 0;
+  padding-left: 1.4em;
+}
+.message .md li { margin: 0.2em 0; }
+.message .md li > ul, .message .md li > ol { margin: 0.2em 0; }
+
+.message .md a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.message .md a:hover { color: var(--accent-hover); }
+
+.message .md blockquote {
+  margin: 0.5em 0;
+  padding: 0.1em 0 0.1em 0.7em;
+  border-left: 3px solid var(--border-default);
+  color: var(--text-muted);
+}
+
+.message .md code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  padding: 0.08em 0.35em;
+  word-break: break-word;
+}
+
+.message .md pre {
+  margin: 0.5em 0;
+  padding: 0.55rem 0.7rem;
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  overflow-x: auto;
+}
+.message .md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.82em;
+  white-space: pre;
+  word-break: normal;
+}
+
+.message .md table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.92em;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.message .md th, .message .md td {
+  border: 1px solid var(--border-default);
+  padding: 0.25rem 0.5rem;
+  text-align: left;
+}
+.message .md th {
+  background: var(--bg-surface);
+  font-weight: 600;
+}
+.message .md hr {
+  border: none;
+  border-top: 1px solid var(--border-default);
+  margin: 0.7em 0;
+}
+
+/* ── T29: Search-result polish + matched-term highlighting ───── */
+
+.search-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.2rem;
+}
+
+.search-result-item {
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 0.45rem 0.6rem;
+  background: var(--bg-surface);
+  transition: border-color 0.15s;
+}
+.search-result-item:hover {
+  border-color: var(--accent);
+}
+
+.search-result-title {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  min-width: 0;
+}
+a.search-result-title:hover { text-decoration: underline; text-underline-offset: 2px; }
+.search-result-title svg { flex-shrink: 0; opacity: 0.7; }
+.search-result-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.search-result-source {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  padding: 0.05rem 0.35rem;
+}
+
+.search-result-snippet {
+  margin-top: 0.25rem;
+  font-family: var(--font-sans);
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.search-hit {
+  background: rgba(255, 200, 0, 0.35);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 0.1em;
+}
+
+/* ── T29: fetch_url preview polish ───────────────────────────── */
+
+.fetch-url-preview {
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg-surface);
+}
+.fetch-url-title {
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem;
+}
+.fetch-url-title a {
+  color: var(--accent);
+  text-decoration: none;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  word-break: break-all;
+}
+.fetch-url-title a:hover { text-decoration: underline; }
+.fetch-url-body {
+  margin-top: 0.4rem;
+  font-family: var(--font-sans);
+  font-size: 0.74rem;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+/* ── T29: tool text / json dump (previously unstyled) ────────── */
+
+.tool-detail {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tool-detail.md { white-space: normal; }
+
+.json-dump {
+  margin: 0.3rem 0 0;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+
+/* ── T29: Top-bar bracket-button collapse ──────────────────────
+   The 4 text buttons (config/export/import/upload csv) show [ icon ] at rest
+   and expand to [ icon text ] on hover / keyboard focus. The 2 icon-only
+   buttons (theme/architecture) are untouched. Spacing is carried by the icon's
+   margins (not the flex gap) so a collapsed label adds no extra space — the
+   at-rest width matches the icon-only buttons exactly. */
+
+#header-actions .btn-header { gap: 0; }
+#header-actions .btn-header svg { margin: 0 0.25rem; }
+
+#header-actions .btn-header .btn-label {
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  margin: 0;
+  white-space: nowrap;
+  transition: max-width 0.18s ease, opacity 0.14s ease;
+}
+#header-actions .btn-header:hover .btn-label,
+#header-actions .btn-header:focus-visible .btn-label {
+  max-width: 9em;
+  opacity: 1;
+}
+
 .scratchpad-header {
   display: flex;
   align-items: center;

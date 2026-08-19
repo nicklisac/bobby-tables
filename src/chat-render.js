@@ -17,6 +17,83 @@ import { renderExplorer, openCreateViewModal } from './explorer-ui.js';
 import { setBusy } from './grid-ui.js';
 import { SCRATCH_ROW_CAP } from './scratchpad.js';
 import { ICONS } from './icons.js';
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
+
+// ── T29: Markdown rendering (marked + DOMPurify) ─────────────────────
+//
+// Chat text (assistant + user + tool text) is untrusted LLM/user content, so it
+// is parsed to HTML with `marked` and then SANITIZED with DOMPurify before it
+// touches the DOM — no raw HTML / script / event handler survives. Links open
+// in a new tab (the afterSanitizeAttributes hook adds target/rel to every <a>
+// the sanitizer lets through). `breaks: true` keeps single-newline line breaks
+// in user messages (chat feel).
+
+marked.setOptions({ gfm: true, breaks: true });
+
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.tagName === 'A') {
+    node.setAttribute('target', '_blank');
+    node.setAttribute('rel', 'noopener noreferrer');
+  }
+});
+
+/** Parse markdown → sanitized HTML string (safe to innerHTML). */
+function renderMarkdown(text) {
+  return DOMPurify.sanitize(marked.parse(String(text ?? '')));
+}
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * HTML-escape `text` and wrap case-insensitive occurrences of each query term
+ * (≥2 chars) in <mark class="search-hit">. Used for search_web results, where
+ * the tool payload carries the query string to highlight against.
+ */
+function highlightTerms(text, query) {
+  const escaped = escapeHtml(text || '');
+  if (!query) return escaped;
+  const terms = String(query).toLowerCase().split(/\s+/).filter((t) => t.length >= 2);
+  if (!terms.length) return escaped;
+  // Single pass that matches an HTML entity OR a query term. Entities are
+  // returned unchanged so a term like "amp"/"lt"/"quot" can never split an
+  // already-escaped &amp;/&lt;/&quot; and corrupt the text.
+  const re = new RegExp('(&[a-z0-9#]+;)|(' + terms.map(escapeRegex).join('|') + ')', 'gi');
+  return escaped.replace(re, (match, entity, term) =>
+    entity ? entity : `<mark class="search-hit">${term}</mark>`);
+}
+
+/**
+ * HTML-escape an FTS5 snippet and convert its `[term]` matched-term markers
+ * (the markers T16's snippet() emits) into <mark class="search-hit">. Used for
+ * search_documents results, where the markers are the precise FTS matches.
+ */
+function markFtsSnippet(text) {
+  return escapeHtml(text || '').replace(/\[([^\]]*)\]/g, '<mark class="search-hit">$1</mark>');
+}
+
+/**
+ * T29: render a chat message's text body into `parent`. Scratchpad user rows
+ * (leading `!`) stay monospace plain text (the `.message.scratchpad` style);
+ * everything else (assistant + regular user) renders as sanitized markdown in
+ * a `.md` block. Empty bodies show the `[empty]` placeholder.
+ */
+function appendMessageText(parent, role, content) {
+  if (content === null || content === undefined || String(content).trim() === '') {
+    parent.textContent = '[empty]';
+    return;
+  }
+  if (role === 'user' && /^!/.test(String(content))) {
+    parent.textContent = content; // keep monospace plain text
+    return;
+  }
+  const textDiv = document.createElement('div');
+  textDiv.className = 'md';
+  textDiv.innerHTML = renderMarkdown(content);
+  parent.appendChild(textDiv);
+}
 
 // ── Init context (wired once by main.js at boot) ─────────────────────
 //
@@ -187,7 +264,8 @@ function renderToolContent(content, toolCallId = null, querySql = '') {
     try {
       parsed = JSON.parse(content);
     } catch {
-      return `<div class="tool-detail">${escapeHtml(content)}</div>`;
+      // T29: non-JSON tool text (e.g. a prose tool output) renders as markdown.
+      return `<div class="tool-detail md">${renderMarkdown(content)}</div>`;
     }
   }
 
@@ -243,11 +321,16 @@ function renderToolContent(content, toolCallId = null, querySql = '') {
     `;
   }
 
-  // 2. Search web results: { query: '...', results: [{ title, url, snippet }] }
+  // 2. Search results: search_web { query, results: [{ title, url, snippet }] }
+  //    and search_documents (T16) { query, results: [{ title, snippet, source,
+  //    sourceRef, id, rank }] } share this shape (a `results` array + `query`).
+  //    T29: polished list + matched-term highlighting — web results highlight
+  //    the query terms; document snippets carry FTS5's own `[term]` markers.
   if (parsed && Array.isArray(parsed.results)) {
     if (!parsed.results.length) return '<em>(no search results found)</em>';
+    const query = parsed.query || '';
     let html = `
-      <div class="draggable-chat-asset" draggable="true" data-asset-type="search_web" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-title="Search: ${escapeHtml(parsed.query || 'Results')}">
+      <div class="draggable-chat-asset" draggable="true" data-asset-type="search_web" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-title="Search: ${escapeHtml(query || 'Results')}">
         <div class="chat-asset-actions">
           <div class="drag-pin-badge" title="Drag to Dashboard to materialize & pin">
             <span class="btn-bracket">[</span>
@@ -258,15 +341,33 @@ function renderToolContent(content, toolCallId = null, querySql = '') {
         </div>
         <div class="search-results-list">`;
     parsed.results.forEach(r => {
-      html += `
-        <div class="search-result-item">
-          <a class="search-result-title" href="${escapeHtml(r.url || '#')}" target="_blank" rel="noopener noreferrer">
-            <span>${escapeHtml(r.title || r.url)}</span>
-            ${ICONS.externalLink({ size: 11 })}
-          </a>
-          <div class="search-result-snippet">${escapeHtml(r.snippet || '')}</div>
-        </div>
-      `;
+      const title = r.title || r.url || '';
+      const snippet = r.snippet || '';
+      if (r.url) {
+        // Web result (search_web): linked title + snippet, query highlighted.
+        html += `
+          <div class="search-result-item">
+            <a class="search-result-title" href="${escapeHtml(r.url)}" target="_blank" rel="noopener noreferrer">
+              <span class="search-result-title-text">${highlightTerms(title, query)}</span>
+              ${ICONS.externalLink({ size: 11 })}
+            </a>
+            ${snippet ? `<div class="search-result-snippet">${highlightTerms(snippet, query)}</div>` : ''}
+          </div>
+        `;
+      } else {
+        // Document result (search_documents): title + source badge + snippet
+        // (the FTS5 `[term]` markers become the highlights).
+        const source = r.source || '';
+        html += `
+          <div class="search-result-item search-result-doc">
+            <div class="search-result-title">
+              <span class="search-result-title-text">${highlightTerms(title, query)}</span>
+              ${source ? `<span class="search-result-source">${escapeHtml(source)}</span>` : ''}
+            </div>
+            ${snippet ? `<div class="search-result-snippet">${markFtsSnippet(snippet)}</div>` : ''}
+          </div>
+        `;
+      }
     });
     html += '</div></div>';
     return html;
@@ -693,13 +794,9 @@ async function renderMessages() {
             const chipDiv = document.createElement('div');
             chipDiv.innerHTML = calls.map(renderToolCallChip).join('');
             div.appendChild(chipDiv);
-            if (hasContent) {
-              const textDiv = document.createElement('div');
-              textDiv.textContent = content;
-              div.appendChild(textDiv);
-            }
+            if (hasContent) appendMessageText(div, role, content);
           } else {
-            div.textContent = content || '[empty]';
+            appendMessageText(div, role, content);
           }
         }
       }

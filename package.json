@@ -16,6 +16,8 @@
   },
   "note": "Uses vendor/wa-sqlite-jspi/ — custom JSPI-enabled SQLite WASM built externally (sqlite-vec + FTS5). That .mjs carries a local JSPI async-export patch: see vendor/wa-sqlite-jspi/README.md before rebuilding or re-vendoring.",
   "dependencies": {
+    "dompurify": "^3.4.14",
+    "marked": "^18.0.10",
     "papaparse": "^5.6.0"
   }
 }
