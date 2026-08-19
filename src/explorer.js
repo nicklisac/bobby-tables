@@ -388,6 +388,12 @@ export async function dropDatabaseObject(sqlite3, db, { name, type }) {
   if (isInternalTable(validName)) {
     throw new Error(`Cannot drop protected internal database object "${validName}".`);
   }
+  // Defense-in-depth: the explorer UI already renders no drop action for
+  // system views, but guard the backend too so a system view can't be dropped
+  // by any caller (dropping one breaks the app).
+  if (objType === 'view' && isSystemView(validName)) {
+    throw new Error(`Cannot drop app system view "${validName}".`);
+  }
 
   const ddlSql = objType === 'view'
     ? `DROP VIEW IF EXISTS ${quoteIdent(validName)};`

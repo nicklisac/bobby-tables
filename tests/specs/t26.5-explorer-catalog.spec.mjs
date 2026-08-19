@@ -69,4 +69,44 @@ test.describe('T26.5 sub1 — explorer catalog via v_schema_catalog', () => {
     expect(await sampleItem.locator('.btn-action-drop').count(),
       'user tables keep the drop action').toBe(1);
   });
+
+  test('dropDatabaseObject guards system views (backend defense-in-depth)', async ({ page }) => {
+    await bootPage(page);
+
+    const result = await page.evaluate(async () => {
+      const { sqlite3, db, explorer } = window.__agent;
+      const { execParams, queryAll } = await import('/src/schema.js');
+      const out = {};
+      // Seed a user view so we can confirm the drop path still works for user views.
+      await execParams(sqlite3, db, `CREATE VIEW t265_drop_user_view AS SELECT 1 AS x`);
+      try {
+        // 1. A system view must be rejected by the backend guard.
+        let sysErr = null;
+        try {
+          await explorer.dropDatabaseObject(sqlite3, db, { name: 'v_active_context', type: 'view' });
+        } catch (e) { sysErr = String(e && e.message || e); }
+        out.systemViewRejected = /system view/i.test(sysErr || '');
+        out.systemViewIntact = (await queryAll(sqlite3, db,
+          `SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='v_active_context'`))[0][0] === 1;
+
+        // 2. A user view must still be droppable.
+        let userErr = null;
+        try {
+          await explorer.dropDatabaseObject(sqlite3, db, { name: 't265_drop_user_view', type: 'view' });
+        } catch (e) { userErr = String(e && e.message || e); }
+        out.userViewDropped = userErr === null
+          && (await queryAll(sqlite3, db,
+            `SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='t265_drop_user_view'`))[0][0] === 0;
+        out.userViewError = userErr;
+      } finally {
+        await execParams(sqlite3, db, `DROP VIEW IF EXISTS t265_drop_user_view`).catch(() => {});
+      }
+      return out;
+    });
+
+    expect(result.systemViewRejected, 'dropDatabaseObject must reject a system view').toBe(true);
+    expect(result.systemViewIntact, 'system view must survive the rejected drop').toBe(true);
+    expect(result.userViewDropped,
+      `user view must still be droppable (err=${result.userViewError})`).toBe(true);
+  });
 });
