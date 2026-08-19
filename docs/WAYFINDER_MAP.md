@@ -312,7 +312,8 @@ graph TD
 
 ### Ticket 17: Human-in-the-Loop Approval Queue (`tool_approvals`)
 * **Label:** `wayfinder:prototype` (HITL)
-* **Status:** Open (Frontier)
+* **Status:** 🟡 IN PROGRESS (claimed 2026-08-18, branch `t17-approval-queue`)
+* **Next steps:** grill the suspension/resume mechanics (JSPI await vs. turn end + resume; savepoint fate on reload; Stop-button interaction; scope of approvable ops) → lock design → implement + probe-verify → AGY review → merge.
 * **Question:** How should destructive tools and database write operations insert into a relational `tool_approvals` table with status `'pending'`, pausing the cascade until the user clicks an [Approve] or [Reject] button in the UI, replacing synchronous JS `window.confirm()` with pure-SQL state management?
 * **Design notes (2026-08-15):** 
   * Replaces the interim JS `window.confirm()` popup in `run_dynamic_sql` with a durable, auditable SQL table: `tool_approvals (id INTEGER PRIMARY KEY, turn_id INTEGER, session_id TEXT, tool_name TEXT, payload TEXT, status TEXT CHECK(status IN ('pending', 'approved', 'rejected')), created_at DATETIME)`.
