@@ -29,6 +29,7 @@
  */
 
 import { queryAll, execParams } from './schema.js';
+import { defaultMaxTokens } from './llm-provider.js';
 
 // ── Knobs (tau-derived, code constants — NOT stored) ─────────────────
 export const COMPACTION_THRESHOLD = 0.85; // compact at 85% of the window
@@ -289,29 +290,29 @@ function buildSummaryPrompt({ isUpdate, prevSummary, messages, instructions, cap
 /**
  * One-shot LLM call for the summary: direct fetch to the same model/endpoint,
  * NO tools, outside the cascade (not the ask_llm UDF). Returns the summary text.
+ *
+ * T32: framing is delegated to the provider registry (src/llm-provider.js) so
+ * the compaction summary call works under every provider (incl. Anthropic's
+ * Messages API), not just the OpenAI-compatible family.
  */
-async function fetchSummary(llmCfg, prompt, signal) {
-  const resp = await fetch(llmCfg.endpointUrl, {
+async function fetchSummary(provider, llmCfg, prompt, signal) {
+  const body = provider.buildBody(llmCfg, {
+    systemPrompt: 'You produce concise, structured conversation summaries. Respond with the summary text only — no code fences, no preamble.',
+    messages: [{ role: 'user', content: prompt }],
+    tools: [],
+    stream: false,
+  });
+  const resp = await fetch(provider.endpoint(llmCfg), {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(llmCfg.apiKey ? { Authorization: `Bearer ${llmCfg.apiKey}` } : {}),
-    },
+    headers: provider.headers(llmCfg),
     signal,
-    body: JSON.stringify({
-      model: llmCfg.model,
-      messages: [
-        { role: 'system', content: 'You produce concise, structured conversation summaries. Respond with the summary text only — no code fences, no preamble.' },
-        { role: 'user', content: prompt },
-      ],
-      stream: false,
-    }),
+    body: JSON.stringify(body),
   });
   if (!resp.ok) {
     throw new Error(`compaction LLM HTTP ${resp.status}: ${await resp.text().catch(() => '')}`);
   }
   const data = await resp.json();
-  const content = data.choices?.[0]?.message?.content || '';
+  const content = provider.parseJson(data).content;
   // Strip markdown code fences if the model added them despite the instruction.
   return content.trim().replace(/^```(?:markdown|md)?\s*/i, '').replace(/\s*```$/i, '').trim();
 }
@@ -320,7 +321,8 @@ async function fetchSummary(llmCfg, prompt, signal) {
  * Run a compaction: plan the pair-safe watermark, fetch the rolling summary
  * from the LLM (one-shot, no tools), and insert the compaction row.
  *
- * @param {object} llmCfg - { model, endpointUrl, apiKey } (same as the harness)
+ * @param {object} provider - a provider from the registry (src/llm-provider.js)
+ * @param {object} llmCfg - { model, url, apiKey, maxTokens } (T32 shape)
  * @param {object} [opts]
  * @param {string} [opts.instructions] - manual: appended as "Additional focus: …"
  * @param {number} [opts.keepBudget] - undefined → tailBudget(window); 0 → summarize all (manual)
@@ -329,11 +331,17 @@ async function fetchSummary(llmCfg, prompt, signal) {
  * @returns {Promise<{seq, watermarkId, summary, summarizedCount} | null>}
  *   null if nothing should be summarized.
  */
-export async function runCompaction(sqlite3, db, sessionId, llmCfg, opts = {}) {
+export async function runCompaction(sqlite3, db, sessionId, provider, llmCfg, opts = {}) {
   const { instructions = '', keepBudget, signal, reason = 'proactive' } = opts;
 
   const storedRaw = await getConfigValue(sqlite3, db, 'effective_context_window');
   const window = resolveContextWindow(storedRaw, llmCfg.model);
+  // T32: Anthropic's Messages API requires max_tokens. If the caller didn't
+  // resolve it (e.g. the proactive/manual triggers), derive min(64000, window/4).
+  const cfg = { ...llmCfg };
+  if (provider.id === 'anthropic' && !cfg.maxTokens) {
+    cfg.maxTokens = defaultMaxTokens(window);
+  }
   const budget = keepBudget !== undefined ? keepBudget : tailBudget(window);
 
   const plan = await planCompaction(sqlite3, db, sessionId, budget);
@@ -372,7 +380,7 @@ export async function runCompaction(sqlite3, db, sessionId, llmCfg, opts = {}) {
     cap: summaryCap(window),
   });
 
-  const summary = await fetchSummary(llmCfg, prompt, signal);
+  const summary = await fetchSummary(provider, cfg, prompt, signal);
   if (!summary) {
     console.warn(`[compaction] ${reason}: LLM returned an empty summary (session ${sessionId})`);
     return null;

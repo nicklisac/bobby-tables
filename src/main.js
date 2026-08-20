@@ -44,6 +44,7 @@ import {
   migrateLegacyConfig, loadStore, getActiveProfile, setActiveProfile,
   upsertProfile, deleteProfile, newProfile, maskKey,
 } from './provider-store.js';
+import { getProvider } from './llm-provider.js';
 import { ICONS } from './icons.js';
 import './styles.css';
 
@@ -60,6 +61,8 @@ const configModel       = document.getElementById('config-model');
 const configKey         = document.getElementById('config-key');
 const labelConfigKey    = document.getElementById('label-config-key');
 const configContextWindow = document.getElementById('config-context-window');
+const rowConfigMaxTokens  = document.getElementById('row-config-max-tokens');
+const configMaxTokens     = document.getElementById('config-max-tokens');
 const btnToggleConfig   = document.getElementById('btn-toggle-config');
 const configModal       = document.getElementById('config-modal');
 const configCancel      = document.getElementById('config-cancel');
@@ -144,11 +147,14 @@ function loadConfig() {
 
 function isProviderConfigured(cfg = loadConfig()) {
   if (!cfg || !cfg.provider) return false;
-  if (cfg.provider === 'gemini') return Boolean(cfg.apiKey && cfg.apiKey.trim());
-  if (cfg.provider === 'openai') {
-    return Boolean((cfg.url && cfg.url.trim()) || (cfg.apiKey && cfg.apiKey.trim()));
+  const provider = getProvider(cfg.provider);
+  // T32: registry-driven. Keyed providers need an API key; local/keyless
+  // providers (ollama, lm-studio, custom openai) are ready once a model or URL
+  // is set.
+  if (provider.keyRequired) {
+    return Boolean(cfg.apiKey && cfg.apiKey.trim());
   }
-  return false;
+  return Boolean((cfg.model && cfg.model.trim()) || (cfg.url && cfg.url.trim()));
 }
 
 function setKeyVisible(visible) {
@@ -166,6 +172,7 @@ function loadProfileIntoForm(id) {
   configModel.value = p.model || '';
   configKey.value = p.apiKey || '';
   configContextWindow.value = p.contextWindow || '';
+  if (configMaxTokens) configMaxTokens.value = p.maxTokens || '';
   setKeyVisible(false);
   updateConfigVisibility(configProvider.value);
 }
@@ -178,6 +185,7 @@ function startNewProfileForm() {
   configModel.value = '';
   configKey.value = '';
   configContextWindow.value = '';
+  if (configMaxTokens) configMaxTokens.value = '';
   setKeyVisible(false);
   updateConfigVisibility('gemini');
 }
@@ -284,21 +292,22 @@ if (btnToggleKey) {
 }
 
 function updateConfigVisibility(provider) {
-  const isGemini = provider === 'gemini';
-  if (rowConfigUrl) rowConfigUrl.style.display = isGemini ? 'none' : 'flex';
+  // T32: registry-driven. Fixed-endpoint providers (gemini / openai-official /
+  // anthropic) hide the URL field (BUG-016) — a stored URL is ignored and would
+  // be confusing. Placeholders + the key required/optional label come from the
+  // provider metadata.
+  const p = getProvider(provider);
+  if (rowConfigUrl) rowConfigUrl.style.display = p.fixedEndpoint ? 'none' : 'flex';
   if (labelConfigKey) {
-    labelConfigKey.innerHTML = isGemini
-      ? 'API Key <span class="required">(required for Gemini API)</span>'
-      : 'API Key <span class="optional">(optional for local Ollama/LM Studio)</span>';
+    labelConfigKey.innerHTML = p.keyRequired
+      ? `API Key <span class="required">(required for ${p.label})</span>`
+      : 'API Key <span class="optional">(optional for local endpoints)</span>';
   }
-  if (isGemini) {
-    configModel.placeholder = 'gemini-2.5-flash';
-    configKey.placeholder = 'AIza...';
-  } else {
-    configUrl.placeholder = 'http://localhost:11434/v1';
-    configModel.placeholder = 'llama3.2';
-    configKey.placeholder = 'AIza... or sk-...';
-  }
+  configModel.placeholder = p.modelPlaceholder || 'model-name';
+  configKey.placeholder = p.keyPlaceholder || 'sk-…';
+  if (!p.fixedEndpoint) configUrl.placeholder = p.presetUrl || 'http://localhost:11434/v1';
+  // T32: max_tokens is only meaningful for Anthropic (required by its API).
+  if (rowConfigMaxTokens) rowConfigMaxTokens.style.display = p.id === 'anthropic' ? 'flex' : 'none';
 }
 
 function openConfigModal() {
@@ -400,20 +409,22 @@ if (configForm) {
     const store = loadStore();
     const existingId = configProfileId.value;
     const existing = existingId ? store.profiles.find(p => p.id === existingId) : null;
+    const providerId = configProvider.value;
+    const provider = getProvider(providerId);
     const profile = {
       id: existingId || newProfile().id,
-      name: configProfileName.value.trim() || configProvider.value,
-      provider: configProvider.value,
-      // Gemini uses a fixed endpoint — the URL field is hidden for it, so a
-      // value present is stale (e.g. a leftover local Ollama URL). Persisting
-      // it would be confusing even though resolveEndpointUrl ignores it.
-      url: configProvider.value === 'gemini' ? '' : configUrl.value.trim(),
+      name: configProfileName.value.trim() || providerId,
+      provider: providerId,
+      // Fixed-endpoint providers (gemini / openai-official / anthropic) hide
+      // the URL field, so a value present is stale (e.g. a leftover local
+      // Ollama URL). Persisting it would be confusing even though the registry
+      // ignores it (BUG-016).
+      url: provider.fixedEndpoint ? '' : configUrl.value.trim(),
       model: configModel.value.trim(),
       apiKey: configKey.value.trim(),
       contextWindow: configContextWindow.value.trim(),
-      // T32: per-profile Anthropic max_tokens override — no UI field yet in
-      // T31, so preserve whatever a prior version stored.
-      maxTokens: (existing && existing.maxTokens) || '',
+      // T32: per-profile Anthropic max_tokens override (empty → derived default).
+      maxTokens: configMaxTokens ? configMaxTokens.value.trim() : '',
     };
     upsertProfile(profile);
     setActiveProfile(profile.id);
@@ -429,9 +440,13 @@ async function bootAgent() {
   migrateLegacyConfig(); // idempotent — a legacy single-object config becomes the first profile
   const cfg = loadConfig();
   const provider = cfg.provider || 'gemini';
-  const url = cfg.url || (provider === 'openai' ? 'http://localhost:11434/v1' : '');
-  const model = cfg.model || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2');
+  const p = getProvider(provider);
+  // T32: registry-driven defaults. Fixed-endpoint providers carry no URL; the
+  // rest fall back to the provider's preset (Ollama / Groq / …).
+  const url = cfg.url || (p.fixedEndpoint ? '' : (p.presetUrl || ''));
+  const model = cfg.model || (p.modelPlaceholder || 'llama3.2');
   const apiKey = cfg.apiKey || '';
+  const maxTokens = cfg.maxTokens || '';
 
   try {
     statusBar.textContent = 'Initializing wa-sqlite JSPI…';
@@ -443,6 +458,7 @@ async function bootAgent() {
       llmModel: model,
       llmApiKey: apiKey,
       llmProvider: provider,
+      llmMaxTokens: maxTokens,
     });
 
     // Debug/test handle (used by the cartridge round-trip tests & console).
@@ -805,17 +821,34 @@ function parseCompactCommand(text) {
   return { instructions: (m[1] || '').trim() || undefined };
 }
 
+/**
+ * T32: build the (provider, cfg) pair for a compaction call from the running
+ * agent's resolved LLM config. cfg is the registry shape { model, url, apiKey,
+ * maxTokens }; runCompaction resolves the Anthropic max_tokens default if unset.
+ */
+function compactionArgs() {
+  const provider = getProvider(agent.llm.provider);
+  const cfg = {
+    model: agent.llm.model,
+    url: agent.llm.url,
+    apiKey: agent.llm.apiKey,
+    maxTokens: agent.llm.maxTokens ? (parseInt(agent.llm.maxTokens, 10) || 0) : 0,
+  };
+  return { provider, cfg };
+}
+
 /** Manual compaction: /compact [instructions] — keep 0, summarize everything. */
 async function runManualCompaction(instructions) {
   if (!agent) return;
   const { sqlite3, db } = agent;
+  const { provider, cfg } = compactionArgs();
   setLoading(true);
   setSendButtonStop(true); // Stop works: the summary fetch uses the turn signal
   const turnAbort = beginTurn();
   try {
     statusBar.textContent = 'Compacting context…';
     statusBar.style.color = '#d29922';
-    const result = await runCompaction(sqlite3, db, activeSessionId, agent.llm, {
+    const result = await runCompaction(sqlite3, db, activeSessionId, provider, cfg, {
       instructions,
       keepBudget: 0, // manual: summarize the ENTIRE active context
       reason: 'manual',
@@ -866,7 +899,8 @@ async function maybeProactiveCompaction(sqlite3, db, signal) {
   if (sList) sList.querySelectorAll('button').forEach(btn => btn.disabled = true);
   statusBar.textContent = `Compacting context… (~${Math.round(est / 1000)}k / ${Math.round(window * COMPACTION_THRESHOLD / 1000)}k token threshold)`;
   statusBar.style.color = '#d29922';
-  const result = await runCompaction(sqlite3, db, activeSessionId, agent.llm, { reason: 'proactive', signal });
+  const { provider, cfg } = compactionArgs();
+  const result = await runCompaction(sqlite3, db, activeSessionId, provider, cfg, { reason: 'proactive', signal });
   if (result) {
     console.log(`[main] Proactive compaction: seq=${result.seq} watermark=${result.watermarkId} summarized=${result.summarizedCount}`);
   }

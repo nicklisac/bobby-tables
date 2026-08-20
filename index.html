@@ -569,7 +569,14 @@
             <label for="config-provider">Provider</label>
             <select id="config-provider">
               <option value="gemini" selected>Google Gemini API</option>
-              <option value="openai">OpenAI Compatible (Ollama, LM Studio, Local, OpenRouter)</option>
+              <option value="anthropic">Anthropic (Claude)</option>
+              <option value="openai-official">OpenAI (official)</option>
+              <option value="openai">OpenAI Compatible (custom)</option>
+              <option value="groq">Groq</option>
+              <option value="mistral">Mistral</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="ollama">Ollama (local)</option>
+              <option value="lm-studio">LM Studio (local)</option>
             </select>
           </div>
           <div class="config-row" id="row-config-url" style="display: none;">
@@ -592,6 +599,11 @@
             <label for="config-context-window">Context Window (tokens)</label>
             <input type="number" id="config-context-window" min="1000" step="1000" placeholder="auto" />
             <small class="hint">T2: context for interval compaction. Leave empty for auto (cloud model lookup, 128k fallback).</small>
+          </div>
+          <div class="config-row" id="row-config-max-tokens" style="display: none;">
+            <label for="config-max-tokens">Max Output Tokens</label>
+            <input type="number" id="config-max-tokens" min="1" step="256" placeholder="auto" />
+            <small class="hint">Anthropic only. Leave empty for auto (min(64000, context window ÷ 4)).</small>
           </div>
           <div class="modal-actions">
             <button type="button" id="config-cancel" class="btn-secondary">[Cancel]</button>

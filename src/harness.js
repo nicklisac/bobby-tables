@@ -19,7 +19,8 @@ import { SQLITE_ROW } from './utils.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
 import { SCHEMA_SQL, SYSTEM_PROMPT, migrateSystemPrompt, migrateTurnTables, migrateMessagesTable, migrateDashboardCardsTable, migrateDocumentsTable, migrateToolsTable, queryAll, isInternalTable, isProtectedObject, logDDL, sweepCaptureTriggers, extractTargetTables, extractDdlTableName, captureDropPreImage } from './schema.js';
-import { runCompaction, queryActiveContextJson } from './compaction.js';
+import { runCompaction, queryActiveContextJson, resolveContextWindow } from './compaction.js';
+import { getProvider, defaultMaxTokens } from './llm-provider.js';
 import { materializeToolResult } from './materialize.js';
 import { upsertDocument, searchDocuments } from './documents.js';
 
@@ -229,30 +230,9 @@ export class ContextLengthError extends Error {
   }
 }
 
-export function isContextLengthError(status, text) {
-  if (status !== 400) return false;
-  return /context|too many tokens|prompt is too long|exceeds the (context|token|maximum)|token limit|maximum context|window is too small|longer than the model/i.test(text || '');
-}
-
-/**
- * Resolve provider endpoint URL.
- */
-function resolveEndpointUrl(url, provider) {
-  if (provider === 'gemini') {
-    // The "Google Gemini API" provider always uses the fixed Google endpoint.
-    // A user-supplied url is deliberately IGNORED: the config UI hides the URL
-    // field for Gemini, so any value present is stale (e.g. a leftover local
-    // Ollama/LM Studio URL) and would silently route Gemini turns to the wrong
-    // model. (Custom endpoints belong to the "OpenAI Compatible" provider.)
-    return 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
-  }
-  if (!url) return '';
-  const cleanUrl = url.trim().replace(/\/+$/, '');
-  if (cleanUrl.endsWith('/v1')) {
-    return `${cleanUrl}/chat/completions`;
-  }
-  return cleanUrl;
-}
+// isContextLengthError is re-exported from the provider registry (T32) so the
+// existing public API (harness.js) keeps working for any importer.
+export { isContextLengthError } from './llm-provider.js';
 
 /**
  * Build the system prompt with tool definitions and structured output instructions.
@@ -282,41 +262,6 @@ export function buildSystemPrompt(tools = [], basePrompt = '') {
   return prompt;
 }
 
-/**
- * Format conversation history for the LLM API.
- */
-export function formatMessages(messages = [], provider = 'openai') {
-  const isGemini = provider === 'gemini';
-  return messages.map(m => {
-    if (isGemini) {
-      if (m.role === 'assistant' && m.tool_calls) {
-        const parsedCalls = typeof m.tool_calls === 'string' ? JSON.parse(m.tool_calls) : m.tool_calls;
-        const body = {
-          content: m.content || '',
-          tool_calls: parsedCalls,
-        };
-        return { role: 'assistant', content: JSON.stringify(body) };
-      }
-      if (m.role === 'tool') {
-        return {
-          role: 'user',
-          content: `[Tool Result for ${m.tool_call_id || 'tool'}]:\n${m.content || ''}`,
-        };
-      }
-      return { role: m.role, content: m.content || '' };
-    }
-
-    const msg = { role: m.role === 'tool' ? 'tool' : m.role, content: m.content || '' };
-    if (m.role === 'assistant' && m.tool_calls) {
-      msg.tool_calls = typeof m.tool_calls === 'string' ? JSON.parse(m.tool_calls) : m.tool_calls;
-    }
-    if (m.role === 'tool' && m.tool_call_id) {
-      msg.tool_call_id = m.tool_call_id;
-    }
-    return msg;
-  });
-}
-
 export async function bootSqliteAgent(config = {}) {
   const {
     dbName      = 'agent_brain.sqlite3',
@@ -324,10 +269,13 @@ export async function bootSqliteAgent(config = {}) {
     llmModel    = 'gemini-2.5-flash',
     llmApiKey   = '',
     llmProvider = 'openai',
+    llmMaxTokens = '',
   } = config;
 
-  const endpointUrl = resolveEndpointUrl(llmUrl, llmProvider);
-  if (!endpointUrl && llmProvider !== 'gemini') {
+  // T32: the provider registry owns endpoint resolution + framing.
+  const provider = getProvider(llmProvider);
+  const endpointUrl = provider.endpoint({ url: llmUrl });
+  if (!endpointUrl && !provider.fixedEndpoint) {
     console.warn('[harness] No LLM URL configured.');
   }
 
@@ -571,43 +519,32 @@ export async function bootSqliteAgent(config = {}) {
   // ContextLengthError on a provider context-length 400 so the caller (ask_llm)
   // can compact + retry once. (Extracted from the UDF so the retry can re-invoke
   // it with a rebuilt context.)
-  async function performLLMCall(apiMessages, tools) {
+  //
+  // T32: request framing is delegated to the provider registry
+  // (src/llm-provider.js). `provider` owns endpoint/headers/body/SSE/JSON; this
+  // function owns the streaming loop, stop handling, and the non-streaming
+  // fallback. `cfg = { model, url, apiKey, maxTokens }`.
+  async function performLLMCall(provider, cfg, { systemPrompt, messages, tools }) {
     let content = '';
     let toolCalls = null;
     let promptTokens = 0;
     let completionTokens = 0;
     let streamSucceeded = false;
 
-    const targetUrl = endpointUrl || resolveEndpointUrl(llmUrl, llmProvider);
-    const targetApiKey = llmApiKey;
-    const isGemini = llmProvider === 'gemini' || /generativelanguage\.googleapis\.com/i.test(targetUrl);
-    const toolsPayload = (tools.length && !isGemini) ? tools.map(t => {
-      const schema = typeof t === 'string' ? JSON.parse(t) : t;
-      return schema;
-    }) : undefined;
+    const targetUrl = provider.endpoint(cfg);
 
     // Try streaming via SSE first
     try {
       const streamResp = await fetch(targetUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(targetApiKey ? { Authorization: `Bearer ${targetApiKey}` } : {}),
-        },
+        headers: provider.headers(cfg),
         signal: turnSignal(),
-        body: JSON.stringify({
-          model: llmModel,
-          messages: apiMessages,
-          ...(toolsPayload ? { tools: toolsPayload } : {}),
-          ...(isGemini ? { response_format: { type: 'json_object' } } : {}),
-          stream: true,
-          stream_options: { include_usage: true },
-        }),
+        body: JSON.stringify(provider.buildBody(cfg, { systemPrompt, messages, tools, stream: true })),
       });
 
       if (!streamResp.ok) {
         const errText = await streamResp.text().catch(() => '');
-        if (isContextLengthError(streamResp.status, errText)) {
+        if (provider.isContextLengthError(streamResp.status, errText)) {
           throw new ContextLengthError(streamResp.status, errText);
         }
         // Non-context 4xx/5xx: fall through to the non-streaming fallback.
@@ -631,46 +568,45 @@ export async function bootSqliteAgent(config = {}) {
               const trimmed = line.trim();
               if (!trimmed || trimmed.startsWith(':')) continue; // skip keep-alive comments
               if (trimmed === 'data: [DONE]') continue;
-              if (trimmed.startsWith('data: ')) {
-                try {
-                  const data = JSON.parse(trimmed.slice(6));
-                  const choice = data.choices?.[0];
-                  if (choice?.delta?.content) {
-                    const token = choice.delta.content;
-                    content += token;
-                    agentEventStream.emit('token', {
-                      token,
-                      accumulated: content,
-                      role: 'assistant',
+              if (!trimmed.startsWith('data: ')) continue;
+              let data;
+              try {
+                data = JSON.parse(trimmed.slice(6));
+              } catch {
+                continue; // skip invalid SSE JSON chunk
+              }
+              const parsed = provider.parseSseData(data);
+              if (parsed.token) {
+                content += parsed.token;
+                agentEventStream.emit('token', {
+                  token: parsed.token,
+                  accumulated: content,
+                  role: 'assistant',
+                });
+              }
+              if (parsed.toolCallsDelta) {
+                for (const tc of parsed.toolCallsDelta) {
+                  const idx = tc.index ?? 0;
+                  if (!toolCallsMap.has(idx)) {
+                    toolCallsMap.set(idx, {
+                      id: tc.id || `call_${Date.now()}_${idx}`,
+                      type: 'function',
+                      function: {
+                        name: tc.function?.name || '',
+                        arguments: tc.function?.arguments || '',
+                      },
                     });
+                  } else {
+                    const existing = toolCallsMap.get(idx);
+                    if (tc.id) existing.id = tc.id;
+                    if (tc.function?.name) existing.function.name += tc.function.name;
+                    if (tc.function?.arguments) existing.function.arguments += tc.function.arguments;
                   }
-                  if (choice?.delta?.tool_calls) {
-                    for (const tc of choice.delta.tool_calls) {
-                      const idx = tc.index ?? 0;
-                      if (!toolCallsMap.has(idx)) {
-                        toolCallsMap.set(idx, {
-                          id: tc.id || `call_${Date.now()}_${idx}`,
-                          type: 'function',
-                          function: {
-                            name: tc.function?.name || '',
-                            arguments: tc.function?.arguments || '',
-                          },
-                        });
-                      } else {
-                        const existing = toolCallsMap.get(idx);
-                        if (tc.id) existing.id = tc.id;
-                        if (tc.function?.name) existing.function.name += tc.function.name;
-                        if (tc.function?.arguments) existing.function.arguments += tc.function.arguments;
-                      }
-                    }
-                  }
-                  if (data.usage) {
-                    promptTokens = data.usage.prompt_tokens || promptTokens;
-                    completionTokens = data.usage.completion_tokens || completionTokens;
-                  }
-                } catch {
-                  // Skip invalid SSE JSON chunk
                 }
+              }
+              if (parsed.usage) {
+                if (parsed.usage.prompt != null) promptTokens = parsed.usage.prompt;
+                if (parsed.usage.completion != null) completionTokens = parsed.usage.completion;
               }
             }
           }
@@ -682,13 +618,11 @@ export async function bootSqliteAgent(config = {}) {
         } else {
           // Endpoint returned normal JSON despite stream: true
           const data = await streamResp.json();
-          const msg = data.choices?.[0]?.message || data.message || {};
-          content = msg.content || '';
-          toolCalls = msg.tool_calls || null;
-          if (data.usage) {
-            promptTokens = data.usage.prompt_tokens || 0;
-            completionTokens = data.usage.completion_tokens || 0;
-          }
+          const parsed = provider.parseJson(data);
+          content = parsed.content;
+          toolCalls = parsed.toolCalls;
+          promptTokens = parsed.usage.prompt;
+          completionTokens = parsed.usage.completion;
           if (content) {
             agentEventStream.emit('token', {
               token: content,
@@ -714,37 +648,24 @@ export async function bootSqliteAgent(config = {}) {
     if (!streamSucceeded) {
       const resp = await fetch(targetUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(targetApiKey ? { Authorization: `Bearer ${targetApiKey}` } : {}),
-        },
+        headers: provider.headers(cfg),
         signal: turnSignal(),
-        body: JSON.stringify({
-          model: llmModel,
-          messages: apiMessages,
-          ...(toolsPayload ? { tools: toolsPayload } : {}),
-          ...(isGemini ? { response_format: { type: 'json_object' } } : {}),
-          stream: false,
-        }),
+        body: JSON.stringify(provider.buildBody(cfg, { systemPrompt, messages, tools, stream: false })),
       });
 
       if (!resp.ok) {
         const errText = await resp.text().catch(() => '');
-        if (isContextLengthError(resp.status, errText)) {
+        if (provider.isContextLengthError(resp.status, errText)) {
           throw new ContextLengthError(resp.status, errText);
         }
         throw new Error(`HTTP ${resp.status}: ${errText}`);
       }
       const data = await resp.json();
-      const msg = data.choices?.[0]?.message || data.message || {};
-
-      // Extract token usage
-      const usage = data.usage || {};
-      promptTokens = usage.prompt_tokens || 0;
-      completionTokens = usage.completion_tokens || 0;
-
-      content = msg.content || '';
-      toolCalls = msg.tool_calls || null;
+      const parsed = provider.parseJson(data);
+      promptTokens = parsed.usage.prompt;
+      completionTokens = parsed.usage.completion;
+      content = parsed.content;
+      toolCalls = parsed.toolCalls;
 
       if (content) {
         agentEventStream.emit('token', {
@@ -784,16 +705,21 @@ export async function bootSqliteAgent(config = {}) {
         let systemMsg = messages.find(m => m.role === 'system');
         let systemPrompt = buildSystemPrompt(tools, systemMsg?.content);
 
-        // Format messages for API
-        let apiMessages = [
-          { role: 'system', content: systemPrompt },
-          ...formatMessages(messages.filter(m => m.role !== 'system'), llmProvider)
-        ];
+        // T32: build the provider config. max_tokens is only meaningful for
+        // Anthropic (required by the Messages API): per-profile override, else
+        // min(64000, window/4).
+        let maxTokens = 0;
+        if (provider.id === 'anthropic') {
+          const winRows = await queryAll(sqlite3, db, `SELECT value FROM system_config WHERE key = 'effective_context_window'`);
+          const window = resolveContextWindow(winRows.length ? winRows[0][0] : null, llmModel);
+          maxTokens = llmMaxTokens ? (parseInt(llmMaxTokens, 10) || 0) : defaultMaxTokens(window);
+        }
+        const llmCfg = { model: llmModel, url: llmUrl, apiKey: llmApiKey, maxTokens };
 
         // Emit 'thinking' event
         agentEventStream.emit('thinking', {
           role: 'assistant',
-          messageCount: apiMessages.length,
+          messageCount: messages.length,
           model: llmModel,
         });
 
@@ -804,26 +730,25 @@ export async function bootSqliteAgent(config = {}) {
         let retried = false;
         while (true) {
           try {
-            result = await performLLMCall(apiMessages, tools);
+            result = await performLLMCall(provider, llmCfg, {
+              systemPrompt,
+              messages: messages.filter(m => m.role !== 'system'),
+              tools,
+            });
             break;
           } catch (e) {
             if (e instanceof ContextLengthError && !retried) {
               const sessRows = await queryAll(sqlite3, db, `SELECT value FROM session_context WHERE key = 'active_session_id'`);
               const activeSessionId = sessRows.length ? sessRows[0][0] : 'default';
-              const llmCfg = { model: llmModel, endpointUrl: endpointUrl || resolveEndpointUrl(llmUrl, llmProvider), apiKey: llmApiKey };
-              const comp = await runCompaction(sqlite3, db, activeSessionId, llmCfg, { reason: 'reactive', signal: turnSignal() });
+              const comp = await runCompaction(sqlite3, db, activeSessionId, provider, llmCfg, { reason: 'reactive', signal: turnSignal() });
               if (comp) {
                 // Rebuild the context from the view (the watermark advanced).
                 messages = JSON.parse(await queryActiveContextJson(sqlite3, db));
                 systemMsg = messages.find(m => m.role === 'system');
                 systemPrompt = buildSystemPrompt(tools, systemMsg?.content);
-                apiMessages = [
-                  { role: 'system', content: systemPrompt },
-                  ...formatMessages(messages.filter(m => m.role !== 'system'), llmProvider)
-                ];
                 agentEventStream.emit('thinking', {
                   role: 'assistant',
-                  messageCount: apiMessages.length,
+                  messageCount: messages.length,
                   model: llmModel,
                   compacted: true,
                 });
@@ -1499,10 +1424,12 @@ export async function bootSqliteAgent(config = {}) {
   // exports the JS API wrapper lacks (sqlite3_serialize, sqlite3_deserialize,
   // sqlite3_backup_*).
   // `llm` is the resolved LLM config — exposed so compaction.js (T2) can make
-  // its one-shot summary fetch to the same model/endpoint.
+  // its one-shot summary fetch to the same model/endpoint. T32: carries the
+  // raw `url` + `maxTokens` + provider id so callers can rebuild the registry
+  // cfg ({ model, url, apiKey, maxTokens }) via getProvider(provider).
   return {
     sqlite3, db, eventStream: agentEventStream, module, vfs,
-    llm: { model: llmModel, endpointUrl, apiKey: llmApiKey, provider: llmProvider },
+    llm: { model: llmModel, url: llmUrl, endpointUrl, apiKey: llmApiKey, maxTokens: llmMaxTokens, provider: llmProvider },
     ...agentApi,
   };
 }

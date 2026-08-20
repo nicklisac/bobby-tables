@@ -12,6 +12,7 @@
 import { escapeHtml, queryAll, SQLITE_ROW } from './utils.js';
 import { getRewindableScratchpadTurns, getSessionTokenUsage } from './schema.js';
 import { getEventStream, settleApproval } from './harness.js';
+import { getProvider } from './llm-provider.js';
 import { globalSchemaIndex } from './sql-autocomplete.js';
 import { renderExplorer, openCreateViewModal } from './explorer-ui.js';
 import { setBusy } from './grid-ui.js';
@@ -216,23 +217,15 @@ function updateReadyStatus() {
     return;
   }
 
-  const provider = cfg.provider || 'gemini';
-  const url = cfg.url || (provider === 'openai' ? 'http://localhost:11434/v1' : '');
-  const model = cfg.model || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama3.2');
-  const apiKey = cfg.apiKey || '';
-
-  if (provider === 'gemini') {
-    if (apiKey) {
-      statusBar.textContent = `Ready — Google Gemini (${model})`;
-      if (statusLed) statusLed.className = 'status-led led-ready';
-    } else {
-      statusBar.textContent = `Ready — Google Gemini (${model}) [API key needed]`;
-      if (statusLed) statusLed.className = 'status-led led-unconfigured';
-    }
-  } else {
-    statusBar.textContent = `Ready — OpenAI Compatible at ${url || 'default'} (${model})`;
-    if (statusLed) statusLed.className = 'status-led led-ready';
-  }
+  // T32: registry-driven status line (works for every provider, not just
+  // gemini / openai-compatible).
+  const provider = getProvider(cfg.provider || 'gemini');
+  const model = cfg.model || provider.modelPlaceholder || 'model';
+  const url = cfg.url || (provider.fixedEndpoint ? '' : (provider.presetUrl || ''));
+  let text = `Ready — ${provider.label} (${model})`;
+  if (!provider.fixedEndpoint && url) text += ` at ${url}`;
+  statusBar.textContent = text;
+  if (statusLed) statusLed.className = 'status-led led-ready';
 }
 
 export { setLoading, setSendButtonStop, updateReadyStatus };

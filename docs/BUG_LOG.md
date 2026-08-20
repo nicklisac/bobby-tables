@@ -44,7 +44,7 @@ This document tracks known issues, edge cases, and improvements to be addressed 
 ---
 
 ### BUG-005: Limited LLM Provider Selection (Missing Major Industry Providers)
-- **Status**: **Being worked as Ticket 32 (frontier, 2026-08-19)** — see `docs/WAYFINDER_MAP.md` ("Ticket 32: Anthropic + OpenAI Official Providers"). Anthropic (Messages API) + OpenAI official as first-class providers; the remainder (Groq / Mistral / OpenRouter / Ollama / LM Studio) closes via OpenAI-compatible endpoint presets.
+- **Status**: **Being worked as Ticket 32 (frontier, 2026-08-19) — implementation complete, pending LM Studio live probe + AGY review.** See `docs/WAYFINDER_MAP.md` ("Ticket 32: Anthropic + OpenAI Official Providers"). Anthropic (Messages API) + OpenAI official are now first-class providers via the `src/llm-provider.js` registry (consumed by both transports); the remainder (Groq / Mistral / OpenRouter / Ollama / LM Studio) closes via OpenAI-compatible endpoint presets. Closes once the live Anthropic-framing probe + AGY pass land.
 - **Reported**: User Feedback
 - **Component**: `src/harness.js`, `src/main.js`, `index.html`
 - **Description**: The application currently only provides options for generic OpenAI-compatible endpoints and Google Gemini. Support is needed for the major LLM providers out of the box (e.g., Anthropic Claude, OpenAI official, Google Gemini, Groq, Mistral, OpenRouter, and local Ollama/LM Studio presets).
