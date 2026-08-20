@@ -90,6 +90,9 @@ graph TD
     T2 --> T30[Ticket 30: Self-Reference Metadata in Agent Context (session + message IDs)]
     T1 --> T18[Ticket 18: Self-Rendering Reactive Views]
     T1 --> T19[Ticket 19: Persona & Prompt Presets]
+    T30[Ticket 30: Self-Reference Metadata in Agent Context - open]
+    T31[Ticket 31: Saved Provider Profiles (multi-provider config store & panel)]
+    T31 --> T32[Ticket 32: Anthropic + OpenAI Official Providers (BUG-005 core)]
 
     T4[Ticket 4: Live Event Streaming & Token Pipe - DONE]
     T5[Ticket 5: Native Vector Search sqlite-vec - DONE]
@@ -115,7 +118,7 @@ graph TD
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
     class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T16,T17,T21,T24,T25,T26,T261,T262,T263,T264,T265,T27,T28,T29 done;
-    class T14,T15,T18,T19,T20,T22,T23,T30 frontier;
+    class T14,T15,T18,T19,T20,T22,T23,T30,T31,T32 frontier;
 ```
 
 ---
@@ -731,6 +734,68 @@ graph TD
   * Full suite green; AGY review pass (sign-off standard).
 * **Next steps:** lock the design (per-message `id` field vs a compact header list; where the session id lands; the prompt migration) → implement (`v_active_context` + `agent_think` + `formatMessages` + system prompt) → fake-LLM probe + cache probe → AGY review → merge.
 * **Branch:** `t30-context-metadata`
+
+---
+
+### Ticket 31: Saved Provider Profiles — Multi-Provider Config Store & Panel
+* **Label:** `wayfinder:prototype` (HITL)
+* **Status:** 🟡 IN PROGRESS (claimed 2026-08-19, branch `t31-t32-providers`)
+* **Workstream note (2026-08-19, user-approved exception to one-session-one-ticket):** T31 + T32 are worked **together on the shared branch `t31-t32-providers`** — T31 first (the profile store is the substrate), then T32 (the provider registry + new providers on top). Each ticket still resolves with its own verification + AGY pass; the pair merges together.
+* **Depends on:** — (independent; unblocks T32)
+* **Question:** How should the app persist multiple named LLM provider profiles (provider type, endpoint, model, API key, context window) so that switching providers never wipes previously saved credentials — and how should the config UI present and manage them?
+* **Reported (2026-08-19, user):** "if a user has already set up a model with a provider they don't need to run and find their API key again. They can just use what they set before. I think this was a 'bug' but we need to work it as a ticket." Tracked as BUG-020.
+* **The defect (verified in code, 2026-08-19):** the config is a single flat `localStorage['sql-agent-config']` object — `{provider, url, model, apiKey, contextWindow, isConfigured}` (main.js:127-133). Saving any provider overwrites the previous provider's key/model/URL: a user with both a Gemini key and an OpenAI-compatible setup re-enters the key on every switch.
+* **Facts gathered (2026-08-19, code-verified):**
+  * Config consumers: `bootAgent` (main.js:284-301 — bakes the config into the harness at boot), `isProviderConfigured` (main.js:135), `populateConfigForm` (main.js:163), config-form submit (main.js:262-280 — saves, then reboots the agent), `chat-render.js:219-225` (provider/model display in the welcome card).
+  * The brain DB is exported as a `.sqlite3` cartridge (T10, VACUUM INTO) — **API keys must never live in the brain DB**: a cartridge export/share would leak credentials. Profile storage stays in localStorage (outside the brain), as a reviewable invariant.
+  * Current config modal (`#config-modal`, index.html:538+): provider select (`gemini` / `openai`), URL row (hidden for gemini — BUG-016), model, API key, context window.
+  * A provider switch requires a full agent reboot (the harness bakes `llmUrl/llmModel/llmApiKey/llmProvider` into the UDF closure at boot, harness.js:320-327) — the current save path already reboots (main.js:277-278).
+* **Design agenda (decisions to lock at claim time):**
+  1. **Store:** `localStorage['sql-agent-providers']` = `{ profiles: [{id, name, provider, url, model, apiKey, contextWindow}], activeId }`. `id` stable (e.g. `crypto.randomUUID()`); `name` = user-editable display label. NOT in SQLite (cartridge-leak invariant, above).
+  2. **Migration:** on boot, if the legacy `sql-agent-config` exists and the profiles store does not → import the legacy object as the first profile (name = provider label), set it active, delete the legacy key. One-way, idempotent, probe-tested.
+  3. **UI shape:** candidates: (a) a "Saved Providers" section inside the existing config modal (list rows: name, provider badge, model, masked key; [Use] [Edit] [Delete] + [+ New]); (b) a separate left-pane accordion; (c) a profile picker atop the config modal. Leaning (a) — the config modal is already the provider home; the form below the list edits the selected/new profile.
+  4. **Key display:** masked at rest (suffix-only, e.g. `sk-…abcd`); the edit form shows it in a `type=password` field with a reveal toggle; delete is confirmed and states what will be lost.
+  5. **Activation:** [Use] / save = set active + `bootAgent()` reboot (the existing save behavior). No hot-swap in this ticket (the harness bakes config at boot; hot-swap is separate hardening, out of scope).
+  6. **Per-profile context window:** keep the existing `contextWindow` field per profile (T2's user-override knob, already per-config today).
+* **Acceptance:**
+  * Set up profile A (key K1) → create profile B (key K2) → switch back to A: K1 intact, no re-entry (the BUG-020 repro is gone).
+  * Legacy-migration probe: seed `sql-agent-config`, boot, assert the profile exists + is active + the legacy key is deleted.
+  * Cartridge invariant: profiles (and keys) are absent from any `.sqlite3` export — by construction (localStorage), documented as a reviewable invariant.
+  * Playwright spec (profile CRUD + switch-persistence + migration) + full suite green; AGY review pass (sign-off standard).
+* **Next steps:** lock the design (store shape, UI shape, migration) → implement (store + migration + config-modal rework) → probe + spec → AGY review → merge.
+* **Branch:** `t31-saved-providers`
+
+---
+
+### Ticket 32: Anthropic + OpenAI Official Providers (BUG-005 core)
+* **Label:** `wayfinder:task` (AFK once probed; one HITL decision — the `max_tokens` default)
+* **Status:** 🟡 IN PROGRESS (claimed 2026-08-19, branch `t31-t32-providers` — worked together with T31, see T31's workstream note)
+* **Depends on:** T31 (multi-provider keys need the multi-profile store — without it, adding providers just moves the BUG-020 key-wipe onto the new providers)
+* **Question:** How do we add first-class **Anthropic** (Messages API) and **OpenAI official** providers to the transport layer — and close BUG-005's remaining gap (Groq / Mistral / OpenRouter / Ollama / LM Studio) with OpenAI-compatible endpoint presets?
+* **Facts gathered (2026-08-19, code-verified):**
+  * **The agent tool protocol is JSON-in-content:** `buildSystemPrompt` (harness.js:260-283) forces `{"content", "tool_calls"}` JSON responses, and `ask_llm` already parses JSON-in-content (harness.js:857-886, incl. code-fence stripping). Native `tool_calls` is an optional fast path. **Consequence: Anthropic needs NO native tool-call mapping** — the gemini path (history flattened to content strings, no native tools payload — `formatMessages` harness.js:288-317, `performLLMCall` harness.js:584) is the template.
+  * **Two transports exist today, both OpenAI-framed:** `performLLMCall` (harness.js:574-759 — SSE `choices[0].delta.content` / `delta.tool_calls`, `usage.prompt_tokens/completion_tokens`, `response_format: json_object` for gemini, native `tools` payload for non-gemini, `Authorization: Bearer`) and `fetchSummary` (compaction.js:293-317 — a second, simpler Bearer fetch for the compaction summary call). **Both must share the provider framing or compaction breaks under Anthropic.**
+  * `isContextLengthError` (harness.js:232-235) matches OpenAI/Gemini-style 400 bodies; Anthropic's context-overflow shape (`invalid_request_error`, "prompt is too long: N tokens > M maximum") needs a pattern.
+  * `CLOUD_MODEL_WINDOWS` (compaction.js:44-48) already covers `/claude/i` and `/gpt-4|gpt-5|o[1-9]-/i` → context-window resolution works for Anthropic/OpenAI model names out of the box.
+  * BUG-016 rule generalizes: `gemini` always uses its fixed endpoint (stored URL ignored); the same applies to `anthropic` (`https://api.anthropic.com/v1/messages`) and `openai-official` (`https://api.openai.com/v1/chat/completions`).
+* **Anthropic Messages API framing (verify in a live probe with a real key before implementing):**
+  * Headers: `x-api-key: <key>`, `anthropic-version: 2023-06-01`, and **`anthropic-dangerous-direct-browser-access: true`** (required for direct browser/CORS calls).
+  * Body: `{ model, max_tokens (REQUIRED), system, messages: [{role: 'user'|'assistant', content: string}] }` — no `stream_options`; SSE events: `message_start` / `content_block_delta` (`delta.text`) / `message_delta` (final `usage`) / `message_stop`.
+  * Response: `content: [{type:'text', text}]`; `usage: {input_tokens, output_tokens}`.
+  * Roles: `system` is a top-level parameter, not a message role → the system prompt (with the tool JSON protocol) goes there; history reuses the gemini `formatMessages` branch (tool rows → user `[Tool Result for …]` rows).
+  * **Open decision — `max_tokens` (the one HITL knob):** required by the API. Candidates: (a) fixed default (e.g. 8192); (b) derived from the resolved context window (e.g. `min(64000, window/4)`); (c) per-profile optional override + default. Leaning (c): per-profile field with a derived default (Claude 3.5+/4.x support 64k output).
+* **OpenAI official:** a preset of the existing OpenAI-compatible transport — fixed endpoint + key required, URL field hidden (BUG-016 pattern). Zero framing work.
+* **The rest of BUG-005 (Groq / Mistral / OpenRouter / Ollama / LM Studio):** all OpenAI-compatible → **endpoint presets** in the provider select (preset name → default URL + placeholder model, URL still editable). No transport work; closes BUG-005 in full.
+* **Architecture (leaning):** a provider registry `src/llm-provider.js` — per provider: `{ resolveEndpoint(cfg), headers(cfg), buildBody(cfg, apiMessages, tools, {stream}), parseSseLine(line) → {token?, toolCalls?, usage?}, parseJson(data) → {content, toolCalls, usage}, contextLengthError(status, text) }`. `performLLMCall` (harness.js) and `fetchSummary` (compaction.js) both consume it — the duplicate transport dies. The existing gemini + openai-compatible paths move into the registry verbatim (behavior preserved, differential-probe-tested).
+* **Acceptance:**
+  * **Live Anthropic probe** (real key, user-provided at session start): a full turn — content streaming (SSE `token` events fire), a JSON-in-content tool-call round-trip (call → tool row → result → final answer), usage mapped to `prompt_tokens`/`completion_tokens`; a forced context-overflow 400 → `ContextLengthError` (reactive-compaction path intact).
+  * **OpenAI official:** the same turn shape (or a documented manual check).
+  * **Compaction under Anthropic:** `/compact` produces a summary (`fetchSummary` via the registry).
+  * **No regression:** gemini + openai-compatible behavior unchanged (differential probe + full suite green).
+  * Playwright spec (provider select shows the new options; presets fill the URL; key-required validation for anthropic/openai-official) + full suite green; AGY review pass (sign-off standard).
+  * BUG-005 → closed.
+* **Next steps:** live-API probe (framing + CORS header + SSE event shapes + error shapes — go/no-go per the T26 discipline) → lock the `max_tokens` decision → provider registry + anthropic/openai-official/presets → compaction.js onto the registry → live probes (anthropic turn + compaction; openai turn) → differential probe (gemini/openai unchanged) → spec → AGY review → merge.
+* **Branch:** `t32-anthropic-openai-providers`
 
 ---
 

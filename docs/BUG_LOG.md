@@ -44,7 +44,7 @@ This document tracks known issues, edge cases, and improvements to be addressed 
 ---
 
 ### BUG-005: Limited LLM Provider Selection (Missing Major Industry Providers)
-- **Status**: Open / Backlogged
+- **Status**: **Being worked as Ticket 32 (frontier, 2026-08-19)** — see `docs/WAYFINDER_MAP.md` ("Ticket 32: Anthropic + OpenAI Official Providers"). Anthropic (Messages API) + OpenAI official as first-class providers; the remainder (Groq / Mistral / OpenRouter / Ollama / LM Studio) closes via OpenAI-compatible endpoint presets.
 - **Reported**: User Feedback
 - **Component**: `src/harness.js`, `src/main.js`, `index.html`
 - **Description**: The application currently only provides options for generic OpenAI-compatible endpoints and Google Gemini. Support is needed for the major LLM providers out of the box (e.g., Anthropic Claude, OpenAI official, Google Gemini, Groq, Mistral, OpenRouter, and local Ollama/LM Studio presets).
@@ -189,6 +189,16 @@ This document tracks known issues, edge cases, and improvements to be addressed 
   3. The repair placeholder message is left as-is (its job — keeping the transcript API-valid — is unchanged); the orphans it repairs should no longer be produced by the cascade.
 - **Verification**: `tests/specs/parallel-tool-calls.spec.mjs` — fake LLM returns 3 parallel `execute_sql` calls in one message, then a final reply. Asserts: exactly 2 LLM calls (initial + one post-batch — a per-row think would make 4), 3 result rows with the right values, zero orphaned ids, and after `page.reload()` the 3 rows persist with zero "Turn interrupted" placeholders. RED before the fix (only `p1` landed — the exact production shape), GREEN after. Full suite 32/32.
 - **Notes**: Pre-existing orphans in live brains (e.g. the 10 production placeholders) are permanent — those tools never ran, so their results cannot be recovered; the affected queries can be re-run from the expanded chip arguments. Optional hardening not done: `parallel_tool_calls: false` on OpenAI-compatible requests (advisory only — local runtimes may ignore it, and correctness no longer depends on it).
+
+---
+
+### BUG-020: Switching LLM Provider Wipes the Previously Saved API Key / Model
+- **Status**: **Being worked as Ticket 31 (frontier, 2026-08-19)** — see `docs/WAYFINDER_MAP.md` ("Ticket 31: Saved Provider Profiles"). Worked as a ticket (a design gap, not a crash): the fix is a multi-profile config store + panel, not a one-line patch.
+- **Reported**: User feedback (2026-08-19) — "if a user has already set up a model with a provider they don't need to run and find their API key again. They can just use what they set before."
+- **Component**: `src/main.js` (`loadConfig` / `saveConfig`, the single flat `localStorage['sql-agent-config']` object)
+- **Description**: The LLM config is one flat object holding a single `{provider, url, model, apiKey, contextWindow}`. Saving a second provider (e.g. switching from Gemini to OpenAI-compatible) overwrites the first provider's API key, model, and URL — the user must re-find and re-type the key on every switch.
+- **Root Cause**: No multi-profile store exists; the config shape has room for exactly one provider at a time.
+- **Resolution (planned, Ticket 31)**: A named-profile store (`localStorage['sql-agent-providers']` — deliberately NOT in the brain DB, so cartridge exports can never leak keys) with a saved-providers panel (list / new / edit / delete / use), one-way migration of the legacy single config, and masked key display.
 
 ---
 
