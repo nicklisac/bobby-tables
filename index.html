@@ -552,7 +552,19 @@
             </svg>
           </button>
         </div>
+        <div id="saved-providers">
+          <div class="saved-providers-header">
+            <h4 id="saved-providers-title">Saved Providers</h4>
+            <button type="button" id="btn-new-provider" class="btn-secondary btn-sm">[+ New]</button>
+          </div>
+          <ul id="provider-list" class="provider-list" aria-label="Saved provider profiles"></ul>
+        </div>
         <form id="config-form">
+          <input type="hidden" id="config-profile-id" />
+          <div class="config-row">
+            <label for="config-profile-name">Profile Name</label>
+            <input type="text" id="config-profile-name" placeholder="e.g. My Gemini, Work Claude" />
+          </div>
           <div class="config-row">
             <label for="config-provider">Provider</label>
             <select id="config-provider">
@@ -571,7 +583,10 @@
           </div>
           <div class="config-row">
             <label for="config-key" id="label-config-key">API Key <span class="optional">(optional for local Ollama/LM Studio)</span></label>
-            <input type="password" id="config-key" placeholder="AIza... or sk-..." />
+            <div class="config-key-row">
+              <input type="password" id="config-key" placeholder="AIza... or sk-..." autocomplete="off" />
+              <button type="button" id="btn-toggle-key" class="btn-secondary btn-sm" title="Show / hide API key">[show]</button>
+            </div>
           </div>
           <div class="config-row">
             <label for="config-context-window">Context Window (tokens)</label>
@@ -580,7 +595,7 @@
           </div>
           <div class="modal-actions">
             <button type="button" id="config-cancel" class="btn-secondary">[Cancel]</button>
-            <button type="submit" id="config-apply" class="btn-primary">[Apply &amp; Reboot]</button>
+            <button type="submit" id="config-apply" class="btn-primary">[Save &amp; Reboot]</button>
           </div>
         </form>
       </div>

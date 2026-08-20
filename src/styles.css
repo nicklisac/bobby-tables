@@ -2756,6 +2756,128 @@ footer {
   line-height: 1.35;
 }
 
+/* ── T31: Saved provider profiles (config modal) ── */
+
+#saved-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 0.6rem 0.65rem 0.65rem;
+}
+
+.saved-providers-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.saved-providers-header h4 {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.provider-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.provider-list-empty {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 0.15rem 0.1rem;
+}
+
+.provider-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  background: var(--bg-surface);
+  transition: border-color 0.15s;
+}
+
+.provider-row.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-subtle);
+}
+
+.provider-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.provider-row-name {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.provider-row-meta {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.provider-row-meta .provider-badge {
+  color: var(--accent);
+}
+
+.provider-row-meta .provider-active-flag {
+  color: var(--green);
+}
+
+.provider-row-actions {
+  display: flex;
+  gap: 0.25rem;
+  flex-shrink: 0;
+}
+
+.provider-row-actions .btn-sm {
+  padding: 0.12rem 0.4rem;
+  font-size: 0.62rem;
+}
+
+.config-key-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: stretch;
+}
+
+.config-key-row input {
+  flex: 1;
+}
+
+.config-key-row .btn-sm {
+  padding: 0 0.5rem;
+  font-size: 0.66rem;
+}
+
 .placement-selects {
   display: flex;
   gap: 0.5rem;

@@ -40,6 +40,10 @@ import {
 import { initSessionsUi, populateSessionDropdown } from './sessions-ui.js';
 import { initDocumentsUi } from './documents-ui.js';
 import * as documentsLib from './documents.js';
+import {
+  migrateLegacyConfig, loadStore, getActiveProfile, setActiveProfile,
+  upsertProfile, deleteProfile, newProfile, maskKey,
+} from './provider-store.js';
 import { ICONS } from './icons.js';
 import './styles.css';
 
@@ -60,6 +64,11 @@ const btnToggleConfig   = document.getElementById('btn-toggle-config');
 const configModal       = document.getElementById('config-modal');
 const configCancel      = document.getElementById('config-cancel');
 const configCloseBtn    = document.getElementById('config-close-btn');
+const providerListEl    = document.getElementById('provider-list');
+const btnNewProvider    = document.getElementById('btn-new-provider');
+const configProfileId   = document.getElementById('config-profile-id');
+const configProfileName = document.getElementById('config-profile-name');
+const btnToggleKey      = document.getElementById('btn-toggle-key');
 const btnArchitecture   = document.getElementById('btn-architecture');
 const archModal         = document.getElementById('architecture-modal');
 const archCloseBtn      = document.getElementById('arch-modal-close');
@@ -122,24 +131,156 @@ export function setTheme(theme, save = true) {
   }
 }
 
-// ── Config Persistence ──────────────────────────────────────────────
+// ── T31: Saved Provider Profiles ────────────────────────────────────
+// The profile store (provider-store.js) is the single source of truth for
+// LLM provider config. loadConfig() returns the ACTIVE profile (or {} when
+// none) in the same shape the legacy single-object config used to have, so
+// every existing consumer (bootAgent, chat-render, isProviderConfigured)
+// keeps working unchanged.
 
 function loadConfig() {
-  try { return JSON.parse(localStorage.getItem('sql-agent-config') || '{}'); } catch { return {}; }
-}
-
-function saveConfig(c) {
-  localStorage.setItem('sql-agent-config', JSON.stringify(c));
+  return getActiveProfile() || {};
 }
 
 function isProviderConfigured(cfg = loadConfig()) {
-  if (cfg && cfg.isConfigured) return true;
   if (!cfg || !cfg.provider) return false;
   if (cfg.provider === 'gemini') return Boolean(cfg.apiKey && cfg.apiKey.trim());
   if (cfg.provider === 'openai') {
     return Boolean((cfg.url && cfg.url.trim()) || (cfg.apiKey && cfg.apiKey.trim()));
   }
   return false;
+}
+
+function setKeyVisible(visible) {
+  if (configKey) configKey.type = visible ? 'text' : 'password';
+  if (btnToggleKey) btnToggleKey.textContent = visible ? '[hide]' : '[show]';
+}
+
+function loadProfileIntoForm(id) {
+  const p = loadStore().profiles.find(x => x.id === id);
+  if (!p) return;
+  configProfileId.value = p.id;
+  configProfileName.value = p.name || '';
+  configProvider.value = p.provider;
+  configUrl.value = p.url || '';
+  configModel.value = p.model || '';
+  configKey.value = p.apiKey || '';
+  configContextWindow.value = p.contextWindow || '';
+  setKeyVisible(false);
+  updateConfigVisibility(configProvider.value);
+}
+
+function startNewProfileForm() {
+  configProfileId.value = '';
+  configProfileName.value = '';
+  configProvider.value = 'gemini';
+  configUrl.value = '';
+  configModel.value = '';
+  configKey.value = '';
+  configContextWindow.value = '';
+  setKeyVisible(false);
+  updateConfigVisibility('gemini');
+}
+
+function renderProviderList() {
+  if (!providerListEl) return;
+  const store = loadStore();
+  providerListEl.innerHTML = '';
+  if (!store.profiles.length) {
+    const li = document.createElement('li');
+    li.className = 'provider-list-empty';
+    li.textContent = 'No saved providers yet — create one below.';
+    providerListEl.appendChild(li);
+    return;
+  }
+  for (const p of store.profiles) {
+    const li = document.createElement('li');
+    li.className = 'provider-row' + (p.id === store.activeId ? ' active' : '');
+    li.dataset.id = p.id;
+
+    const main = document.createElement('div');
+    main.className = 'provider-row-main';
+    const name = document.createElement('span');
+    name.className = 'provider-row-name';
+    name.textContent = p.name || p.provider;
+    const meta = document.createElement('span');
+    meta.className = 'provider-row-meta';
+    const parts = [p.provider];
+    if (p.model) parts.push(p.model);
+    parts.push(p.apiKey ? 'key ' + maskKey(p.apiKey) : 'no key');
+    if (p.id === store.activeId) parts.push('● active');
+    meta.textContent = parts.join(' · ');
+    main.appendChild(name);
+    main.appendChild(meta);
+
+    const actions = document.createElement('div');
+    actions.className = 'provider-row-actions';
+    for (const [action, label] of [['use', '[Use]'], ['edit', '[Edit]'], ['delete', '[Delete]']]) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn-secondary btn-sm';
+      b.dataset.action = action;
+      b.textContent = label;
+      actions.appendChild(b);
+    }
+
+    li.appendChild(main);
+    li.appendChild(actions);
+    providerListEl.appendChild(li);
+  }
+}
+
+async function useProfile(id) {
+  if (!setActiveProfile(id)) return;
+  closeConfigModal();
+  statusBar.textContent = 'Provider switched. Rebooting…';
+  await bootAgent();
+}
+
+async function deleteProfileFlow(id) {
+  const store = loadStore();
+  const p = store.profiles.find(x => x.id === id);
+  if (!p) return;
+  const wasActive = store.activeId === id;
+  const hasOthers = store.profiles.length > 1;
+  const msg =
+    `Delete provider "${p.name || p.provider}"?` +
+    (p.apiKey ? ` Its saved API key (${maskKey(p.apiKey)}) will be lost.` : '') +
+    (wasActive && !hasOthers ? ' No other profiles remain — the app will run unconfigured until you create one.' : '');
+  if (!window.confirm(msg)) return;
+  deleteProfile(id);
+  renderProviderList();
+  if (wasActive) {
+    // The running agent still holds the deleted profile's config — reboot onto
+    // the new active profile (or unconfigured when none remain).
+    closeConfigModal();
+    statusBar.textContent = 'Provider deleted. Rebooting…';
+    await bootAgent();
+  }
+}
+
+if (providerListEl) {
+  providerListEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const row = btn.closest('.provider-row');
+    const id = row && row.dataset.id;
+    if (!id) return;
+    const action = btn.dataset.action;
+    if (action === 'use') useProfile(id);
+    else if (action === 'edit') loadProfileIntoForm(id);
+    else if (action === 'delete') deleteProfileFlow(id);
+  });
+}
+
+if (btnNewProvider) {
+  btnNewProvider.addEventListener('click', () => startNewProfileForm());
+}
+
+if (btnToggleKey) {
+  btnToggleKey.addEventListener('click', () => {
+    setKeyVisible(configKey.type !== 'text');
+  });
 }
 
 function updateConfigVisibility(provider) {
@@ -160,19 +301,13 @@ function updateConfigVisibility(provider) {
   }
 }
 
-function populateConfigForm() {
-  const c = loadConfig();
-  if (c.provider) configProvider.value = c.provider;
-  else configProvider.value = 'gemini';
-  if (c.url !== undefined) configUrl.value = c.url;
-  if (c.model !== undefined) configModel.value = c.model;
-  if (c.apiKey !== undefined) configKey.value = c.apiKey;
-  if (c.contextWindow !== undefined) configContextWindow.value = c.contextWindow;
-  updateConfigVisibility(configProvider.value);
-}
-
 function openConfigModal() {
-  populateConfigForm();
+  migrateLegacyConfig(); // idempotent — ensures the store exists (BUG-020 migration)
+  renderProviderList();
+  const store = loadStore();
+  const active = store.profiles.find(p => p.id === store.activeId);
+  if (active) loadProfileIntoForm(active.id);
+  else startNewProfileForm();
   if (configModal) configModal.classList.remove('hidden');
   if (btnToggleConfig) btnToggleConfig.classList.add('is-active');
   setTimeout(() => {
@@ -262,7 +397,12 @@ window.addEventListener('keydown', (e) => {
 if (configForm) {
   configForm.addEventListener('submit', async (e) => {
     e.preventDefault();
-    saveConfig({
+    const store = loadStore();
+    const existingId = configProfileId.value;
+    const existing = existingId ? store.profiles.find(p => p.id === existingId) : null;
+    const profile = {
+      id: existingId || newProfile().id,
+      name: configProfileName.value.trim() || configProvider.value,
       provider: configProvider.value,
       // Gemini uses a fixed endpoint — the URL field is hidden for it, so a
       // value present is stale (e.g. a leftover local Ollama URL). Persisting
@@ -271,8 +411,12 @@ if (configForm) {
       model: configModel.value.trim(),
       apiKey: configKey.value.trim(),
       contextWindow: configContextWindow.value.trim(),
-      isConfigured: true,
-    });
+      // T32: per-profile Anthropic max_tokens override — no UI field yet in
+      // T31, so preserve whatever a prior version stored.
+      maxTokens: (existing && existing.maxTokens) || '',
+    };
+    upsertProfile(profile);
+    setActiveProfile(profile.id);
     closeConfigModal();
     statusBar.textContent = 'Configuration saved. Rebooting…';
     await bootAgent();
@@ -282,6 +426,7 @@ if (configForm) {
 // ── Boot ────────────────────────────────────────────────────────────
 
 async function bootAgent() {
+  migrateLegacyConfig(); // idempotent — a legacy single-object config becomes the first profile
   const cfg = loadConfig();
   const provider = cfg.provider || 'gemini';
   const url = cfg.url || (provider === 'openai' ? 'http://localhost:11434/v1' : '');
@@ -821,7 +966,6 @@ initCsvUi({
 
 // ── Boot ────────────────────────────────────────────────────────────
 
-populateConfigForm();
 bootAgent();
 
 // Initialize Day/Night Theme
