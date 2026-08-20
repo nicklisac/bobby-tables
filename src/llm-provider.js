@@ -22,7 +22,8 @@
 // Native tool_calls is an optional fast path used only by the OpenAI family.
 
 const ANTHROPIC_VERSION = '2023-06-01';
-const ANTHROPIC_ENDPOINT = 'https://api.anthropic.com/v1/messages';
+const ANTHROPIC_BASE = 'https://api.anthropic.com';
+const ANTHROPIC_PRESET = `${ANTHROPIC_BASE}/v1`;
 const OPENAI_OFFICIAL_ENDPOINT = 'https://api.openai.com/v1/chat/completions';
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
 
@@ -148,13 +149,17 @@ const anthropic = {
   // one, which the app surfaces as a normal error).
   fixedEndpoint: false,
   keyRequired: false,
-  presetUrl: ANTHROPIC_ENDPOINT,
+  // Base URL with /v1 (the /messages path is appended), matching the
+  // OpenAI-compatible convention. Empty → the real API.
+  presetUrl: ANTHROPIC_PRESET,
   modelPlaceholder: 'claude-sonnet-4-5',
-  keyPlaceholder: 'sk-ant-… (leave empty for local)',
+  keyPlaceholder: 'lmstudio (local) / sk-ant-… (real API)',
 
   endpoint: (cfg) => {
-    const raw = ((cfg && cfg.url) || '').trim().replace(/\/+$/, '');
-    return raw || ANTHROPIC_ENDPOINT;
+    const raw = ((cfg && cfg.url) || ANTHROPIC_PRESET).trim().replace(/\/+$/, '');
+    // Consistent with OpenAI-compatible: a base ending in /v1 gets /messages
+    // appended; a full …/messages URL is used as-is.
+    return raw.endsWith('/v1') ? `${raw}/messages` : raw;
   },
 
   headers: (cfg) => ({

@@ -73,7 +73,7 @@ test.describe('T32 — provider registry: metadata + endpoints', () => {
     expect(r.fallbackId).toBe('openai');
   });
 
-  test('endpoint resolution: fixed ignores stale url; /v1 appends /chat/completions', async ({ page }) => {
+  test('endpoint resolution: fixed ignores stale url; /v1 base appends provider path', async ({ page }) => {
     await toOrigin(page);
     const r = await page.evaluate(async () => {
       const m = await import('/src/llm-provider.js');
@@ -82,7 +82,8 @@ test.describe('T32 — provider registry: metadata + endpoints', () => {
         geminiIgnoresStale: P.gemini.endpoint({ url: 'http://stale:11434/v1' }),
         openaiOfficial: P['openai-official'].endpoint({}),
         anthropicDefault: P.anthropic.endpoint({}),
-        anthropicOverride: P.anthropic.endpoint({ url: 'http://localhost:1234/v1/messages' }),
+        anthropicBase: P.anthropic.endpoint({ url: 'http://192.168.18.52:1234/v1' }),
+        anthropicFull: P.anthropic.endpoint({ url: 'http://localhost:1234/v1/messages' }),
         openaiV1: P.openai.endpoint({ url: 'http://localhost:11434/v1' }),
         openaiPreset: P.openai.endpoint({}),
         groqPreset: P.groq.endpoint({}),
@@ -92,7 +93,8 @@ test.describe('T32 — provider registry: metadata + endpoints', () => {
     expect(r.geminiIgnoresStale).toBe('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions');
     expect(r.openaiOfficial).toBe('https://api.openai.com/v1/chat/completions');
     expect(r.anthropicDefault).toBe('https://api.anthropic.com/v1/messages');
-    expect(r.anthropicOverride).toBe('http://localhost:1234/v1/messages');
+    expect(r.anthropicBase).toBe('http://192.168.18.52:1234/v1/messages');
+    expect(r.anthropicFull).toBe('http://localhost:1234/v1/messages');
     expect(r.openaiV1).toBe('http://localhost:11434/v1/chat/completions');
     expect(r.openaiPreset).toBe('http://localhost:11434/v1/chat/completions');
     expect(r.groqPreset).toBe('https://api.groq.com/openai/v1/chat/completions');
