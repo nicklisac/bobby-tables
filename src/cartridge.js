@@ -1,5 +1,5 @@
 /**
- * CARTRIDGE — Import/Export .sqlite3 agent brains.
+ * CARTRIDGE — Import/Export .sqlite3 cartridges.
  *
  * Export: live DB ──backup API──▶ :memory: DB ──sqlite3_serialize──▶ bytes
  * Import: file bytes ──sqlite3_deserialize──▶ :memory: DB ──backup API──▶ live DB
@@ -115,7 +115,7 @@ async function backupFull(module, destDb, srcDb) {
  * @param {number} db      - Database handle pointer
  * @param {string} filename - Suggested download filename
  */
-export async function exportCartridge(sqlite3, module, db, filename = 'bobby-brain.sqlite3') {
+export async function exportCartridge(sqlite3, module, db, filename = 'tables-cartridge.sqlite3') {
   // 1. Snapshot the live DB into an in-memory DB (safe with active statements)
   const pMemDb = await openMemoryDb(sqlite3);
   try {
@@ -206,9 +206,9 @@ export async function importCartridge(sqlite3, module, db) {
  * Emits schema objects from sqlite_master (tables, views, indexes, triggers)
  * followed by one INSERT per row. Works with any wa-sqlite build.
  */
-export async function exportSqlDump(sqlite3, db, filename = 'bobby-brain.sql') {
+export async function exportSqlDump(sqlite3, db, filename = 'tables-cartridge.sql') {
   const lines = [];
-  lines.push('-- Bobby cartridge SQL dump');
+  lines.push('-- Tables cartridge SQL dump');
   lines.push(`-- Generated ${new Date().toISOString()}`);
   lines.push('PRAGMA foreign_keys=OFF;');
   lines.push('BEGIN TRANSACTION;');
@@ -351,7 +351,7 @@ export function initCartridgeUi(context) {
     try {
       cartridgeStatusBar.textContent = 'Exporting cartridge…';
       cartridgeStatusBar.style.color = '#d29922';
-      const result = await exportCartridge(agent.sqlite3, agent.module, agent.db, `bobby-brain-${new Date().toISOString().slice(0, 10)}.sqlite3`);
+      const result = await exportCartridge(agent.sqlite3, agent.module, agent.db, `tables-cartridge-${new Date().toISOString().slice(0, 10)}.sqlite3`);
       if (result?.cancelled) {
         cartridgeCtx.updateReadyStatus();
         return;
@@ -370,7 +370,7 @@ export function initCartridgeUi(context) {
       // Fallback to SQL dump only on actual engine error, never on user cancel
       try {
         cartridgeStatusBar.textContent = 'Binary export unavailable, trying SQL dump…';
-        const sqlResult = await exportSqlDump(agent.sqlite3, agent.db, `bobby-brain-${new Date().toISOString().slice(0, 10)}.sql`);
+        const sqlResult = await exportSqlDump(agent.sqlite3, agent.db, `tables-cartridge-${new Date().toISOString().slice(0, 10)}.sql`);
         if (sqlResult?.cancelled) {
           cartridgeCtx.updateReadyStatus();
           return;
@@ -411,7 +411,7 @@ export function initCartridgeUi(context) {
       await populateSessionDropdown();
       await renderMessages();
       // T11: the whole DB was replaced — rebuild the dashboard grid + explorer
-      // from the imported brain (cards referencing dropped tables show errors).
+      // from the imported cartridge (cards referencing dropped tables show errors).
       try { await rebuildGrid(); } catch (e) { console.warn('[main] grid rebuild failed (non-fatal):', e); }
       cartridgeStatusBar.textContent = '✓ Cartridge imported';
       cartridgeStatusBar.style.color = '#3fb950';

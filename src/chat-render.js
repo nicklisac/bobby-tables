@@ -717,23 +717,39 @@ async function renderMessages() {
         <div class="welcome-icon-wrap">
           ${ICONS.sparkles({ size: 18 })}
         </div>
-        <h3>Welcome to Tables!</h3>
+        <h3>Tables</h3>
       </div>
-      <p>Tables is an in-browser SQL data workstation. ${configured ? 'Ask a question below to analyze data with AI.' : 'To start querying with AI, please configure your LLM provider:'}</p>
-      ${!configured ? `
-      <div class="welcome-actions">
-        <button type="button" class="welcome-config-btn">
-          <span class="btn-bracket">[</span>
-          ${ICONS.gear({ size: 13 })}
-          <span>configure provider</span>
-          <span class="btn-bracket">]</span>
-        </button>
-      </div>` : ''}
-      <p class="welcome-hint">
-        <em>Tip:</em> You can also run direct SQL commands immediately without an LLM using <code>!SELECT * FROM sample_data</code>.
+      <p class="welcome-lede">
+        I'm Tables. I live in the SQLite database in this tab — everything I
+        know is a table I can query.
       </p>
+      ${configured
+        ? `<p>Drop a CSV, ask a question, or try one of these:</p>
+        <div class="welcome-chips">
+          <button type="button" class="welcome-chip" data-prompt="What's in sample_data? Tell me what's interesting.">What's in sample_data? Tell me what's interesting.</button>
+          <button type="button" class="welcome-chip" data-prompt="Build me a small dashboard from sample_data.">Build me a small dashboard from it.</button>
+          <button type="button" class="welcome-chip" data-prompt="Fetch https://en.wikipedia.org/wiki/SQLite and turn it into a queryable table.">Fetch a web page and turn it into a table.</button>
+        </div>`
+        : `<p>To get me up and running, use <code>config</code> to set up an LLM provider. You can still run <code>!SQL</code> directly without me.</p>
+        <div class="welcome-actions">
+          <button type="button" class="welcome-config-btn">
+            <span class="btn-bracket">[</span>
+            ${ICONS.gear({ size: 13 })}
+            <span>configure provider</span>
+            <span class="btn-bracket">]</span>
+          </button>
+        </div>`}
     `;
     welcomeDiv.querySelector('.welcome-config-btn')?.addEventListener('click', () => ctx.onConfigClick());
+    welcomeDiv.querySelectorAll('.welcome-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        // main.js dispatches 'tables:send-welcome' into sendMessage (which
+        // re-checks isBusy itself); the guard here just avoids a dead click.
+        if (ctx.getAgent() && !(ctx.isBusy && ctx.isBusy())) {
+          window.dispatchEvent(new CustomEvent('tables:send-welcome', { detail: chip.dataset.prompt }));
+        }
+      });
+    });
     fragment.appendChild(welcomeDiv);
   } else {
     // T17: turn tracking — a non-scratchpad user row starts an agent turn; its

@@ -653,7 +653,7 @@
       var q = new URLSearchParams(location.search).get('theme');
       if (q === 'dark' || q === 'light') return q;
       try {
-        var s = localStorage.getItem('bobby-tables-theme');
+        var s = localStorage.getItem('tables-theme');
         if (s === 'dark' || s === 'light') return s;
       } catch (e) {}
       return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
@@ -671,7 +671,7 @@
     document.getElementById('theme-toggle').addEventListener('click', function () {
       var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
       applyTheme(next);
-      try { localStorage.setItem('bobby-tables-theme', next); } catch (e) {}
+      try { localStorage.setItem('tables-theme', next); } catch (e) {}
     });
 
     /* ── Scroll-spy for the top nav ────────────────────────── */

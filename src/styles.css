@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════
- *  BOBBY TABLES — Workstation Design System
+ *  TABLES — Workstation Design System
  *  Aesthetic: Portland Teal & Warm Architectural (Day & Night)
  *  Typography: Geist + Geist Mono · Monospace Technical Controls
  * ═══════════════════════════════════════════════════════════ */
@@ -2113,6 +2113,52 @@ a.search-result-title:hover { text-decoration: underline; text-underline-offset:
   font-size: 0.72rem;
   color: var(--accent);
   border: 1px solid var(--border-default);
+}
+
+.welcome-lede {
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.welcome-card code {
+  background: var(--bg-base);
+  padding: 0.15rem 0.35rem;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--accent);
+  border: 1px solid var(--border-default);
+}
+
+.welcome-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.7rem;
+}
+
+.welcome-chip {
+  text-align: left;
+  font-family: var(--font-sans);
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.welcome-chip:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+  background: var(--accent-subtle);
+}
+
+.welcome-chip:active {
+  transform: translateY(1px);
 }
 
 /* ── Footer & Unified Prompt Card ─────────────────────────── */

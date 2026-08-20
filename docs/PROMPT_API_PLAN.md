@@ -2,7 +2,7 @@
 
 > **⚠️ SHELVED** — Chrome's native `window.LanguageModel` (Built-In AI) intercepts the polyfill and ignores `OPENAI_CONFIG`/`GEMINI_CONFIG`, routing to Chrome's on-device model instead. ES module import hoisting prevents deleting the native API before polyfill loads. Raw `fetch()` is the reliable transport for arbitrary OpenAI-compatible endpoints. Revisit when Prompt API standard matures or polyfill gains `forcePolyfill` option.
 
-**Goal:** Wire Bobby's LLM transport layer to the **Prompt API** (via `prompt-api-polyfill` / `LanguageModel`) using `responseConstraint` (JSON Schema structured output), and build a clean **Provider Configuration UI** supporting custom OpenAI-compatible endpoints (Ollama, LM Studio, OpenRouter, OpenAI) and Google Gemini API.
+**Goal:** Wire Tables' LLM transport layer to the **Prompt API** (via `prompt-api-polyfill` / `LanguageModel`) using `responseConstraint` (JSON Schema structured output), and build a clean **Provider Configuration UI** supporting custom OpenAI-compatible endpoints (Ollama, LM Studio, OpenRouter, OpenAI) and Google Gemini API.
 
 ---
 
@@ -193,7 +193,7 @@ sequenceDiagram
    * Set URL to `http://localhost:11434/v1`, model to `llama3.2` (or your local model).
    * Leave API key blank.
    * Send: `"What products are in the sample_data table?"`
-   * **Expected:** Bobby calls `execute_sql('SELECT * FROM sample_data')` via structured JSON output, receives rows, and answers correctly.
+   * **Expected:** Tables calls `execute_sql('SELECT * FROM sample_data')` via structured JSON output, receives rows, and answers correctly.
 2. **Google Gemini API Test:**
    * Select "Google Gemini API".
    * Enter Gemini API key, model `gemini-2.5-flash`.

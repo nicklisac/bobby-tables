@@ -29,7 +29,7 @@ export function initSessionsUi(context) {
 
 /**
  * Rebuild the session list in the left pane. Exported: the cartridge import
- * handler (cartridge.js) refreshes the dropdown after a brain swap.
+ * handler (cartridge.js) refreshes the dropdown after a cartridge import.
  */
 export async function populateSessionDropdown() {
   const agent = ctx.getAgent();

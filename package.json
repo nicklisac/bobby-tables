@@ -2,7 +2,7 @@
   "name": "web-sql-agent",
   "version": "0.1.0",
   "type": "module",
-  "description": "Pure-SQL Brain-in-a-Box agent — SQLite WASM with JSPI, triggers drive the ReAct loop",
+  "description": "Pure-SQL in-browser agent — SQLite WASM with JSPI, triggers drive the ReAct loop",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

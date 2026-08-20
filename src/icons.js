@@ -1,7 +1,7 @@
 /**
  * VECTOR ICONOGRAPHY SUBSYSTEM — Ticket 25
  *
- * Provides crisp, zero-dependency, scalable SVG icons across the entire Bobby Tables IDE.
+ * Provides crisp, zero-dependency, scalable SVG icons across the entire Tables IDE.
  * Replaces all Unicode emojis with pro-grade vector icons adhering to 24×24 viewBox standards.
  */
 

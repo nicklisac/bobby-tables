@@ -71,7 +71,7 @@ let activeSessionId = 'default';
 // ── Day / Night Theme Management ─────────────────────────────────────
 
 export function initTheme() {
-  const saved = localStorage.getItem('bobby-tables-theme');
+  const saved = localStorage.getItem('tables-theme');
   const systemPrefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
   const theme = saved || (systemPrefersDark ? 'dark' : 'light');
   setTheme(theme, false);
@@ -84,7 +84,7 @@ export function initTheme() {
 
   if (window.matchMedia) {
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
-      if (!localStorage.getItem('bobby-tables-theme')) {
+      if (!localStorage.getItem('tables-theme')) {
         setTheme(e.matches ? 'dark' : 'light', false);
       }
     });
@@ -94,7 +94,7 @@ export function initTheme() {
 export function setTheme(theme, save = true) {
   document.documentElement.setAttribute('data-theme', theme);
   if (save) {
-    localStorage.setItem('bobby-tables-theme', theme);
+    localStorage.setItem('tables-theme', theme);
   }
   const iconSvg = document.getElementById('theme-mode-icon');
   if (iconSvg) {
@@ -735,6 +735,14 @@ formEl.addEventListener('submit', (e) => {
   sendMessage(inputEl.value);
 });
 
+// Welcome-card example chips (chat-render.js) dispatch this; route the
+// prompt through the normal send path so it behaves exactly like a typed
+// message (busy-gate, !SQL bypass, turn tracking all apply).
+window.addEventListener('tables:send-welcome', (e) => {
+  const text = e.detail;
+  if (typeof text === 'string' && text.trim()) sendMessage(text);
+});
+
 // Support Shift+Enter for newlines vs Enter for submit on textarea
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -772,6 +780,7 @@ initChatRender({
   getSessionId: () => activeSessionId,
   getConfig: loadConfig,
   isConfigured: isProviderConfigured,
+  isBusy,
   onConfigClick: () => openConfigModal(),
   onRewindTurn: (id) => rewindToBefore(id),
   onRewindScratchpad: (id) => rewindToBeforeScratchpad(id),

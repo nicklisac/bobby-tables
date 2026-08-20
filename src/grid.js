@@ -7,7 +7,7 @@
  * change-triggered reactivity (T18 groundwork) and the UI layer use.
  *
  * Locked design (user-confirmed 2026-08-14):
- *   - GLOBAL to the brain (no session_id) — a workstation view over the data.
+ *   - GLOBAL to the database (no session_id) — a workstation view over the data.
  *   - Cards run READ-ONLY SQL only (single SELECT/WITH/EXPLAIN statement) —
  *     never DML/DDL, so card execution stays outside T3's changeset capture
  *     and is safe to re-run at any time.

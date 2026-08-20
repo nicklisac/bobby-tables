@@ -1,5 +1,5 @@
 /**
- * Database Schema — the agent's brain.
+ * Database Schema — the agent's own database.
  *
  * Pure-SQL trigger cascade (ReAct loop), scoped per session:
  *   user INSERT → agent_think → assistant INSERT → execute_tool → tool INSERT → agent_think → …
@@ -34,33 +34,100 @@ export {
   queryAll,
 } from './utils.js';
 
+// =====================================================================
+// System prompt — the single source of truth.
+//
+// Lives in JS (not in the SCHEMA_SQL seed) so the text can use backticks
+// and newlines freely. migrateSystemPrompt() installs it into
+// system_config + the system message row at every boot, version-gated by
+// the `prompt_version` key (bump it when the text changes; existing
+// databases pick up the new prompt on next load — the same self-heal
+// pattern the drop+create triggers use).
+// =====================================================================
+export const SYSTEM_PROMPT_VERSION = 2;
+
+export const SYSTEM_PROMPT = `You are Tables. You live inside a SQLite database in the user's browser.
+The tables are your body: your memory is in \`messages\`, your tools are functions you call,
+your work is the rows you write. When you act, you modify your own database.
+That's not a metaphor. You are tables.
+
+How you work:
+- You think by querying. Never guess a schema — look. SELECT before you answer.
+- When you learn something from the web, make it permanent: materialize it into a table.
+  A fact you can query is a fact you own.
+- Your conversation is in the \`messages\` table. If you need something from earlier, query your
+  own memory instead of guessing or making the user repeat it.
+- A view is a saved way of seeing the data. If the user asks the same shape of question twice,
+  offer to make it a view.
+- Fetched pages and web search results are automatically stored as searchable documents.
+  Use search_documents to find them later, and ingest_document to store any text as a document.
+- Writes are reversible — the user can rewind any turn — but you still only write what the task needs.
+
+Voice:
+- Talk like a person, not a helpdesk. No "Great question!", no "Certainly!", no "I hope this helps!",
+  no "As an AI...". Never call yourself a toy, a demo, or an analytical assistant.
+- Don't narrate your tools. The user can already see what you're doing. Just do it, then report
+  what you found.
+- Have opinions. "The November drop looks like a data-entry gap, not a real decline" beats
+  "there is a decrease in November".
+- If you can show it, show it: a small result set beats a paragraph of restated numbers.
+  Interpret the table, don't re-read it.
+- When you're uncertain, say so in one line and go verify.
+- Dry humor is fine. No emoji unless the user uses them.
+
+Memory:
+The summary at the head of your context is your memory of the earlier conversation — compressed,
+not gone. If it's missing something you need, query \`messages\`.
+
+If asked who you are, answer plainly: "I'm Tables. I live in the SQLite database in this browser tab."`;
+
+/**
+ * Install the current SYSTEM_PROMPT into system_config and every session's
+ * system message row, version-gated by `prompt_version`.
+ *
+ * Must run AFTER SCHEMA_SQL (system_config must exist). No-op when the
+ * stored version already matches — so the prompt text stays byte-stable
+ * across boots (it is the KV-cache prefix; T2).
+ */
+export async function migrateSystemPrompt(sqlite3, db) {
+  const stored = await queryValue(sqlite3, db, `SELECT value FROM system_config WHERE key = 'prompt_version'`);
+  if (stored === String(SYSTEM_PROMPT_VERSION)) return;
+  await execParams(sqlite3, db,
+    `UPDATE system_config SET value = ? WHERE key = 'system_prompt'`,
+    [SYSTEM_PROMPT]);
+  // prompt_version may not exist yet (fresh DBs seed no version key — its
+  // absence is the "needs install" signal), so upsert rather than UPDATE.
+  await execParams(sqlite3, db,
+    `INSERT INTO system_config (key, value) VALUES ('prompt_version', ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    [String(SYSTEM_PROMPT_VERSION)]);
+  // The system message row (id=0) is seeded from the config value and is
+  // what v_active_context actually reads — update it too (all sessions).
+  await execParams(sqlite3, db,
+    `UPDATE messages SET content = ? WHERE role = 'system'`,
+    [SYSTEM_PROMPT]);
+}
+
 export const SCHEMA_SQL = `
 -- Enable foreign keys
 PRAGMA foreign_keys = ON;
 
 -- =====================================================================
--- 1. Configuration
+-- 1. System Config
 -- =====================================================================
 CREATE TABLE IF NOT EXISTS system_config (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
+-- The canonical prompt text lives in JS (SYSTEM_PROMPT, exported below) —
+-- the seed is a placeholder and migrateSystemPrompt() (run at every boot)
+-- installs the current text, version-gated by the prompt_version key.
+-- NOTE: the seed must NOT insert prompt_version — its absence is what tells
+-- the migration a fresh database still needs the canonical text installed.
 INSERT OR IGNORE INTO system_config (key, value) VALUES
   ('system_prompt',
-     'You are Tables — a SQL-driven agent living inside an in-browser SQLite database.'
-     || char(10) || char(10)
-     || 'Your memory, session state, and conversation history are stored directly in SQLite tables (messages, sessions, turn_changesets).'
-     || char(10) || '- You use SQL queries to inspect schemas, explore data, and verify facts before answering.'
-     || char(10)       || '- You have tools to execute SQL queries, search the web, fetch web pages, and materialize JSON outputs into permanent SQLite tables.'
-      || char(10) || '- Fetched pages and web search results are automatically stored as searchable documents. Use search_documents (BM25 full-text search) to find them later, and ingest_document to store any text as a document.'
-     || char(10) || char(10)
-     || 'Guidelines:'
-     || char(10) || '1. Check the schema and query tables directly rather than guessing table structures or column names.'
-     || char(10) || '2. When external web data is needed, search or fetch it, then use the materialize tool to convert JSON results into queryable SQLite tables.'
-     || char(10) || '3. Write standard, readable SQLite queries (CTEs, window functions, and json_extract where appropriate).'
-     || char(10) || '4. Present clear, concise summaries of your findings with the relevant data points.'
-     || char(10) || '5. Help users analyze datasets, create database views, and build dashboard queries.'),
+     'You are Tables. (Prompt placeholder — replaced at boot by migrateSystemPrompt.)'),
   ('llm_model', 'gemini-2.5-flash'),
   ('allow_dml', '1'),
   -- T2: fallback effective context window (tau's DEFAULT_CONTEXT_WINDOW_TOKENS).
@@ -271,8 +338,8 @@ CREATE INDEX IF NOT EXISTS idx_tool_approvals_session ON tool_approvals(session_
 -- on the active session (the trigger's WHERE session_id = NEW.session_id is
 -- belt-and-braces).
 --
--- DROP VIEW + recreate (not IF NOT EXISTS) so existing brains pick up changes
--- (the superseded sliding-window draft may exist in dev brains).
+-- DROP VIEW + recreate (not IF NOT EXISTS) so existing databases pick up changes
+-- (the superseded sliding-window draft may exist in dev databases).
 -- =====================================================================
 DROP VIEW IF EXISTS v_active_context;
 CREATE VIEW v_active_context AS
@@ -313,7 +380,7 @@ WHERE m.session_id = a.session_id
 -- =====================================================================
 -- 4g. Dashboard Cards (T11: 3-pane workstation — right-pane grid)
 --
--- UI state for the 3x3 reactive canvas, GLOBAL to the brain (no session_id —
+-- UI state for the 3x3 reactive canvas, GLOBAL to the database (no session_id —
 -- the grid is a workstation view over the DATA, not a conversation artifact;
 -- it persists across session switches and is untouched by fork/delete).
 --
@@ -351,7 +418,7 @@ WHERE m.session_id = a.session_id
  -- The document corpus: text the agent (or user) wants to full-text search
  -- later. Sources: 'web-fetch' (fetch_url auto-ingest, source_ref = URL),
  -- 'web-search' (search_web auto-ingest, one doc per result, source_ref =
- -- URL), 'user' (explicit ingest_document / UI add). GLOBAL to the brain
+ -- URL), 'user' (explicit ingest_document / UI add). GLOBAL to the database
  -- (no session_id — the corpus is a property of the database, like the data
  -- itself; it persists across session switches and fork/delete).
  --
@@ -367,7 +434,7 @@ WHERE m.session_id = a.session_id
   -- inverted structure, the rows stay in the documents table. The three sync
  -- triggers below keep it consistent (the standard FTS5 external-content
  -- pattern — the 'delete' command removes a row's postings). DROP+CREATE
- -- (not IF NOT EXISTS) so existing brains self-heal at boot.
+ -- (not IF NOT EXISTS) so existing databases self-heal at boot.
  -- =====================================================================
  CREATE TABLE IF NOT EXISTS documents (
      id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -413,7 +480,7 @@ WHERE m.session_id = a.session_id
 -- occupancy, and session aggregations — computed in SQL, not JS loops.
 --
 -- All five are DROP VIEW IF EXISTS + recreate (not IF NOT EXISTS) so
--- existing brains pick up definition changes at boot, consistent with
+-- existing databases pick up definition changes at boot, consistent with
 -- v_active_context.
 --
 -- Legality note (T26.4 step 1, tests/specs/t26.4-view-legality.spec.mjs):
@@ -663,7 +730,7 @@ INSERT OR IGNORE INTO sample_data (id, name, category, value) VALUES
 --    re-insert dance after a hard-error rollback).
 --    T9: the context build excludes in_context = 0 rows (the !! private
 --    scratchpad — the agent must never see those commands or results).
---    Drop+create (not IF NOT EXISTS) so existing brains pick up changes.
+--    Drop+create (not IF NOT EXISTS) so existing databases pick up changes.
 -- =====================================================================
 DROP TRIGGER IF EXISTS agent_think;
 CREATE TRIGGER agent_think
@@ -741,7 +808,7 @@ END;
 --    as agent_think. Required for T1 forking: forkSession copies messages
 --    (including assistant rows with tool_calls) with the cascade suppressed;
 --    without this gate the copy would RE-EXECUTE the tools into the fork.
---    Drop+create (not IF NOT EXISTS) so existing brains pick up the gate.
+--    Drop+create (not IF NOT EXISTS) so existing databases pick up the gate.
 -- =====================================================================
 DROP TRIGGER IF EXISTS execute_tool;
 CREATE TRIGGER execute_tool
@@ -1521,7 +1588,7 @@ export async function repairOrphanedToolCalls(sqlite3, db, sessionId) {
  * drop+recreate on SQLite builds without ALTER TABLE DROP COLUMN (< 3.35).
  */
 /**
- * T9/T3 migration: existing brains may lack `messages.in_context` (added with
+ * T9/T3 migration: existing databases may lack `messages.in_context` (added with
  * the scratchpad) and/or `messages.rewound` (added with chat rewind).
  * `CREATE TABLE IF NOT EXISTS` never alters an existing table, so add any
  * missing column here — pre-existing rows default to in_context=1 (in context,
@@ -1529,7 +1596,7 @@ export async function repairOrphanedToolCalls(sqlite3, db, sessionId) {
  */
 export async function migrateMessagesTable(sqlite3, db) {
   const rows = await queryAll(sqlite3, db, `PRAGMA table_info(messages)`);
-  // Table doesn't exist yet (fresh brain) — SCHEMA_SQL creates it with the
+  // Table doesn't exist yet (fresh database) — SCHEMA_SQL creates it with the
   // columns. MUST run before SCHEMA_SQL: the T9 agent_think trigger references
   // in_context, and CREATE TRIGGER fails on a missing column.
   if (!rows.length) return;
@@ -1594,7 +1661,7 @@ export async function migrateTurnTables(sqlite3, db) {
  */
 export async function migrateDocumentsTable(sqlite3, db) {
   const rows = await queryAll(sqlite3, db, `PRAGMA table_info(documents)`);
-  if (!rows.length) return; // fresh brain — SCHEMA_SQL creates it
+  if (!rows.length) return; // fresh database — SCHEMA_SQL creates it
   const cols = new Set(rows.map(([, name]) => name));
   if (cols.has('title') && cols.has('content')) return;
   const legacy = `documents_legacy_${Date.now()}`;
@@ -1615,7 +1682,7 @@ export async function migrateDocumentsTable(sqlite3, db) {
  */
 export async function migrateToolsTable(sqlite3, db) {
   const rows = await queryAll(sqlite3, db, `PRAGMA table_info(tools)`);
-  if (!rows.length) return; // fresh brain — SCHEMA_SQL creates + seeds it
+  if (!rows.length) return; // fresh database — SCHEMA_SQL creates + seeds it
   const bad = await queryAll(sqlite3, db,
     `SELECT name FROM tools WHERE json_valid(schema) = 0 OR json_type(schema) != 'object'`);
   for (const [name] of bad) {

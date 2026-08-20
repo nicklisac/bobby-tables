@@ -1,4 +1,4 @@
-# Bobby (Web-SQL Agent): Master Feature & Roadmap Matrix
+# Tables (Web-SQL Agent): Master Feature & Roadmap Matrix
 
 **Scoring Scale:**
 * **Impact:** `1` (Minor convenience) $\rightarrow$ `5` (Game Changer / Killer Feature)

@@ -1,6 +1,6 @@
-# Bobby Tables (Web SQL Agent)
+# Tables - an Agent Written in SQL
 
-Bobby Tables is a browser-based data analysis tool and SQL assistant. It runs on SQLite compiled to WebAssembly with JavaScript Promise Integration (JSPI), executing its core loop through SQLite triggers, views, and asynchronous user-defined functions (UDFs).
+Tables is a browser-based AI agent harness. It runs on SQLite compiled to WebAssembly with JavaScript Promise Integration (JSPI), executing its core loop through SQLite triggers, views, and asynchronous user-defined functions (UDFs).
 
 Instead of orchestrating the conversation entirely in JavaScript, the conversation history, tool calls, dashboard state, and execution loop live inside the SQLite database itself.
 
@@ -38,6 +38,8 @@ The host JavaScript handles browser I/O and network requests. The agent's contro
                      - search_web
                      - fetch_url
                      - materialize
+                     - search_documents
+                     - ingest_document
                            │
                            ▼
                      INSERT INTO messages (role, 'tool', content)
@@ -102,8 +104,13 @@ The `materialize` tool converts raw JSON from prior search or fetch tool outputs
 - Export the current database state (data, sessions, messages, and dashboard cards) as a binary `.sqlite3` file using `sqlite3.serialize()`.
 - Import existing cartridges to resume work or export `.sql` text dumps.
 
-### Protected Tables
-System tables (`system_config`, `tools`, `messages`, `sessions`, `turn_changesets`, `compactions`, `dashboard_cards`) are protected from destructive DDL statements to prevent accidental corruption while allowing standard queries.
+### Protected Tables and Views
+System objects are protected from DDL and DML (except `system_config`, which the app itself updates) to prevent accidental corruption, while standard queries remain allowed.
+
+- **Internal tables**: `system_config`, `tools`, `messages`, `sessions`, `session_context`, `turn_changesets`, `turn_ddl_log`, `compactions`, `tool_approvals`, `dashboard_cards`, `documents`, `documents_fts`
+- **System views**: `v_active_context`, `v_schema_catalog`, `v_turn_boundaries`, `v_tool_call_queries`, `v_grid_matrix`, `v_session_summary`
+
+The boundary check (`isProtectedObject` in `src/schema.js`) applies to both the agent's `execute_sql` tool and the direct SQL console, so neither path can drop or modify objects the app owns.
 
 ---
 
@@ -111,14 +118,17 @@ System tables (`system_config`, `tools`, `messages`, `sessions`, `turn_changeset
 
 ### Prerequisites
 - Node.js (v18 or higher)
-- A browser with WebAssembly JSPI support (Chrome 119+ or Edge with experimental JSPI enabled)
+- A browser with WebAssembly JSPI support — [JSPI](https://github.com/WebAssembly/js-promise-integration) is a Phase 4 W3C WebAssembly feature, shipping flag-free in:
+  - Chrome / Edge 137+
+  - Firefox 153+
+  - Safari 27 (beta)
 
 ### Installation and Run
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/web-sql-agent.git
-cd web-sql-agent
+git clone https://github.com/nicklisac/tables.git
+cd tables
 
 # Install dependencies
 npm install
@@ -128,6 +138,16 @@ npm run dev
 ```
 
 Visit `http://localhost:5174` in your browser.
+
+Or try a live version at `https://tables.nicholaslisac.com`
+
+### Testing
+
+```bash
+npm test
+```
+
+Playwright guardrails harness: persistence (the IDB-dump no-op-commit discriminator), VFS contract, and boot-idempotency suites. Requires the dev server on `:5174` and a JSPI-capable system browser (bundled Chromium cannot run JSPI). See `tests/README.md`.
 
 ---
 
@@ -159,7 +179,7 @@ Open the **Settings** modal in the top-right corner to configure provider settin
 ## Project Structure
 
 ```
-web-sql-agent/
+tables/
 ├── src/
 │   ├── schema.js             # SQLite schema, tables, triggers, and session queries
 │   ├── harness.js            # SQLite WASM bootloader, JSPI UDFs, and LLM calls
@@ -168,19 +188,38 @@ web-sql-agent/
 │   ├── materialize.js        # JSON tool output to SQLite table conversion
 │   ├── csv-ingestion.js      # CSV parser and table generation
 │   ├── cartridge.js          # .sqlite3 binary import/export and .sql dump
+│   ├── documents.js          # FTS5 document corpus (search_documents / ingest_document)
+│   ├── documents-ui.js       # Left-pane document corpus accordion
+│   ├── scratchpad.js         # Direct SQL scratchpad (! / !!) bang-grammar engine
+│   ├── sessions-ui.js        # Session list: create, rename, delete, switch
 │   ├── explorer.js           # Database catalog introspection
 │   ├── explorer-ui.js        # Schema explorer UI and preview modals
 │   ├── grid.js               # Dashboard grid logic and cell spanning
 │   ├── grid-ui.js            # Grid rendering and drag-drop handlers
 │   ├── sql-autocomplete.js   # SQL autocomplete and editor popover
 │   ├── panes.js              # Resizable pane dividers
+│   ├── icons.js              # Zero-dependency SVG icon set
+│   ├── utils.js              # Shared string, SQL, and SQLite execution helpers
 │   ├── main.js               # Application startup and event handling
 │   └── styles.css            # Styles
 ├── vendor/
-│   └── wa-sqlite-jspi/       # JSPI-enabled SQLite WASM build
+│   └── wa-sqlite-jspi/       # JSPI-enabled SQLite WASM build (see its README for the local patch)
+├── tests/
+│   ├── specs/                # Playwright guardrails suites (npm test)
+│   ├── probes/               # Headless probe scripts
+│   └── helpers.mjs           # Shared test helpers (IDB dump, fake LLM, etc.)
+├── docs/
+│   ├── ROADMAP.md            # Feature matrix and scoring
+│   ├── WAYFINDER_MAP.md      # Session-handoff map: decisions, operating notes, tickets
+│   ├── TRANSACTION_RULES.md  # Codified transaction invariants (never re-introduce)
+│   ├── BUG_LOG.md            # Known issues and resolved root causes
+│   └── ...                   # Prompt API plan, prototypes, research notes
+├── public/
+│   ├── architecture-hero.svg # README hero diagram
+│   └── architecture.html     # Interactive architecture explorer ([?] in the app)
 ├── index.html                # Main page
 ├── package.json
-└── vite.config.js            # Vite configuration with required headers
+└── vite.config.js            # Vite configuration with required COOP/COEP headers
 ```
 
 ---

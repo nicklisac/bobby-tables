@@ -18,7 +18,7 @@ import { SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_UTF8, SQLITE_INSERT, 
 import { SQLITE_ROW } from './utils.js';
 import { IDBBatchAtomicVFS } from '../vendor/wa-sqlite-jspi/IDBBatchAtomicVFS.js';
 import { MemoryVFS } from '../vendor/wa-sqlite-jspi/MemoryVFS.js';
-import { SCHEMA_SQL, migrateTurnTables, migrateMessagesTable, migrateDashboardCardsTable, migrateDocumentsTable, migrateToolsTable, queryAll, isInternalTable, isProtectedObject, logDDL, sweepCaptureTriggers, extractTargetTables, extractDdlTableName, captureDropPreImage } from './schema.js';
+import { SCHEMA_SQL, SYSTEM_PROMPT, migrateSystemPrompt, migrateTurnTables, migrateMessagesTable, migrateDashboardCardsTable, migrateDocumentsTable, migrateToolsTable, queryAll, isInternalTable, isProtectedObject, logDDL, sweepCaptureTriggers, extractTargetTables, extractDdlTableName, captureDropPreImage } from './schema.js';
 import { runCompaction, queryActiveContextJson } from './compaction.js';
 import { materializeToolResult } from './materialize.js';
 import { upsertDocument, searchDocuments } from './documents.js';
@@ -258,17 +258,10 @@ function resolveEndpointUrl(url, provider) {
  * Build the system prompt with tool definitions and structured output instructions.
  */
 export function buildSystemPrompt(tools = [], basePrompt = '') {
-  let prompt = basePrompt ||
-    'You are Tables — a SQL-driven agent living inside an in-browser SQLite database.\n\n' +
-    'Your memory, session state, and conversation history are stored directly in SQLite tables (messages, sessions, turn_changesets).\n' +
-    '- You use SQL queries to inspect schemas, explore data, and verify facts before answering.\n' +
-    '- You have tools to execute SQL queries, search the web, fetch web pages, and materialize JSON outputs into permanent SQLite tables.\n\n' +
-    'Guidelines:\n' +
-    '1. Check the schema and query tables directly rather than guessing table structures or column names.\n' +
-    '2. When external web data is needed, search or fetch it, then use the materialize tool to convert JSON results into queryable SQLite tables.\n' +
-    '3. Write standard, readable SQLite queries (CTEs, window functions, and json_extract where appropriate).\n' +
-    '4. Present clear, concise summaries of your findings with the relevant data points.\n' +
-    '5. Help users analyze datasets, create database views, and build dashboard queries.';
+  // basePrompt comes from the system message row (seeded from
+  // system_config.system_prompt, kept current by migrateSystemPrompt).
+  // SYSTEM_PROMPT is the last-resort fallback if that row is somehow missing.
+  let prompt = basePrompt || SYSTEM_PROMPT;
 
   if (tools && tools.length > 0) {
     prompt += '\n\n# AVAILABLE TOOLS\n';
@@ -1426,7 +1419,7 @@ export async function bootSqliteAgent(config = {}) {
 
   // 9. T9 migration: add messages.in_context BEFORE SCHEMA_SQL — the T9
   // agent_think trigger references the column, and CREATE TRIGGER fails on a
-  // missing column. (No-op on fresh brains: the table doesn't exist yet and
+  // missing column. (No-op on fresh databases: the table doesn't exist yet and
   // SCHEMA_SQL creates it with the column.)
   try {
     await migrateMessagesTable(sqlite3, db);
@@ -1456,6 +1449,17 @@ export async function bootSqliteAgent(config = {}) {
 
   // 9c. Initialize schema
   await sqlite3.exec(db, SCHEMA_SQL);
+
+  // 9d. System prompt: install the current SYSTEM_PROMPT (version-gated by
+  // prompt_version — no-op on databases already at the current version, so
+  // the prompt text stays byte-stable across boots; it is the KV-cache
+  // prefix). Runs after SCHEMA_SQL so system_config + the system message
+  // row exist.
+  try {
+    await migrateSystemPrompt(sqlite3, db);
+  } catch (e) {
+    console.warn('[harness] migrateSystemPrompt failed (non-fatal):', e.message);
+  }
 
   // 10. Schema migration: detect old agent_memory table and migrate
   try {

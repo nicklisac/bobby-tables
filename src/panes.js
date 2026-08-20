@@ -15,7 +15,7 @@
  * - Ctrl+J / Cmd+J: Toggle Right Sidebar (Dashboard Canvas)
  */
 
-const STORAGE_KEY = 'bobby.paneLayout.v3';
+const STORAGE_KEY = 'tables.paneLayout.v3';
 
 const DEFAULTS = {
   explorerWidth: 260,

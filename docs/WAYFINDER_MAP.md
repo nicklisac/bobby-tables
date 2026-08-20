@@ -1,4 +1,4 @@
-# Wayfinder Map: Bobby (Web SQL Agent)
+# Wayfinder Map: Tables (Web SQL Agent)
 
 **Map Label:** `wayfinder:map`  
 **Status:** Charted & Active  
@@ -87,6 +87,7 @@ graph TD
     T27[Ticket 27: Trigger firing order — stale current_turn_id - DONE]
     T28[Ticket 28: Chat Pane — Live Tool-Call Chips & Blink-Free Re-render - DONE]
     T28 --> T29[Ticket 29: Chat Rendering & UI Tidying — Markdown, Search Polish, Bracket-Button Collapse - DONE]
+    T2 --> T30[Ticket 30: Self-Reference Metadata in Agent Context (session + message IDs)]
     T1 --> T18[Ticket 18: Self-Rendering Reactive Views]
     T1 --> T19[Ticket 19: Persona & Prompt Presets]
 
@@ -114,7 +115,7 @@ graph TD
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
     class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T16,T17,T21,T24,T25,T26,T261,T262,T263,T264,T265,T27,T28,T29 done;
-    class T14,T15,T18,T19,T20,T22,T23 frontier;
+    class T14,T15,T18,T19,T20,T22,T23,T30 frontier;
 ```
 
 ---
@@ -703,6 +704,33 @@ graph TD
   * **Part 3 — Bracket-button collapse:** the 4 text buttons' labels carry a new `.btn-label` class. `#header-actions .btn-header` drops its flex `gap`; spacing moves to the icon's `margin: 0 0.25rem`, so a collapsed label (`max-width:0; opacity:0`) adds **zero** width — all 6 buttons measure the same 52px at rest (verified). On `:hover` **and** `:focus-visible` the label expands to `max-width:9em` (smooth `max-width`+`opacity` transition). The 2 icon-only buttons (`theme`/`architecture`) have no `.btn-label` and are untouched; `title` attrs remain the accessible fallback. Scoped to `#header-actions` only.
   * **Guarded by** `tests/specs/t29-chat-rendering-tidying.spec.mjs` (6 tests: M1 markdown+sanitization, M2 user-md vs scratchpad-plain, S1 web highlight+clamp, S2 FTS markers+source badge, S3 entity-safety, B1 button collapse/hover). Full suite 43/43.
   * **AGY review (2026-08-19, `Gemini 3.7 Flash (Medium)`, conv `fdb1af7c`):** XSS surface, the DOMPurify hook, the T28 invariants, and the CSS collapse all confirmed correct. **Minor (fixed):** `highlightTerms` could match a query term inside an HTML entity (`amp` inside `&amp;`) and corrupt the text → single-pass entity-or-term regex (test S3). **Nit (left, pre-existing):** the search branch hardcodes `data-asset-type="search_web"` even for `search_documents` payloads, so dragging a document result to the dashboard materializes it as a `web_search` card. Pre-dates T29 (the old branch caught both shapes too); changing it would silently disable the drag (grid-ui only special-cases `search_web`/`fetch_url`/`table`), so it's out of scope for this rendering pass — a candidate for the rolling "UI tidying" scope.
+
+---
+
+### Ticket 30: Self-Reference Metadata in Agent Context (session + message IDs)
+* **Label:** `wayfinder:prototype` (HITL)
+* **Status:** Open (Frontier)
+* **Depends on:** T2 (compaction / KV-cache constraint), T26.4 (`v_active_context` lineage)
+* **Question:** How do we give the agent very small amounts of metadata about its own environment — the active session ID and each message's stable `messages.id` — so it can use direct SQL to manipulate its own state (e.g. create a view from a specific past query, reference a specific tool output by id) — without bloating context or breaking the KV-cache-stable prefix?
+* **Rationale (user, 2026-08-19):** the app's superpower is direct SQL control over itself; giving the agent that metadata in its context lets it "supremely manipulate its environment" — such as using a query on a specific message to create a view.
+* **Context (verified in code 2026-08-19):**
+  * The agent can already **read** its own brain: `messages` is protected from DDL/DML (T21) but fully queryable via `execute_sql`. The gap is **correlation** — the LLM sees message *content* in its context but not the row ids, so it cannot target a specific message ("that query we just ran") in SQL.
+  * Context is built by the `agent_think` trigger: `json_group_array(json_object('role',…, 'content',…, 'tool_calls',…, 'tool_call_id',…))` over `v_active_context ORDER BY ctx_order`. The view = [system row id=0, latest summary as a synthetic `user` row, in_context=1 rows past the watermark].
+  * T2's surviving constraint: *the prefix builder must be deterministic (no timestamps/random ids in the prefix).* `messages.id` (AUTOINCREMENT, append-only, immutable) is deterministic and stable — including it is KV-cache-safe: a turn only appends new rows, so the prefix stays byte-stable between turns. The session id is stable within a session (a session switch changes the prefix, which is a new conversation anyway).
+  * `formatMessages` (harness.js) currently maps to `{role, content, tool_calls, tool_call_id}` — an extra `id` field must be threaded through (or deliberately dropped per provider).
+* **Design agenda:**
+  1. **Per-message id (primary):** add `id` (the integer `messages.id` — the rowid; small, not a UUID) to each message object in the trigger's `json_object`. `v_active_context` already selects from `messages` — expose `m.id` (NULL for the system + synthetic summary rows, so the model isn't handed ids it can't correlate). Cost: ~3–5 tokens per message.
+  2. **Session id:** make the active session known. Candidates: (a) a synthetic environment row at the head of the context (e.g. a system note `session_id = 'default'`); (b) appended to the system prompt at trigger time (deterministic within a session). Decide which keeps `formatMessages` / provider framing cleanest.
+  3. **Usage instruction:** a short addition to `system_config.system_prompt` — every message carries a stable `id` (its row in `messages`); to inspect or reuse a specific message, query `messages` by id (e.g. create a view from a prior query). New brains get it on seed; existing brains need a one-shot prompt migration (`INSERT OR IGNORE` won't update).
+  4. **Token minimization:** v1 = session id + message id only. Explicitly out for now: `created_at`, per-message token counts, anything else — the model already sees role + content.
+  5. **Compaction interaction:** after compaction, compacted messages' ids are out of context — acceptable (the agent can `SELECT` from `messages` to find them); optionally the summary prompt preserves a few notable ids (nice-to-have, not required).
+  6. **Safety:** no new boundary — `messages` is already read-only to the agent (T21). This ticket adds correlation, not new write paths.
+* **Acceptance:**
+  * Fake-LLM probe: the context JSON the trigger builds carries per-message `id` + the session id; and the agent completes a task that requires referencing a specific past message by id (e.g. "create a view from my third query" → `CREATE VIEW … SELECT … FROM messages WHERE id = N`).
+  * KV-cache check: turn N+1 still shows `cached_tokens > 0` for the shared prefix (the T2 cache-probe pattern) — the metadata must not bust the cache.
+  * Full suite green; AGY review pass (sign-off standard).
+* **Next steps:** lock the design (per-message `id` field vs a compact header list; where the session id lands; the prompt migration) → implement (`v_active_context` + `agent_think` + `formatMessages` + system prompt) → fake-LLM probe + cache probe → AGY review → merge.
+* **Branch:** `t30-context-metadata`
 
 ---
 
