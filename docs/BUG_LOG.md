@@ -202,6 +202,31 @@ This document tracks known issues, edge cases, and improvements to be addressed 
 
 ---
 
+### BUG-021: Cartridge Import Appears to Do Nothing (Fresh / Incognito Profile)
+- **Status**: **Open / Under investigation — spec written (2026-08-20), fix not started.** Full investigation + boundary analysis: `docs/WAYFINDER_MAP.md` ("Ticket 33: Cartridge Import Does Nothing (BUG-021) + Engine/Cartridge Boundary Hardening").
+- **Reported**: User feedback (2026-08-20) — exported a cartridge in a normal window, imported it in an incognito window (fresh profile): "basically nothing happened."
+- **Component**: `src/cartridge.js` (import handler + `importCartridge`), `src/main.js` (boot-time config overrides), `src/schema.js` (`migrateSystemPrompt`)
+- **Description**: Export a cartridge from a normal window; in a fresh incognito profile, click [import] and pick the exported file. No visible change, no obvious error.
+- **Root Cause (hypotheses, ranked — see Ticket 33 for evidence + verification plan)**:
+  1. **Silent pre-boot click**: the handler returns silently when `getAgent()` is null (boot not complete); the [import] button is not disabled during boot, and fresh profiles boot the longest (create brain from scratch). No status, no log, no picker — literally nothing happens.
+  2. **Import succeeded but chat looks empty**: the handler hardcodes session `'default'` instead of restoring the cartridge's `active_session_id` (boot does this via BUG-017 logic; import does not).
+  3. **Exported file is a `.sql` dump, not a binary cartridge**: the export handler silently falls back to `exportSqlDump` when binary export throws; importing it fails with a 3-second status-bar flash that's easy to miss.
+  4. **(Lower) Post-reload persistence failure** of the IDB backup (VFS is crash-atomic per transaction, so unlikely).
+  Related **real priority overrides** found during investigation (manifest on next boot / in config, not same-session): `effective_context_window` is clobbered by the local profile's value every boot (`ON CONFLICT DO UPDATE` in `main.js`); `migrateSystemPrompt` overwrites the cartridge's system prompt on `prompt_version` mismatch; provider credentials are intentionally absent from cartridges (incognito = no provider → the imported agent can't chat until a profile is created); `llm_model` in `system_config` is dead config (live model comes from the localStorage profile).
+- **Proposed Fix**: See Ticket 33 (hardening spec: no silent paths / disable until boot, pre-import validation + `integrity_check`, confirm + pre-import snapshot + undo, post-import report, active-session restore, boundary decisions D1–D5, Playwright round-trip guard).
+
+---
+
+### BUG-022: Webfetch Dead on Hosted Deployments; Public CORS-Proxy Fallback Leaks Fetched URLs
+- **Status**: **Being worked as Ticket 34 (2026-08-21)** — implemented + full suite green (78/78); pending Vercel deploy + live smoke. See `docs/WAYFINDER_MAP.md` ("Ticket 34: Hosted Webfetch — Same-Origin Fetch Proxy").
+- **Reported**: User feedback (2026-08-21) — "webfetch does not work… when I am using my hosted service on my website to showcase Tables I can't webfetch anywhere."
+- **Component**: `src/harness.js` (`fetch_url` UDF tiers), `vite.config.js` (dev-only `/api/fetch-proxy` middleware)
+- **Description**: `fetch_url`'s tier-1 proxy was a Vite dev-server middleware — it 404s in production. Tier-2 direct `fetch()` fails CORS on most sites (the browser can't read cross-origin responses without the target's headers). Tier-3 fell back to public CORS proxies, which were verified dead (`corsproxy.io` 403s anonymous use; `allorigins.win` unreachable) and were a privacy leak: every URL the agent fetched transited third-party servers.
+- **Root Cause**: The only CORS-free path (a server-side fetch) existed only in dev; the production fallback routed the agent's browsing through strangers' infrastructure.
+- **Resolution (Ticket 34)**: Same-origin Vercel function at `/api/fetch-proxy` (`api/fetch-proxy.js` — SSRF DNS-resolve gate, same-site Origin/Referer gate, per-IP rate limit, 8s/5MB caps, zero logging) + `localStorage['sql-agent-fetch-proxy']` override + `X-Fetch-Proxy-Error` contract (4xx policy = authoritative, 5xx = fall through to direct fetch) + third-party fallback removed (privacy regression guard test).
+
+---
+
 ### Numbering note (BUG-010 / 011 / 012)
 BUG-010, BUG-011, and BUG-012 are the **Ticket 26 debugging-session bugs** (per-boot `DROP`+`RENAME` session migration; double-boot VFS corruption; the no-op commit that writes zero pages to IDB). They are tracked in `docs/archive/RETROSPECTIVE_TICKET_26.md` and `docs/TRANSACTION_RULES.md` (§5, §6) and referenced by the `persistence` / `boot-idempotency` / `vfs-contract` specs. Their `BUG_LOG.md` entries were drafted during the `sql-refactor` re-scope but stashed (see retrospective §5) and not merged, so this log jumps from BUG-009 to BUG-013. New entries continue from BUG-013 to avoid colliding with the reserved numbers.
 

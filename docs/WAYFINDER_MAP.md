@@ -93,6 +93,7 @@ graph TD
     T30[Ticket 30: Self-Reference Metadata in Agent Context - open]
     T31[Ticket 31: Saved Provider Profiles (multi-provider config store & panel)]
     T31 --> T32[Ticket 32: Anthropic + OpenAI Official Providers (BUG-005 core)]
+    T10 --> T33[Ticket 33: Cartridge Import Bug (BUG-021) + Engine/Cartridge Boundary Hardening]
 
     T4[Ticket 4: Live Event Streaming & Token Pipe - DONE]
     T5[Ticket 5: Native Vector Search sqlite-vec - DONE]
@@ -101,6 +102,7 @@ graph TD
     T7[Ticket 7: Web Search & URL Fetch Tools - DONE]
     T10[Ticket 10: Cartridge Import / Export - DONE]
     T16[Ticket 16: In-Browser Full-Text Search FTS5 - DONE]
+    T16 --> T34[Ticket 34: Hosted Webfetch — Same-Origin Fetch Proxy (BUG-022)]
     T21[Ticket 21: Protected-Tables Boundary - DONE]
     T13 --> T12
     T12 --> T22[Ticket 22: Reference Integrity for Dashboard Cards]
@@ -118,7 +120,7 @@ graph TD
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
     class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T16,T17,T21,T24,T25,T26,T261,T262,T263,T264,T265,T27,T28,T29 done;
-    class T14,T15,T18,T19,T20,T22,T23,T30,T31,T32 frontier;
+    class T14,T15,T18,T19,T20,T22,T23,T30,T31,T32,T33,T34 frontier;
 ```
 
 ---
@@ -802,10 +804,115 @@ graph TD
 
 ---
 
+### Ticket 33: Cartridge Import Does Nothing (BUG-021) + Engine/Cartridge Boundary Hardening
+
+* **Label:** `wayfinder:task` (HITL)
+* **Status:** 🟡 IN PROGRESS — investigation complete (2026-08-20), fix not started. Investigation was spec-only per user instruction ("don't fix anything — just look into it and speculate").
+* **Depends on:** T10 (cartridge import/export)
+* **Question:** Why does importing an exported cartridge into a fresh (incognito) profile "basically do nothing," and which parts of the cartridge should come in vs. be defined by the engine — are there conflicting instructions or priority overrides?
+
+**Symptom (user report, 2026-08-20):** Export a cartridge from a normal window; open an incognito window (fresh profile); click [import] and pick the exported file. "Basically nothing happened" — no visible change, no obvious error.
+
+**Verified code path (`src/cartridge.js`, read 2026-08-20):**
+- `initCartridgeUi` handler: `const agent = cartridgeCtx.getAgent(); if (!agent) return;` — **silent no-op** if boot has not completed (no status, no log, no file picker).
+- `pickFile()` cancel → `{cancelled:true}` → **silent no-op** (status restored).
+- `importCartridge`: bytes → `:memory:` → `sqlite3_deserialize` → `backupFull` onto the live DB (full replace).
+- On success: **hardcodes `setSessionId('default')` + `setActiveSession('default')`** — does NOT restore the cartridge's `session_context.active_session_id` (boot does via the BUG-017 logic; import does not) — then `populateSessionDropdown()`, `renderMessages()`, `rebuildGrid()`, status "✓ Cartridge imported" (3s flash).
+- On error: status "⚠ Import failed: <msg>" (3s flash) + `console.error`.
+- [import] button is **not disabled during boot** (plain button, `index.html:41`; no disable logic anywhere) — no readiness signal.
+- Export side: if binary export throws (e.g. `SuspendError` without the `exportPattern` patch), the handler **silently falls back** to `exportSqlDump` → a `.sql` text file.
+
+**Ranked hypotheses (spec — no fix yet):**
+
+1. **H1 — silent pre-boot click.** Fresh incognito profile = boot does the most work (WASM fetch + instantiate + create brain from scratch + all migrations). Click [import] before `bootAgent()` resolves → `getAgent()` null → handler returns silently: no picker, no status, nothing. Most consistent with "basically nothing happened." *Discriminating evidence:* `window.__agent?.ready` in console before the click; status bar before/after.
+2. **H2 — import succeeded but chat looks empty (active-session mismatch).** The exported conversation lived in a non-default session; import hardcodes `'default'` → chat pane renders an empty session → perceived as "nothing happened." *Discriminating evidence:* post-import `SELECT id FROM sessions` + `SELECT value FROM session_context WHERE key='active_session_id'`.
+3. **H3 — the exported file is a `.sql` dump, not a binary cartridge** (export-side silent fallback). Import → `sqlite3_deserialize` rc≠OK → "⚠ Import failed: file is not a database" — visible only as a 3s status-bar flash, easy to miss. *Discriminating evidence:* file header bytes (`SQLite format 3\0`) + extension; window A console for "Binary export unavailable…".
+4. **H4 — import succeeded, status flash missed, session empty** (H2 variant — the "✓ Cartridge imported" flash went unseen).
+5. **H5 — post-reload persistence failure** (if the user reloaded and saw the fresh brain again): the backup wrote through the live handle over `IDBBatchAtomicVFS`; an uncommitted IDB transaction would lose it. Lower probability (VFS is crash-atomic per transaction). *Discriminating evidence:* reload test + IDB object-store inspection.
+
+**The user's hunch was right — there ARE real priority overrides (engine vs. cartridge), but they manifest on next boot / in config, not as the same-session "nothing happened":**
+
+| Surface | Current behavior | Winner |
+|---|---|---|
+| Triggers + views | drop + recreate from running build every boot | engine (by design — self-healing mechanism) |
+| Schema shape (tables/columns) | engine migrations run every boot | engine |
+| `system_config` seeds + `tools` + sample data | `INSERT OR IGNORE` | cartridge (seeds only fill gaps) |
+| System prompt (`system_config.system_prompt` + `messages` role='system') | `migrateSystemPrompt` overwrites when cartridge `prompt_version` ≠ running `SYSTEM_PROMPT_VERSION` (currently 2) | **hybrid: same version → cartridge; different version → engine overwrites the identity** |
+| `effective_context_window` | `main.js` boot writes the local profile's value (or 128000 fallback) with `ON CONFLICT DO UPDATE` **every boot** | **local profile clobbers the cartridge** |
+| Provider credentials | intentionally never in the cartridge (localStorage invariant) | local profile (incognito = none → agent can't chat until a profile is created) |
+| `llm_model` (system_config) | seeded in the cartridge, but the live model comes from the localStorage profile | dead config in the cartridge |
+| Active session on import | hardcoded `'default'` (boot restores the stored one; import does not) | neither — a bug |
+
+**Boundary to lock in this ticket (cartridge brings data + identity; engine defines mechanism):**
+- Cartridge brings: messages, sessions, compactions, turn_changesets, turn_ddl_log, tool_approvals, dashboard_cards, documents + FTS, user tables/views/indexes, sample data, tools (user-added), `system_config` (prompt — see D1).
+- Engine defines: triggers, views, UDFs, schema shape, provider credentials (never).
+
+**Open boundary decisions (D1–D5, to lock with the user before implementation):**
+- **D1 — system prompt ownership:** for the "cartridge = agent" philosophy, the cartridge's prompt should win on import; the engine prompt is a fallback for fresh brains, not an override. (The current hybrid is the surprise.)
+- **D2 — `effective_context_window`:** the cartridge's value should survive import; the engine writes only on explicit user change, not every boot.
+- **D3 — active session on import:** restore the cartridge's `active_session_id` with the BUG-017 fallback chain (stored → exists? → default), instead of hardcoding `'default'`.
+- **D4 — tool versioning:** gate tool-schema updates with a version key like the prompt, or leave unversioned?
+- **D5 — `llm_model` dead config:** remove from the cartridge, or honor it?
+
+**Hardening spec (for implementation — not yet done):**
+1. No silent paths: disable [import]/[export] until boot completes (or show "not ready"); log + surface every cancel/failure.
+2. Pre-import validation: deserialize to `:memory:`, `PRAGMA integrity_check`, verify it's a Tables brain (`messages` + `sessions` + `system_config` present; future `_manifest` version row), report row counts; clear error for non-brain files.
+3. Confirmation dialog + pre-import snapshot (backup to an IDB sidecar) → "undo import."
+4. Post-import report: what came over (sessions/messages/cards/tables), what the engine redefined (triggers/views), what the local profile overrode (provider, context window).
+5. Restore the cartridge's active session (D3).
+6. Lock D1–D5 as decisions in this ticket.
+7. Regression guard: Playwright round-trip spec (profile A export → profile B import → assert messages/sessions/cards present + active session restored + prompt preserved).
+
+**Verification plan (discriminate H1–H5 — run before implementing):**
+1. Incognito window, before clicking: console `window.__agent?.ready` — undefined/false → H1 confirmed (click anyway, observe silence).
+2. Post-boot click; pick the file; capture the status bar within 3s (screenshot) + console for `[import]` errors.
+3. Post-import DB probe: `SELECT COUNT(*) FROM messages`, `SELECT id FROM sessions`, `SELECT value FROM session_context WHERE key='active_session_id'`, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`.
+4. Inspect the exported file: first 16 bytes, extension, size.
+5. Reload test: does the imported state survive? (H5)
+6. Window A console: "Binary export unavailable, trying SQL dump…"? (H3)
+
+* **Next steps:** run the verification plan (user or preview browser) → confirm the winning hypothesis → lock D1–D5 with the user → implement fix + hardening → spec + AGY review → merge.
+* **Branch:** (not started)
+
+---
+
+### Ticket 34: Hosted Webfetch — Same-Origin Fetch Proxy (BUG-022)
+
+* **Label:** `wayfinder:task`
+* **Status:** 🟡 IN PROGRESS — implemented + full suite green (78 passed / 2 skipped, 2026-08-21); pending Vercel deploy + live smoke on the hosted site.
+* **Depends on:** T16 (owns the `fetch_url` / `search_web` toolset)
+* **Question:** Why is webfetch dead on the hosted service, and how do we fix it with the least friction and the least privacy exposure?
+
+**Symptom (user report, 2026-08-21):** `fetch_url` works on desktop (dev) but "can't webfetch anywhere" on the hosted service (tables.nicholaslisac.com — Vercel, top-level).
+
+**Root cause:** The browser cannot read cross-origin responses without the target site's CORS headers (which we don't control). The only CORS-free path — a server-side fetch — existed only in dev: tier 1 of `fetch_url` called `/api/fetch-proxy`, a **Vite dev-server middleware** (`vite.config.js`) that 404s in production. Tier 2 (direct fetch) fails CORS on most sites. Tier 3 (public CORS proxies) was verified dead *and* leaky: `corsproxy.io` now 403s anonymous use ("Server-side requests are not allowed on your plan"), `allorigins.win` was unreachable — and whenever either worked, **every URL the agent fetched transited a third party's server**.
+
+**Fix (implemented 2026-08-21):**
+1. **`api/fetch-proxy.js`** — Vercel function (Node runtime — `node:dns` is unavailable in Edge) at the *same relative path* as the dev middleware, same contract (`GET /api/fetch-proxy?url=…` → target body + status). A deploy at that path on the app's origin makes webfetch work with zero app changes. Controls: **SSRF gate** (resolve DNS, then reject loopback/private/link-local/cloud-metadata/CGNAT/multicast/reserved — IPv4 + IPv6 + IPv4-mapped, fail closed; the client-side blocklist in harness.js is bypassable via decimal/hex IPs and DNS rebinding, so the server is authoritative), **same-site Origin/Referer gate** (not an open relay), per-IP rate limit (30/min/instance), 8s upstream timeout, 5MB cap, browser UA. **Logs nothing** — no URLs, no targets, no IPs (privacy by design).
+2. **`vercel.json`** — minimal additive config (build command, `dist` output, 20s `maxDuration` for the function). Deliberately no `headers` block: don't silently override any existing dashboard header config (COOP/COEP noted as a follow-up below).
+3. **`src/harness.js`** — `fetch_url` tiers reworked: (1) same-origin / **configurable** proxy — `localStorage['sql-agent-fetch-proxy']` override (self-hosters point at their own worker; no UI field yet), (2) direct fetch (CORS-friendly targets still work proxy-free), (3) actionable error. **The third-party fallback is removed** (privacy regression guard test enforces it).
+4. **Proxy error contract — `X-Fetch-Proxy-Error`:** both proxies (Vite middleware + Vercel function) set this header on their *own* failures; upstream headers are never passed through, so a target can't forge it. App semantics: **4xx = policy rejection (authoritative — surfaced to the agent, not retried)**; **5xx = upstream unreachable (fall through to a direct browser fetch** — the browser may have reach the proxy lacks; T28's `page.route`-intercepted hosts depend on exactly this); **no header = relayed target response** (non-2xx = definitive failure, reported with the status).
+5. **Tests:** `tests/specs/t34-fetch-proxy.spec.mjs` — 14 tests: `isBlockedIp` gate, handler policy layer (method/path/origin/rate-limit/target/SSRF incl. decimal-IP encoding), live passthrough (skipped offline), dev-proxy contract e2e (success + the 5xx fall-through marker), privacy regression guard. Full suite: 78 passed / 2 skipped.
+
+**Privacy posture:** fetched URLs touch exactly two parties — the target site and the host's operator. For the showcase the operator is the user; for other users it's their host (standard, disclosable tradeoff; the configurable endpoint lets privacy-maximalists run their own proxy).
+
+**Follow-ups (not done):**
+* **Vercel deploy + live smoke** (user): push, then a real `fetch_url` turn on the hosted site. If the project already has dashboard-only settings, merge `vercel.json` rather than replace.
+* COOP/COEP headers for the hosted origin (required for SAB/OPFS acceleration — check existing dashboard config first; `require-corp` would block any third-party fonts/analytics the page loads).
+* Optional: proxy-URL field in the config modal (currently the `localStorage` override).
+* Optional: KV-backed global rate limit (current in-memory bucket is per function instance).
+* Residual SSRF note: DNS-rebinding TOCTOU window between resolve and fetch; Vercel's own network blocks cloud metadata from functions, bounding the blast radius.
+* One-line UI/README disclosure: "web fetches are relayed through your Tables host."
+
+* **Branch:** main (uncommitted as of 2026-08-21)
+
+---
+
 ## The Next Shelf & Fog of War (Group 3: Post-Core Horizons)
 
 These items sit on the next shelf to be tackled after the core workstation is complete:
 
+* **Self-Booting Cartridges — "Agent on a Keychain" (post-frontier fog, 2026-08-20):** The cartridge carries its own host. A `system_files(name, mime, body)` table holds the host console — **dual-host, both verified 2026-08-20**: `host.py` (stdlib-only CPython `sqlite3`) and `host.cjs` (Node 22.13+ built-in `node:sqlite`, written CJS so it evals inside a one-liner). Each just opens the file, sets `PRAGMA recursive_triggers=ON`, registers the UDFs as language callbacks, and does one `INSERT` — the file's *own triggers* then drive the whole ReAct loop. **Verified with a probe + a self-extracting boot:** the full cascade (user → assistant/tool_calls → tool → assistant/final) runs natively on *both* runtimes, including nested dynamic SQL from inside a UDF mid-trigger-chain — the JSPI problem is a WASM/UI-thread artifact; in a CLI a blocking UDF callback is just a function call, so the pure-SQL flagship loop needs no compatible mode. **The keychain moment (verified):** one command extracts the host from the file and runs it — `python3 -c "import sqlite3;exec(sqlite3.connect('c.sqlite3').execute(\"select body from system_files where name='host.py'\").fetchone()[0])" c.sqlite3` and the `node -e "…eval(…get().body)…" c.sqlite3` equivalent — the file literally contains its own engine. **Host tiers (four ways to boot one file):** ① web/WASM (hosted loader URL `tables.nicholaslisac.com/open?src=…`, or a self-contained `.html`), ② Node CLI (`node host.cjs` — shares code with the app's `harness.js`, single source of truth for UDF behavior + LLM framing; **Node 24 adds the cartridge primitives natively: `db.serialize()`/`db.deserialize()` for import/export and `db.setAuthorizer()` for the sandbox**), ③ Python CLI (`python3 host.py` — most ubiquitous on a random laptop), ④ **Datasette web host** (`datasette serve --plugins-dir ./plugin cartridge.sqlite3` — **verified end-to-end 2026-08-21 on Datasette 0.65.3**: a ~60-line plugin `.py` shipped next to the db (or stored in `system_files` and extracted at boot) registers the UDFs via the documented `prepare_connection` hook — on *every* connection, so the loop can even be driven from Datasette's own SQL page — and a `register_routes` `/ask` endpoint (INSERT user row → the cartridge's *own triggers* run the loop → read back the final answer) makes it a chat host; a full table browser + JSON/CSV API come for free, and `write_wrapper` exposes the SQLite authorizer = the sandbox hook; costs: `pip install datasette` dependency (heavier than stdlib) and the chat surface is a thin template on top of a data-browser, not a purpose-built console; gotcha found in the proof: `datasette.databases` includes an `_internal` db with `path=None` — pick the first file-backed one). **Node gotcha (verified):** UDF arity is inferred from `function.length`, so a callback must *declare* its parameters (`(ctx, tools) =>`, not `() =>`) or use the `varargs` option. **Why not the others:** the `sqlite3` CLI has no UDFs (can't run the loop — but it's the perfect read-only peek: `sqlite3 c.sqlite3 ".tables"`); the GUI viewers (DB Browser for SQLite, DBeaver, Beekeeper Studio, TablePlus) open the file for peeking but can't run the loop — none expose a UDF-registration API (Datasette is the only major viewer with a documented one, hence tier ④); C/Go/Rust need a toolchain or a per-platform binary (breaks "host is readable TEXT in the file"); Bun/Deno are fine bonus paths but less ubiquitous; a bash+curl "dumb loop" works anywhere but abandons the pure-SQL loop. The reader of that cell doesn't have to be a human — any LLM agent handed the file can boot it. Open questions to resolve before this can be ticketed: the `_manifest` contract (format version, required UDFs + signatures, feature negotiation — JSPI vs. compatible vs. read-only); cartridge identity (`cartridge_id`) + guest isolation (per-cartridge IDB namespace, working copy, never write back to the original); sandboxed boot profile for imported cartridges (approval-gated network UDFs — the keychain permission prompt; Node 24's `setAuthorizer` is the native hook); the cartridge→self-contained-`.html` build step (file:// cannot set COOP/COEP → no JSPI from double-click → compatible mode only); trust model (hash-pinned runtime components, signed manifests for published cartridges — a file that ships its own console is a malware distribution format until it signs). Prerequisite: the engine/cartridge priority boundary locked in **Ticket 33**.
 * **Google Workspace Integration:** Read/write connectors for Google Sheets, Docs, and Drive syncing directly into relational SQLite tables.
 * **Notifications & Scheduled Cron Jobs:** SQLite-driven timers and cron schedules (`scheduled_jobs` table) with Web Notifications API triggers for periodic agent audits.
 * **Visual Multi-Tab Subagent Swarms:** Spawning child subagent browser tabs (`window.open`) coordinating through a shared `subagent_tasks` SQLite table.

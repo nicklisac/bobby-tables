@@ -29,6 +29,9 @@ export default defineConfig({
             const targetUrl = urlObj.searchParams.get('url');
             if (!targetUrl) {
               res.statusCode = 400;
+              // T34 contract: mark the proxy's OWN errors so the app can tell
+              // them apart from relayed target responses (see api/fetch-proxy.js).
+              res.setHeader('X-Fetch-Proxy-Error', 'bad-target');
               res.end('Missing url parameter');
               return;
             }
@@ -44,7 +47,11 @@ export default defineConfig({
             res.statusCode = fetchResp.status;
             res.end(text);
           } catch (err) {
+            // 5xx = upstream unreachable (DNS failure, timeout, …). The app
+            // falls through to a direct browser fetch for these — the browser
+            // may have reach the dev server lacks (T28 route-intercepted hosts).
             res.statusCode = 500;
+            res.setHeader('X-Fetch-Proxy-Error', 'upstream-failed');
             res.end(err.message);
           }
         });

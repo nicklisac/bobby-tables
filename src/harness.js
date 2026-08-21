@@ -1162,47 +1162,73 @@ export async function bootSqliteAgent(config = {}) {
 
         let html = '';
         let respStatus = 200;
+        let fetched = false;
 
-        // 1. Try local dev proxy endpoint first
-        try {
-          const proxyUrl = `/api/fetch-proxy?url=${encodeURIComponent(url)}`;
-          const proxyResp = await fetch(proxyUrl, { signal: turnSignalWith(12000) });
-          if (proxyResp.ok) {
-            respStatus = proxyResp.status;
-            html = await proxyResp.text();
+        // T34: fetch tiers.
+        // 1. Same-origin / configured fetch proxy — a server-side fetch, so
+        //    CORS never applies. Dev: the Vite middleware in vite.config.js.
+        //    Prod: the Vercel function in api/fetch-proxy.js, served at the
+        //    same relative path on the app's origin. A deployment can point
+        //    elsewhere via localStorage['sql-agent-fetch-proxy'] (e.g. a
+        //    self-hosted worker on another subdomain).
+        //    When the proxy RESPONDS it is authoritative: a policy error
+        //    (SSRF block, rate limit, bad target) is surfaced to the agent
+        //    rather than retried against the open internet. Only an
+        //    UNREACHABLE proxy (static hosting with no function) falls
+        //    through to a direct fetch.
+        const proxyBase = (localStorage.getItem('sql-agent-fetch-proxy') || '/api/fetch-proxy').trim();
+        if (proxyBase) {
+          let proxyResp = null;
+          try {
+            const sep = proxyBase.includes('?') ? '&' : '?';
+            proxyResp = await fetch(`${proxyBase}${sep}url=${encodeURIComponent(url)}`, { signal: turnSignalWith(12000) });
+          } catch { /* proxy unreachable — fall through to direct fetch */ }
+          if (proxyResp) {
+            // X-Fetch-Proxy-Error marks the proxy's OWN failures (dev and prod
+            // proxies both set it; upstream headers are never passed through,
+            // so a target can't forge it). Absent header = the proxy
+            // successfully relayed the target's response.
+            const proxyErr = proxyResp.headers.get('x-fetch-proxy-error');
+            if (proxyErr) {
+              if (proxyResp.status >= 400 && proxyResp.status < 500) {
+                // Policy rejection (SSRF block, rate limit, bad target):
+                // authoritative — surface it, don't retry elsewhere.
+                throw new Error(`Fetch proxy rejected the request (${proxyResp.status}: ${proxyErr})`);
+              }
+              // 5xx: the proxy could not reach the target — fall through to a
+              // direct browser fetch (the browser may have reach the proxy
+              // lacks; T28's route-intercepted hosts depend on this).
+            } else if (proxyResp.ok) {
+              respStatus = proxyResp.status;
+              html = await proxyResp.text();
+              fetched = true;
+            } else {
+              // The proxy relayed the target's own non-2xx — definitive; a
+              // direct fetch would just re-learn the same answer (slower).
+              throw new Error(`Fetch failed: target returned HTTP ${proxyResp.status}`);
+            }
           }
-        } catch { /* proceed to direct fetch fallback */ }
+        }
 
-        // 2. If dev proxy did not respond, try direct fetch
-        if (!html) {
+        // 2. Direct browser fetch — works for CORS-friendly targets (many
+        //    JSON APIs send Access-Control-Allow-Origin).
+        if (!fetched) {
           try {
             const resp = await fetch(url, { signal: turnSignalWith(10000) });
             if (resp.ok) {
               respStatus = resp.status;
               html = await resp.text();
+              fetched = true;
             }
-          } catch { /* proceed to public CORS proxy fallback */ }
+          } catch { /* blocked by CORS or network error */ }
         }
 
-        // 3. Fallback to public CORS proxies if direct browser fetch was blocked by CORS
-        if (!html) {
-          const corsProxies = [
-            `https://corsproxy.io/?${encodeURIComponent(url)}`,
-            `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-          ];
-          for (const cp of corsProxies) {
-            try {
-              const resp = await fetch(cp, { signal: turnSignalWith(10000) });
-              if (resp.ok) {
-                respStatus = resp.status;
-                html = await resp.text();
-                if (html) break;
-              }
-            } catch { /* try next proxy */ }
-          }
-        }
-
-        if (!html) throw new Error('Failed to fetch page (blocked by CORS or network error)');
+        // 3. No third-party CORS-proxy fallback (T34, privacy): the agent's
+        //    browsing must not transit strangers' servers (the old public
+        //    proxy fallback leaked every fetched URL and is dead anyway —
+        //    one of them now 403s anonymous use outright). Fail with an
+        //    actionable error instead.
+        if (!fetched) throw new Error('Fetch blocked by CORS and no fetch proxy is available for this deployment (deploy api/fetch-proxy.js or set a proxy URL in localStorage["sql-agent-fetch-proxy"])');
 
         const text = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8000);
         const payload = { url, status: respStatus, title: html.match(/<title>(.*?)<\/title>/i)?.[1] || '(no title)', content: text, truncated: html.length > 8000 };
