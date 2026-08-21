@@ -1,5 +1,5 @@
 import { defineConfig, loadEnv } from 'vite';
-import { searchWeb } from './api/search-providers.mjs';
+import { searchWeb, PROVIDERS } from './api/search-providers.mjs';
 
 /**
  * Vite configuration for the Web SQL Agent.
@@ -82,12 +82,19 @@ export default defineConfig(({ mode }) => {
             const query = (u.searchParams.get('q') || '').trim();
             if (!query) return json(400, { error: 'Missing q parameter' }, 'bad-query');
             if (query.length > 400) return json(400, { error: 'Query too long (max 400 chars)' }, 'bad-query');
-            const { provider, results } = await searchWeb(query, {
-              exaKey: process.env.EXA_API_KEY || env.EXA_API_KEY,
-              tavilyKey: process.env.TAVILY_API_KEY || env.TAVILY_API_KEY,
-              braveKey: process.env.BRAVE_API_KEY || env.BRAVE_API_KEY,
-              provider: process.env.SEARCH_PROVIDER || env.SEARCH_PROVIDER,
-            });
+            // T35b (BYOK): per-request user key (X-Search-Provider +
+            // X-Search-Key) wins over any .env/.env.local host key.
+            const reqProvider = String(req.headers['x-search-provider'] || '').toLowerCase();
+            const reqKey = String(req.headers['x-search-key'] || '').trim();
+            const keys = (reqKey && PROVIDERS.includes(reqProvider))
+              ? { [reqProvider + 'Key']: reqKey, provider: reqProvider }
+              : {
+                  exaKey: process.env.EXA_API_KEY || env.EXA_API_KEY,
+                  tavilyKey: process.env.TAVILY_API_KEY || env.TAVILY_API_KEY,
+                  braveKey: process.env.BRAVE_API_KEY || env.BRAVE_API_KEY,
+                  provider: process.env.SEARCH_PROVIDER || env.SEARCH_PROVIDER,
+                };
+            const { provider, results } = await searchWeb(query, keys);
             return json(200, { query, provider, results });
           } catch (e) {
             const status = e.status === 503 ? 503 : e.status === 429 ? 429 : 502;

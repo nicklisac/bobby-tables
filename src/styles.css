@@ -2878,6 +2878,67 @@ footer {
   font-size: 0.66rem;
 }
 
+/* ── T35b: Web Search (bring-your-own-key) section in the config modal ── */
+
+.config-search-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 0.6rem 0.65rem 0.65rem;
+  margin-top: 0.75rem;
+  background: var(--bg-subtle, transparent);
+}
+
+.config-search-header h4 {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.config-search-header h4 .hint {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.config-search-blurb {
+  margin: 0;
+  font-size: 0.64rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.config-search-blurb code {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  background: var(--bg-input, rgba(127, 127, 127, 0.12));
+  padding: 0 0.25em;
+  border-radius: 3px;
+}
+
+.config-search-status {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  line-height: 1.4;
+  min-height: 0.9em;
+}
+
+.config-search-status.is-ok { color: var(--green, #3fb950); }
+.config-search-status.is-err { color: var(--red, #f85149); }
+.config-search-status.is-busy { color: var(--text-muted); }
+
+.config-search-section .modal-actions {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
+  justify-content: flex-start;
+}
+
 .placement-selects {
   display: flex;
   gap: 0.5rem;

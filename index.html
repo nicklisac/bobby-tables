@@ -610,6 +610,35 @@
             <button type="submit" id="config-apply" class="btn-primary">[Save &amp; Reboot]</button>
           </div>
         </form>
+        <div class="config-search-section">
+          <div class="config-search-header">
+            <h4>Web Search <span class="hint">— bring your own key</span></h4>
+          </div>
+          <p class="hint config-search-blurb">Powers the agent's <code>search_web</code>. Your key stays in <em>this</em> browser only — it is relayed through your Tables host (never logged) and is never shared with other users. Leave empty to disable web search.</p>
+          <form id="search-form">
+            <div class="config-row">
+              <label for="search-provider">Provider</label>
+              <select id="search-provider">
+                <option value="exa">Exa (neural — paid)</option>
+                <option value="tavily">Tavily (free 1,000/mo, no card)</option>
+                <option value="brave">Brave (card-gated credits)</option>
+              </select>
+            </div>
+            <div class="config-row">
+              <label for="search-key">API Key</label>
+              <div class="config-key-row">
+                <input type="password" id="search-key" placeholder="Exa: … &middot; Tavily: tvly-… &middot; Brave: …" autocomplete="off" />
+                <button type="button" id="btn-toggle-search-key" class="btn-secondary btn-sm" title="Show / hide key">[show]</button>
+              </div>
+            </div>
+            <div class="config-search-status" id="search-status" role="status" aria-live="polite"></div>
+            <div class="modal-actions">
+              <button type="button" id="search-test" class="btn-secondary">[Test]</button>
+              <button type="button" id="search-clear" class="btn-secondary">[Clear]</button>
+              <button type="submit" id="search-save" class="btn-primary">[Save]</button>
+            </div>
+          </form>
+        </div>
       </div>
     </div>
 

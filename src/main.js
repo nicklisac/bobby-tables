@@ -45,6 +45,9 @@ import {
   upsertProfile, deleteProfile, newProfile, maskKey,
 } from './provider-store.js';
 import { getProvider } from './llm-provider.js';
+import {
+  loadSearchConfig, saveSearchConfig, clearSearchConfig, maskSearchKey,
+} from './search-store.js';
 import { ICONS } from './icons.js';
 import './styles.css';
 
@@ -72,6 +75,14 @@ const btnNewProvider    = document.getElementById('btn-new-provider');
 const configProfileId   = document.getElementById('config-profile-id');
 const configProfileName = document.getElementById('config-profile-name');
 const btnToggleKey      = document.getElementById('btn-toggle-key');
+// T35b: Web Search (bring-your-own-key) section.
+const searchForm        = document.getElementById('search-form');
+const searchProvider    = document.getElementById('search-provider');
+const searchKey         = document.getElementById('search-key');
+const btnToggleSearchKey = document.getElementById('btn-toggle-search-key');
+const searchStatus      = document.getElementById('search-status');
+const searchTestBtn     = document.getElementById('search-test');
+const searchClearBtn    = document.getElementById('search-clear');
 const btnArchitecture   = document.getElementById('btn-architecture');
 const archModal         = document.getElementById('architecture-modal');
 const archCloseBtn      = document.getElementById('arch-modal-close');
@@ -313,6 +324,7 @@ function updateConfigVisibility(provider) {
 function openConfigModal() {
   migrateLegacyConfig(); // idempotent — ensures the store exists (BUG-020 migration)
   renderProviderList();
+  loadSearchConfigIntoForm(); // T35b: reflect the saved BYOK search config
   const store = loadStore();
   const active = store.profiles.find(p => p.id === store.activeId);
   if (active) loadProfileIntoForm(active.id);
@@ -431,6 +443,99 @@ if (configForm) {
     closeConfigModal();
     statusBar.textContent = 'Configuration saved. Rebooting…';
     await bootAgent();
+  });
+}
+
+// ── T35b: Web Search (bring-your-own-key) ─────────────────────────
+// The search key lives in localStorage (search-store.js) — NOT in the brain
+// DB and NOT on any server. Saving does NOT reboot the agent: the search_web
+// UDF reads the config live on every call and sends the key per-request to
+// the same-origin relay, which uses THE USER'S key (never the host's).
+
+function setSearchStatus(msg, kind) {
+  if (!searchStatus) return;
+  searchStatus.textContent = msg || '';
+  searchStatus.className = 'config-search-status' + (kind ? ' is-' + kind : '');
+}
+
+function loadSearchConfigIntoForm() {
+  if (!searchProvider || !searchKey) return;
+  const cfg = loadSearchConfig();
+  if (cfg) {
+    searchProvider.value = cfg.provider;
+    searchKey.value = cfg.apiKey;
+    setSearchStatus('Configured: ' + cfg.provider + ' · key ' + maskSearchKey(cfg.apiKey), 'ok');
+  } else {
+    searchKey.value = '';
+    setSearchStatus('Not configured — web search is disabled.', '');
+  }
+}
+
+// Minimal live search through the relay to validate a provider+key (one cheap
+// query). Used by the [Test] button so a typo'd key fails here, not mid-turn.
+async function testSearchConfig(provider, apiKey) {
+  const resp = await fetch('/api/search?q=test', {
+    headers: { 'X-Search-Provider': provider, 'X-Search-Key': apiKey },
+  });
+  let data = {};
+  try { data = await resp.json(); } catch { /* non-JSON body */ }
+  return { ok: resp.ok, status: resp.status, data };
+}
+
+if (btnToggleSearchKey) {
+  btnToggleSearchKey.addEventListener('click', () => {
+    if (!searchKey) return;
+    const showing = searchKey.type === 'text';
+    searchKey.type = showing ? 'password' : 'text';
+    btnToggleSearchKey.textContent = showing ? '[show]' : '[hide]';
+  });
+}
+
+if (searchForm) {
+  searchForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const provider = searchProvider ? searchProvider.value : '';
+    const apiKey = searchKey ? searchKey.value.trim() : '';
+    if (!apiKey) {
+      setSearchStatus('Enter an API key (or [Clear] to disable).', 'err');
+      return;
+    }
+    if (saveSearchConfig({ provider, apiKey })) {
+      setSearchStatus('Saved: ' + provider + ' · key ' + maskSearchKey(apiKey) + ' — active for new searches.', 'ok');
+    } else {
+      setSearchStatus('Could not save (invalid provider or empty key).', 'err');
+    }
+  });
+}
+
+if (searchClearBtn) {
+  searchClearBtn.addEventListener('click', () => {
+    clearSearchConfig();
+    if (searchKey) searchKey.value = '';
+    setSearchStatus('Cleared — web search is disabled.', '');
+  });
+}
+
+if (searchTestBtn) {
+  searchTestBtn.addEventListener('click', async () => {
+    const provider = searchProvider ? searchProvider.value : '';
+    const apiKey = searchKey ? searchKey.value.trim() : '';
+    if (!apiKey) {
+      setSearchStatus('Enter an API key first, then [Test].', 'err');
+      return;
+    }
+    setSearchStatus('Testing ' + provider + '…', 'busy');
+    try {
+      const { ok, status, data } = await testSearchConfig(provider, apiKey);
+      if (ok) {
+        const n = Array.isArray(data.results) ? data.results.length : 0;
+        setSearchStatus('✓ ' + provider + ' works (' + n + ' result' + (n === 1 ? '' : 's') + ').', 'ok');
+      } else {
+        setSearchStatus('✗ ' + provider + ' failed (' + status + '): ' + (data.error || 'unknown'), 'err');
+      }
+    } catch (err) {
+      setSearchStatus('✗ Test failed: ' + err.message, 'err');
+    }
   });
 }
 

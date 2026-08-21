@@ -913,7 +913,7 @@ graph TD
 ### Ticket 35: Web Search — Same-Origin Search Proxy (BUG-023)
 
 * **Label:** `wayfinder:task`
-* **Status:** 🟡 IN PROGRESS — implemented + full suite green (97 passed / 3 skipped, 2026-08-21); pending a provider key on the host (`EXA_API_KEY` preferred) + Vercel deploy + live smoke.
+* **Status:** 🟢 DONE (T35 + T35b BYOK) — implemented + full suite green (102 passed / 3 skipped, 2026-08-21); config-modal BYOK verified in-browser. Pending Vercel deploy + a live `search_web` turn with a real user key.
 * **Depends on:** T16 (owns the `search_web` toolset), T34 (same-origin proxy pattern)
 * **Question:** Why does web search return nothing, and how do we give the agent real search with the least cost and the least privacy exposure?
 
@@ -930,15 +930,21 @@ graph TD
 2. **`api/search.js`** — Vercel function (sibling of `api/fetch-proxy.js`): `GET /api/search?q=…` → `{query, provider, results}`. Same anti-abuse controls as T34 (same-site Origin/Referer gate, per-IP rate limit 10/min, 10s upstream timeout) + `X-Search-Error` marker (4xx policy / 5xx no-provider-or-upstream). **Logs nothing.** Provider auto-priority **Exa > Tavily > Brave**; `SEARCH_PROVIDER` forces one. No key → 503 naming the exact env var to set.
 3. **`vite.config.js`** — dev parity: a `/api/search` middleware with the same contract, reading keys from `process.env` or `.env`/`.env.local` (via `loadEnv`). Dev and prod are interchangeable.
 4. **`src/harness.js`** — `search_web` now calls the same-origin `/api/search` (the only tier). Non-2xx → actionable error surfaced verbatim (the function's body already names the env var). The dead DDG stub is **removed**; the T16 auto-ingest (one corpus doc per result) is unchanged and now ingests real snippets.
-5. **Tests:** `tests/specs/t35-search.spec.mjs` — 20 tests: the three normalizers (fixtures, highlight-vs-text preference, truncation, malformed tolerance), handler policy layer (method/path/origin/rate-limit/query/no-provider), live search (skipped unless a key is set), dev-proxy contract e2e (200-with-key / 503-without + 400), privacy regression guard (no `api.duckduckgo.com`, no third-party middleman). Full suite: 97 passed / 3 skipped.
+5. **T35b — bring-your-own-key (the privacy fix):** the host operator must **not** put a key in the server env — that would burn the host's credits on every visitor's search and expose their usage. Instead:
+   * **`src/search-store.js`** — per-user config in `localStorage['sql-agent-search']` = `{provider, apiKey}`. Deliberately **not** in the brain DB (a cartridge export must never leak a key) and not on any server.
+   * **Config modal** (`index.html` + `main.js`) — a "Web Search — bring your own key" section: provider select (Exa/Tavily/Brave), masked key input, **[Test]** (one cheap live search to validate the key before saving), **[Save]** (no reboot — the UDF reads it live), **[Clear]**. A disclosure line states the key stays in the browser and is relayed through the host (never logged).
+   * **`src/harness.js`** — `search_web` reads the config and sends `X-Search-Provider` + `X-Search-Key` **per-request**.
+   * **`api/search.js` + `vite.config.js`** — the relay honors the per-request key, which **wins over** any optional host env default. The key is used in-memory for that request only — never logged, never stored.
+6. **Tests:** `tests/specs/t35-search.spec.mjs` — 25 tests: the three normalizers, handler policy layer (method/path/origin/rate-limit/query/no-provider/**BYOK bypasses no-provider**), live search (skipped unless a key is set), dev-proxy contract e2e, `search-store` unit tests (Node + localStorage mock: round-trip/trim, invalid rejection, masking), and two privacy guards (no DDG stub / no third-party middleman; BYOK key sent per-request and sourced from localStorage, not the brain DB). Full suite: 102 passed / 3 skipped.
 
-**Cost posture:** the user pays for Exa, so it's the default when `EXA_API_KEY` is set. Tavily is the free fallback (no card). Brave is last (card-gated). All keys are server-side env vars — never exposed to the client, never in the repo.
+**CORS finding (why a relay at all, verified 2026-08-21):** Tavily sends full CORS (echoes origin, allows `authorization`) and *could* be called directly from the browser; **Exa's preflight returns methods/headers/credentials but no `access-control-allow-origin`** (it's behind a payment-gateway layer) and **Brave sends no CORS** — so both are browser-blocked. Since the user's paid provider is Exa, a relay is required regardless; using it for all three keeps the UX uniform.
+
+**Cost/privacy posture:** each user brings their own key (stored only in their browser). The host operator sets **no** key by default, so no host credits are burned and nothing is shared. The key transits TLS to the host's relay (same trust model as the T34 web-fetch proxy) and is never logged or stored server-side. An optional host env key remains as a fallback default for hosts that want to subsidize search.
 
 **Follow-ups (not done):**
-* **Set the key + deploy (user):** add `EXA_API_KEY` (and optionally `TAVILY_API_KEY`) to the Vercel project env + `.env.local` for dev, redeploy, then a real `search_web` turn on the hosted site.
-* Optional: per-user provider keys (currently host-level env).
+* **Deploy + live smoke (user):** redeploy to Vercel, then configure a real key in the config modal on the hosted site and run a `search_web` turn.
 * Optional: `time_range` / `category` passthrough for news-style queries.
-* Optional: surface `costDollars` (Exa) / `usage` (Tavily) in a debug view for quota visibility.
+* Optional: surface `costDollars` (Exa) / `usage` (Tavily) in a debug view for per-user quota visibility.
 
 * **Branch:** main (uncommitted as of 2026-08-21)
 

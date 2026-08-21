@@ -23,6 +23,7 @@ import { runCompaction, queryActiveContextJson, resolveContextWindow } from './c
 import { getProvider, defaultMaxTokens } from './llm-provider.js';
 import { materializeToolResult } from './materialize.js';
 import { upsertDocument, searchDocuments } from './documents.js';
+import { loadSearchConfig } from './search-store.js';
 
 /**
  * Live Event Stream for real-time UI streaming (tokens, tool execution, ReAct steps).
@@ -1079,11 +1080,21 @@ export async function bootSqliteAgent(config = {}) {
         }
 
         // T35 tier 1 (the only tier): same-origin search function.
+        // T35b (BYOK): if the user configured their own search key in the
+        // config modal (localStorage), send it per-request so the relay uses
+        // THE USER'S key — never the host's. The key stays in this browser
+        // and is relayed over TLS; it is never logged or stored server-side.
         // 4xx = policy error (authoritative — surface it, don't retry);
         // 5xx = no provider configured / upstream failure (surface with a
         // clear remediation message — there is no degraded fallback, the
         // old keyless endpoint is a dead stub).
-        const resp = await fetch(`/api/search?q=${encodeURIComponent(query)}`, { signal: turnSignalWith(15000) });
+        const searchCfg = loadSearchConfig();
+        const searchHeaders = {};
+        if (searchCfg) {
+          searchHeaders['X-Search-Provider'] = searchCfg.provider;
+          searchHeaders['X-Search-Key'] = searchCfg.apiKey;
+        }
+        const resp = await fetch(`/api/search?q=${encodeURIComponent(query)}`, { headers: searchHeaders, signal: turnSignalWith(15000) });
         let data;
         try {
           data = await resp.json();

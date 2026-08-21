@@ -154,6 +154,7 @@ async function callHandler({
   origin = APP_ORIGIN,
   referer = null,
   ip = null,
+  headers = {},
 } = {}) {
   const clientIp = ip || `9.9.9.${++ipCounter}`; // unique per call: isolate rate-limit buckets
   const req = {
@@ -162,6 +163,7 @@ async function callHandler({
     headers: {
       ...(origin ? { origin } : {}),
       ...(referer ? { referer } : {}),
+      ...headers,
       'x-forwarded-for': clientIp,
     },
     socket: { remoteAddress: clientIp },
@@ -220,6 +222,35 @@ test.describe('T35 — handler policy', () => {
       // The error names the exact env var to set (Exa first — it's the
       // preferred provider).
       expect(JSON.parse(res.body).error).toContain('EXA_API_KEY');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
+  test('T35b — a per-request BYOK key bypasses the no-provider path', async () => {
+    // No env keys, but the browser supplies X-Search-Provider + X-Search-Key
+    // (the user's own key). The relay must take the BYOK path, NOT answer
+    // 503 no-provider. A fake key yields 502 (rejected) online or 502
+    // (network) offline — either way, not 503.
+    const saved = {
+      EXA_API_KEY: process.env.EXA_API_KEY,
+      TAVILY_API_KEY: process.env.TAVILY_API_KEY,
+      BRAVE_API_KEY: process.env.BRAVE_API_KEY,
+      SEARCH_PROVIDER: process.env.SEARCH_PROVIDER,
+    };
+    delete process.env.EXA_API_KEY;
+    delete process.env.TAVILY_API_KEY;
+    delete process.env.BRAVE_API_KEY;
+    delete process.env.SEARCH_PROVIDER;
+    try {
+      const res = await callHandler({
+        query: 'q=hello',
+        headers: { 'x-search-provider': 'exa', 'x-search-key': 'exa-fake-key-for-test' },
+      });
+      expect(res.statusCode).not.toBe(503);
     } finally {
       for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete process.env[k];
@@ -307,6 +338,44 @@ test.describe('T35 — dev proxy contract (e2e)', () => {
   });
 });
 
+// ---- T35b — search-store (BYOK persistence, Node + localStorage mock) -------
+
+function mockLocalStorage() {
+  const m = new Map();
+  return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => { m.set(k, String(v)); },
+    removeItem: (k) => { m.delete(k); },
+  };
+}
+
+test.describe('T35b — search-store', () => {
+  test('save -> load round-trip (trims key); clear removes', async () => {
+    const { loadSearchConfig, saveSearchConfig, clearSearchConfig } = await import('../../src/search-store.js');
+    globalThis.localStorage = mockLocalStorage();
+    expect(loadSearchConfig()).toBeNull();
+    expect(saveSearchConfig({ provider: 'exa', apiKey: '  exa-key-12345 ' })).toBe(true);
+    expect(loadSearchConfig()).toEqual({ provider: 'exa', apiKey: 'exa-key-12345' });
+    clearSearchConfig();
+    expect(loadSearchConfig()).toBeNull();
+  });
+
+  test('rejects an unknown provider or an empty key', async () => {
+    const { loadSearchConfig, saveSearchConfig } = await import('../../src/search-store.js');
+    globalThis.localStorage = mockLocalStorage();
+    expect(saveSearchConfig({ provider: 'nope', apiKey: 'k' })).toBe(false);
+    expect(saveSearchConfig({ provider: 'exa', apiKey: '   ' })).toBe(false);
+    expect(loadSearchConfig()).toBeNull();
+  });
+
+  test('mask keeps only the last 4 chars', async () => {
+    const { maskSearchKey } = await import('../../src/search-store.js');
+    expect(maskSearchKey('exa-abcdef1234')).toBe('••••1234');
+    expect(maskSearchKey('ab')).toBe('••••');
+    expect(maskSearchKey('')).toBe('');
+  });
+});
+
 // ---- privacy regression guard ------------------------------------------------
 
 test('T35 — the dead DDG stub and third-party search middlemen are gone', () => {
@@ -316,4 +385,14 @@ test('T35 — the dead DDG stub and third-party search middlemen are gone', () =
   expect(src).not.toContain('corsproxy.io');
   expect(src).not.toContain('allorigins.win');
   expect(src).toContain('/api/search'); // the same-origin tier is in place
+});
+
+test('T35b — the BYOK key is sent per-request and never written to the brain DB', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, '../../src/harness.js'), 'utf8');
+  // The UDF forwards the user's key to the same-origin relay per-request…
+  expect(src).toContain('X-Search-Key');
+  expect(src).toContain('X-Search-Provider');
+  // …and the key is sourced from the localStorage store, not the brain DB.
+  expect(src).toContain('loadSearchConfig');
 });

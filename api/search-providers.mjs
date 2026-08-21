@@ -25,6 +25,9 @@ const TAVILY_ENDPOINT = 'https://api.tavily.com/search';
 const BRAVE_ENDPOINT = 'https://api.search.brave.com/res/v1/web/search';
 const TIMEOUT_MS = 10_000;
 
+/** Provider ids (must match src/search-store.js SEARCH_PROVIDERS). */
+export const PROVIDERS = ['exa', 'tavily', 'brave'];
+
 function withStatus(message, status) {
   const e = new Error(message);
   e.status = status;

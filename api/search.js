@@ -28,7 +28,7 @@
 //
 // RUNTIME: Node (default for Vercel functions).
 
-import { searchWeb } from './search-providers.mjs';
+import { searchWeb, PROVIDERS } from './search-providers.mjs';
 
 const APP_ORIGIN = 'https://tables.nicholaslisac.com';
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -94,15 +94,28 @@ export default async function handler(req, res) {
   if (!query) return send(res, 400, { error: 'Missing q parameter' }, 'bad-query');
   if (query.length > 400) return send(res, 400, { error: 'Query too long (max 400 chars)' }, 'bad-query');
 
-  // 4. Search upstream (provider chosen by key presence; SEARCH_PROVIDER
-  //    overrides). Keys are server-side only — never exposed to the client.
-  try {
-    const { provider, results } = await searchWeb(query, {
+  // 4. Search upstream.
+  //    T35b (BYOK): the browser may send X-Search-Provider + X-Search-Key —
+  //    the USER's own key from their config modal. When present they WIN over
+  //    any host env key: each user brings their own key, so the host operator
+  //    never has to (or should) share theirs. The key is used in-memory for
+  //    this request only — never logged, never stored.
+  //    No per-request key -> fall back to host env keys (optional default).
+  const reqProvider = String(req.headers['x-search-provider'] || '').toLowerCase();
+  const reqKey = String(req.headers['x-search-key'] || '').trim();
+  let keys;
+  if (reqKey && PROVIDERS.includes(reqProvider)) {
+    keys = { [reqProvider + 'Key']: reqKey, provider: reqProvider };
+  } else {
+    keys = {
       exaKey: process.env.EXA_API_KEY,
       tavilyKey: process.env.TAVILY_API_KEY,
       braveKey: process.env.BRAVE_API_KEY,
       provider: process.env.SEARCH_PROVIDER,
-    });
+    };
+  }
+  try {
+    const { provider, results } = await searchWeb(query, keys);
     return send(res, 200, { query, provider, results });
   } catch (e) {
     const status = e.status === 503 ? 503 : e.status === 429 ? 429 : 502;
