@@ -1048,7 +1048,14 @@ export async function bootSqliteAgent(config = {}) {
     }
   );
 
-  // 7. Register async UDF: search_web (web search via DuckDuckGo)
+  // 7. Register async UDF: search_web (T35: same-origin search proxy)
+  //
+  // T35: the old DuckDuckGo Instant Answer endpoint was a deprecated stub
+  // (verified 2026-08-21: empty for every query, meta.id="just_another_test"),
+  // so search silently returned zero results. Search now goes through the
+  // same-origin /api/search function (Vercel: api/search.js, dev: the vite
+  // middleware) which calls Brave Search server-side — the API key never
+  // reaches the browser, and no third-party proxy is involved.
   await sqlite3.create_function(
     db, 'search_web', 1, SQLITE_UTF8, null,
     async (context, args) => {
@@ -1064,28 +1071,32 @@ export async function bootSqliteAgent(config = {}) {
           sqlite3.result_text(context, JSON.stringify(res));
           return;
         }
-        const searchUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1`;
-        const resp = await fetch(searchUrl, { headers: { 'Accept': 'application/json' }, signal: turnSignalWith(15000) });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        const results = [];
-        if (data.RelatedTopics) {
-          for (const topic of data.RelatedTopics.slice(0, 8)) {
-            if (topic.Text && topic.FirstURL) {
-              results.push({ title: topic.Text.split('. ')[0] || topic.Text.slice(0, 80), url: topic.FirstURL, snippet: topic.Text.slice(0, 200) });
-            } else if (topic.Topics) {
-              for (const sub of topic.Topics.slice(0, 3)) {
-                if (sub.Text && sub.FirstURL) {
-                  results.push({ title: sub.Text.split('. ')[0] || sub.Text.slice(0, 80), url: sub.FirstURL, snippet: sub.Text.slice(0, 200) });
-                }
-              }
-            }
-          }
+        if (query.length > 400) {
+          const res = { error: 'Search query too long (max 400 chars)' };
+          agentEventStream.emit('tool_result', { tool: 'search_web', query, error: res.error, result: res });
+          sqlite3.result_text(context, JSON.stringify(res));
+          return;
         }
-        if (data.AbstractText && data.AbstractURL) {
-          results.unshift({ title: data.Heading || query, url: data.AbstractURL, snippet: data.AbstractText.slice(0, 300) });
+
+        // T35 tier 1 (the only tier): same-origin search function.
+        // 4xx = policy error (authoritative — surface it, don't retry);
+        // 5xx = no provider configured / upstream failure (surface with a
+        // clear remediation message — there is no degraded fallback, the
+        // old keyless endpoint is a dead stub).
+        const resp = await fetch(`/api/search?q=${encodeURIComponent(query)}`, { signal: turnSignalWith(15000) });
+        let data;
+        try {
+          data = await resp.json();
+        } catch {
+          data = {};
         }
-        const payload = { query, results: results.slice(0, 10) };
+        if (!resp.ok) {
+          // The function's error body is already actionable (it names the
+          // exact env var to set), so surface it verbatim.
+          throw new Error(`Search unavailable (${resp.status}: ${data.error || resp.statusText})`);
+        }
+        if (!Array.isArray(data.results)) throw new Error('Search returned a malformed response');
+        const payload = { query, provider: data.provider || 'unknown', results: data.results.slice(0, 10) };
 
         // T16: auto-ingest — one corpus document per result (the derived
         // index is app state; a corpus failure must not break the tool

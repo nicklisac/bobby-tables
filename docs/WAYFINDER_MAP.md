@@ -103,6 +103,8 @@ graph TD
     T10[Ticket 10: Cartridge Import / Export - DONE]
     T16[Ticket 16: In-Browser Full-Text Search FTS5 - DONE]
     T16 --> T34[Ticket 34: Hosted Webfetch — Same-Origin Fetch Proxy (BUG-022)]
+    T16 --> T35[Ticket 35: Web Search — Same-Origin Search Proxy (BUG-023)]
+    T34 --> T35
     T21[Ticket 21: Protected-Tables Boundary - DONE]
     T13 --> T12
     T12 --> T22[Ticket 22: Reference Integrity for Dashboard Cards]
@@ -120,7 +122,7 @@ graph TD
     classDef blocked fill:#21262d,stroke:#30363d,color:#8b949e;
 
     class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12,T13,T16,T17,T21,T24,T25,T26,T261,T262,T263,T264,T265,T27,T28,T29 done;
-    class T14,T15,T18,T19,T20,T22,T23,T30,T31,T32,T33,T34 frontier;
+    class T14,T15,T18,T19,T20,T22,T23,T30,T31,T32,T33,T34,T35 frontier;
 ```
 
 ---
@@ -903,6 +905,40 @@ graph TD
 * Optional: KV-backed global rate limit (current in-memory bucket is per function instance).
 * Residual SSRF note: DNS-rebinding TOCTOU window between resolve and fetch; Vercel's own network blocks cloud metadata from functions, bounding the blast radius.
 * One-line UI/README disclosure: "web fetches are relayed through your Tables host."
+
+* **Branch:** main (uncommitted as of 2026-08-21)
+
+---
+
+### Ticket 35: Web Search — Same-Origin Search Proxy (BUG-023)
+
+* **Label:** `wayfinder:task`
+* **Status:** 🟡 IN PROGRESS — implemented + full suite green (97 passed / 3 skipped, 2026-08-21); pending a provider key on the host (`EXA_API_KEY` preferred) + Vercel deploy + live smoke.
+* **Depends on:** T16 (owns the `search_web` toolset), T34 (same-origin proxy pattern)
+* **Question:** Why does web search return nothing, and how do we give the agent real search with the least cost and the least privacy exposure?
+
+**Symptom (user report, 2026-08-21):** "search is not really great."
+
+**Root cause:** `search_web` called the DuckDuckGo **Instant Answer** API (`api.duckduckgo.com`), which is not a search engine — it's a Wikipedia-style entity-abstract lookup, and it is now a **deprecated stub**. Verified 2026-08-21: it returns empty results for *every* query (even "capital of France"), `meta.id = "just_another_test"`. The UDF treated the empty `results` array as success, so the agent's search **silently returned zero hits**. The HTML endpoint (`html.duckduckgo.com/html/`) was also probed and bot-challenges datacenter IPs (HTTP 202 anomaly page), so keyless server-side scraping is not viable.
+
+**Fix (implemented 2026-08-21):**
+1. **`api/search-providers.mjs`** — shared, provider-agnostic search client (pure Node, zero deps). Three providers, all contracts verified 2026-08-21:
+   * **Exa** — `POST https://api.exa.ai/search`, `x-api-key` auth, `type=auto`, `contents={highlights, text≤600}`. Paid plan (user's choice — preferred provider). `402` = credits exhausted.
+   * **Tavily** — `POST https://api.tavily.com/search`, Bearer auth, `basic` depth = 1 credit. **Free: 1,000 credits/month, no credit card**, resets on the 1st. `432/433` = quota exhausted.
+   * **Brave** — `GET …/res/v1/web/search`, `X-Subscription-Token` auth. **Note: the old 2,000/month free tier is gone** — now $5/1,000 requests with $5 free credits monthly (≈1,000 searches) and a credit-card requirement.
+   Each normalizes to `{title, url, snippet}` (Exa prefers `highlights`, falls back to `text`), truncates title→200 / snippet→400, and maps provider errors to `429` (rate/quota) or `502` (bad key/upstream).
+2. **`api/search.js`** — Vercel function (sibling of `api/fetch-proxy.js`): `GET /api/search?q=…` → `{query, provider, results}`. Same anti-abuse controls as T34 (same-site Origin/Referer gate, per-IP rate limit 10/min, 10s upstream timeout) + `X-Search-Error` marker (4xx policy / 5xx no-provider-or-upstream). **Logs nothing.** Provider auto-priority **Exa > Tavily > Brave**; `SEARCH_PROVIDER` forces one. No key → 503 naming the exact env var to set.
+3. **`vite.config.js`** — dev parity: a `/api/search` middleware with the same contract, reading keys from `process.env` or `.env`/`.env.local` (via `loadEnv`). Dev and prod are interchangeable.
+4. **`src/harness.js`** — `search_web` now calls the same-origin `/api/search` (the only tier). Non-2xx → actionable error surfaced verbatim (the function's body already names the env var). The dead DDG stub is **removed**; the T16 auto-ingest (one corpus doc per result) is unchanged and now ingests real snippets.
+5. **Tests:** `tests/specs/t35-search.spec.mjs` — 20 tests: the three normalizers (fixtures, highlight-vs-text preference, truncation, malformed tolerance), handler policy layer (method/path/origin/rate-limit/query/no-provider), live search (skipped unless a key is set), dev-proxy contract e2e (200-with-key / 503-without + 400), privacy regression guard (no `api.duckduckgo.com`, no third-party middleman). Full suite: 97 passed / 3 skipped.
+
+**Cost posture:** the user pays for Exa, so it's the default when `EXA_API_KEY` is set. Tavily is the free fallback (no card). Brave is last (card-gated). All keys are server-side env vars — never exposed to the client, never in the repo.
+
+**Follow-ups (not done):**
+* **Set the key + deploy (user):** add `EXA_API_KEY` (and optionally `TAVILY_API_KEY`) to the Vercel project env + `.env.local` for dev, redeploy, then a real `search_web` turn on the hosted site.
+* Optional: per-user provider keys (currently host-level env).
+* Optional: `time_range` / `category` passthrough for news-style queries.
+* Optional: surface `costDollars` (Exa) / `usage` (Tavily) in a debug view for quota visibility.
 
 * **Branch:** main (uncommitted as of 2026-08-21)
 

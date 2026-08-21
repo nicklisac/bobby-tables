@@ -1,4 +1,5 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
+import { searchWeb } from './api/search-providers.mjs';
 
 /**
  * Vite configuration for the Web SQL Agent.
@@ -11,7 +12,12 @@ import { defineConfig } from 'vite';
  *   Cross-Origin-Opener-Policy: same-origin
  *   Cross-Origin-Embedder-Policy: require-corp
  */
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  // T35: load .env / .env.local for the dev search proxy (BRAVE_API_KEY).
+  // loadEnv with an empty prefix loads ALL vars, not just VITE_-prefixed ones.
+  const env = loadEnv(mode, process.cwd(), '');
+
+  return {
   server: {
     port: 5174,
     headers: {
@@ -57,7 +63,42 @@ export default defineConfig({
         });
       },
     },
+    {
+      // T35 — dev parity for api/search.js (the Vercel function). Same
+      // contract: GET /api/search?q=... -> { query, provider, results } or
+      // 503 { error } when no key is configured. The key comes from
+      // process.env or .env / .env.local (BRAVE_API_KEY) — never the client.
+      name: 'search-proxy-plugin',
+      configureServer(server) {
+        server.middlewares.use('/api/search', async (req, res) => {
+          const json = (status, obj, searchError) => {
+            res.statusCode = status;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            if (searchError) res.setHeader('X-Search-Error', searchError);
+            res.end(JSON.stringify(obj));
+          };
+          try {
+            const u = new URL(req.url, 'http://localhost:5174');
+            const query = (u.searchParams.get('q') || '').trim();
+            if (!query) return json(400, { error: 'Missing q parameter' }, 'bad-query');
+            if (query.length > 400) return json(400, { error: 'Query too long (max 400 chars)' }, 'bad-query');
+            const { provider, results } = await searchWeb(query, {
+              exaKey: process.env.EXA_API_KEY || env.EXA_API_KEY,
+              tavilyKey: process.env.TAVILY_API_KEY || env.TAVILY_API_KEY,
+              braveKey: process.env.BRAVE_API_KEY || env.BRAVE_API_KEY,
+              provider: process.env.SEARCH_PROVIDER || env.SEARCH_PROVIDER,
+            });
+            return json(200, { query, provider, results });
+          } catch (e) {
+            const status = e.status === 503 ? 503 : e.status === 429 ? 429 : 502;
+            const tag = status === 503 ? 'no-provider' : status === 429 ? 'provider-rate-limited' : 'upstream-failed';
+            return json(status, { error: e.message }, tag);
+          }
+        });
+      },
+    },
   ],
   // Treat .wasm files as assets so Vite serves them correctly
   assetsInclude: ['**/*.wasm'],
+  };
 });

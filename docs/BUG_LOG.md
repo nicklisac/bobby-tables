@@ -227,6 +227,16 @@ This document tracks known issues, edge cases, and improvements to be addressed 
 
 ---
 
+### BUG-023: Web Search Silently Returns Zero Results (DuckDuckGo Instant Answer API Is a Dead Stub)
+- **Status**: **Being worked as Ticket 35 (2026-08-21)** — implemented + full suite green (97 passed / 3 skipped); pending `EXA_API_KEY` (or Tavily/Brave) on the host + Vercel deploy + live smoke. See `docs/WAYFINDER_MAP.md` ("Ticket 35: Web Search — Same-Origin Search Proxy").
+- **Reported**: User feedback (2026-08-21) — "search is not really great."
+- **Component**: `src/harness.js` (`search_web` UDF)
+- **Description**: `search_web` called the DuckDuckGo **Instant Answer** API (`api.duckduckgo.com/?q=…&format=json`). That endpoint is not a search engine — it's a Wikipedia-style entity-abstract lookup, and it is now a **deprecated stub**: verified 2026-08-21, it returns empty results for *every* query (even "capital of France"), with `meta.id = "just_another_test"`. The UDF treated an empty `results` array as success, so the agent's web search **silently returned zero hits** — no error, no signal. (The HTML endpoint `html.duckduckgo.com/html/` was also probed: it bot-challenges datacenter IPs — HTTP 202 anomaly page — so server-side scraping is not a viable keyless path.)
+- **Root Cause**: The tool depended on a keyless endpoint that had been quietly decommissioned, and the empty-but-200 response was indistinguishable from "no results."
+- **Resolution (Ticket 35)**: Search now goes through a same-origin proxy (Vercel `api/search.js` + Vite dev middleware) that calls a real search API **server-side** — the key never reaches the browser, no third-party relay. Provider-agnostic with three verified providers: **Exa** (paid, neural, preferred when `EXA_API_KEY` is set), **Tavily** (free 1,000 searches/month, no card, `TAVILY_API_KEY`), **Brave** (`BRAVE_API_KEY`; note its old free tier is gone — now $5/month credits, card required). `SEARCH_PROVIDER` forces one. No key → 503 with an actionable error naming the exact env var (the agent reports "search unavailable" instead of fake empties). The dead DDG stub is removed (privacy regression guard test enforces it).
+
+---
+
 ### Numbering note (BUG-010 / 011 / 012)
 BUG-010, BUG-011, and BUG-012 are the **Ticket 26 debugging-session bugs** (per-boot `DROP`+`RENAME` session migration; double-boot VFS corruption; the no-op commit that writes zero pages to IDB). They are tracked in `docs/archive/RETROSPECTIVE_TICKET_26.md` and `docs/TRANSACTION_RULES.md` (§5, §6) and referenced by the `persistence` / `boot-idempotency` / `vfs-contract` specs. Their `BUG_LOG.md` entries were drafted during the `sql-refactor` re-scope but stashed (see retrospective §5) and not merged, so this log jumps from BUG-009 to BUG-013. New entries continue from BUG-013 to avoid colliding with the reserved numbers.
 
