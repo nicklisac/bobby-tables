@@ -1,10 +1,11 @@
 // T35c — fetch_url: preview + pointer to the full document.
 //
-// The tool result returns a PREVIEW (first max_chars chars, default 8000) to
-// protect the context window, but the FULL page is stored in the document
-// corpus. When truncated, the result carries doc_id + full_doc_hint telling
-// the agent exactly how to pull the rest with plain SQL (no re-fetch). The
-// chat renders the result pre-compacted (a collapsed <details>, expandable).
+// The tool result returns a FIXED 8000-char PREVIEW (not agent-tunable — the
+// agent can't inflate it) to protect the context window, but the FULL page is
+// stored in the document corpus. When truncated, the result carries doc_id +
+// full_doc_hint telling the agent exactly how to pull the rest with plain SQL
+// (no re-fetch). The chat renders the result pre-compacted (collapsed
+// <details>, expandable).
 //
 // The fake fetch host never resolves, so the dev fetch-proxy 5xx's and the
 // UDF falls through to a direct browser fetch — which page.route intercepts
@@ -96,17 +97,14 @@ test.describe('T35c — fetch_url preview + full-document pointer', () => {
     expect(typeof r.doc_id, 'doc_id still set (page was ingested)').toBe('number');
   });
 
-  test('max_chars param: smaller preview, hint offset follows the cap', async ({ page }) => {
+  test('tool schema exposes no max_chars (the agent cannot inflate the preview)', async ({ page }) => {
     test.setTimeout(60_000);
-    const N = 20_000;
-    routeLongPage(page, N);
-    await runTurn(page, [tc('tc-f3', 'fetch_url', { url: `http://${HOST}/long2`, max_chars: 3000 })]);
-
-    const r = await fetchResult(page, 'tc-f3');
-    expect(r.content.length, 'preview capped at the requested 3000').toBe(3000);
-    expect(r.truncated).toBe(true);
-    expect(r.total_chars).toBeGreaterThan(3000);
-    expect(r.full_doc_hint, 'offset follows the requested cap').toContain(`SUBSTR(content, ${3000 + 1},`);
+    await seedConfig(page, seedCfg);
+    await bootPage(page);
+    const schema = await queryValue(page, `SELECT schema FROM tools WHERE name = 'fetch_url'`);
+    const props = JSON.parse(schema).function.parameters.properties;
+    expect(Object.keys(props), 'only the url parameter is exposed').toEqual(['url']);
+    expect('max_chars' in props, 'no max_chars parameter').toBe(false);
   });
 
   test('UI: fetch result is pre-compacted (collapsed <details>) and expandable', async ({ page }) => {

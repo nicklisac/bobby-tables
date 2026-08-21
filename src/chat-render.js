@@ -384,7 +384,7 @@ function renderToolContent(content, toolCallId = null, querySql = '') {
     if (parsed.content) {
       body = `<div class="fetch-url-body">${escapeHtml(parsed.content)}</div>`;
       if (parsed.truncated && parsed.doc_id != null) {
-        body += `<div class="fetch-url-more">… showing first ${Number(parsed.max_chars || 0).toLocaleString()} of ${Number(parsed.total_chars).toLocaleString()} chars — the full page is stored as document #${escapeHtml(String(parsed.doc_id))}.</div>`;
+        body += `<div class="fetch-url-more">… showing first ${Number(parsed.content.length).toLocaleString()} of ${Number(parsed.total_chars).toLocaleString()} chars — the full page is stored as document #${escapeHtml(String(parsed.doc_id))}.</div>`;
       }
     }
     return `

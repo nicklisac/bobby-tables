@@ -26,10 +26,10 @@ import { upsertDocument, searchDocuments } from './documents.js';
 import { loadSearchConfig } from './search-store.js';
 
 // T35c: fetch_url truncation bounds. The tool RESULT (what enters the LLM
-// context) is capped at MAX_FETCH_DISPLAY by default; the AI may raise it up
-// to MAX_FETCH_INGEST by passing max_chars. The CORPUS ingest always keeps up
-// to MAX_FETCH_INGEST so search_documents can find the whole page, not just
-// the returned slice.
+// context) is a fixed PREVIEW of MAX_FETCH_DISPLAY chars — deliberately not
+// agent-tunable, so it can't be inflated to dump a whole page into context.
+// The CORPUS ingest keeps up to MAX_FETCH_INGEST so search_documents can find
+// the whole page, and the agent pulls more from the stored document if needed.
 const MAX_FETCH_DISPLAY = 8000;
 const MAX_FETCH_INGEST = 100_000;
 
@@ -1152,25 +1152,21 @@ export async function bootSqliteAgent(config = {}) {
   );
 
   // 8. Register async UDF: fetch_url (with SSRF protection)
-  // T35c: optional 2nd arg max_chars — peek-then-expand. The tool RESULT is a
-  // PREVIEW capped at max_chars (default 8000) to protect the context window;
-  // the FULL page is stored in the corpus (capped at MAX_FETCH_INGEST) and the
-  // result points the agent at it (doc_id + full_doc_hint) so it can pull the
-  // rest with plain SQL — no re-fetch. max_chars still lets the agent request
-  // a bigger initial preview (varargs: fetch_url(url) or fetch_url(url, n)).
+  // T35c: the tool RESULT is a fixed PREVIEW (MAX_FETCH_DISPLAY chars) to
+  // protect the context window; the FULL page is stored in the corpus (capped
+  // at MAX_FETCH_INGEST) and the result points the agent at it (doc_id +
+  // full_doc_hint) so it can pull the rest with plain SQL — no re-fetch.
+  // Deliberately a single arg (NO max_chars): the agent can't inflate the
+  // preview, which keeps tool calling simple and stops it dumping a huge page
+  // into context. It reads `truncated` + `total_chars` and pulls more from the
+  // stored document if it needs to.
   await sqlite3.create_function(
-    db, 'fetch_url', -1, SQLITE_UTF8, null,
+    db, 'fetch_url', 1, SQLITE_UTF8, null,
     async (context, args) => {
       const url = sqlite3.value_text(args[0]);
-      const maxCharsArg = args.length > 1 ? sqlite3.value_text(args[1]) : null;
-      let maxChars = MAX_FETCH_DISPLAY;
-      if (maxCharsArg != null && String(maxCharsArg).trim() !== '') {
-        const n = Math.floor(Number(maxCharsArg));
-        if (Number.isFinite(n) && n > 0) maxChars = Math.min(n, MAX_FETCH_INGEST);
-      }
       agentEventStream.emit('tool_call', {
         name: 'fetch_url',
-        arguments: { url, ...(maxChars !== MAX_FETCH_DISPLAY ? { max_chars: maxChars } : {}) },
+        arguments: { url },
       });
       try {
         if (!url) {
@@ -1301,8 +1297,8 @@ export async function bootSqliteAgent(config = {}) {
           console.warn('[fetch_url] T16 auto-ingest failed (non-fatal):', e.message);
         }
 
-        const preview = fullText.slice(0, maxChars);
-        const truncated = fullText.length > maxChars;
+        const preview = fullText.slice(0, MAX_FETCH_DISPLAY);
+        const truncated = fullText.length > MAX_FETCH_DISPLAY;
 
         // T35c: if we returned only a slice, tell the agent where the full page
         // lives and exactly how to pull the rest — plain SQL against the corpus
@@ -1310,9 +1306,9 @@ export async function bootSqliteAgent(config = {}) {
         let fullDocHint = null;
         if (truncated && docId != null) {
           fullDocHint =
-            `Preview: first ${maxChars.toLocaleString()} of ${fullText.length.toLocaleString()} characters. ` +
+            `Preview: first ${MAX_FETCH_DISPLAY.toLocaleString()} of ${fullText.length.toLocaleString()} characters. ` +
             `The full page is stored as document #${docId}. To read the rest WITHOUT re-fetching, ` +
-            `run: SELECT SUBSTR(content, ${maxChars + 1}, 5000) FROM documents WHERE id = ${docId}; ` +
+            `run: SELECT SUBSTR(content, ${MAX_FETCH_DISPLAY + 1}, 5000) FROM documents WHERE id = ${docId}; ` +
             `(SUBSTR offset is 1-based; LENGTH(content) gives the total). Or search it: search_documents('your terms').`;
         }
 
@@ -1326,7 +1322,6 @@ export async function bootSqliteAgent(config = {}) {
           // mis-flagged markup-heavy pages and gave the AI no way to expand.)
           truncated,
           total_chars: fullText.length,
-          max_chars: maxChars,
           ...(docId != null ? { doc_id: docId } : {}),
           ...(fullDocHint ? { full_doc_hint: fullDocHint } : {}),
         };

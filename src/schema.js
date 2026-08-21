@@ -115,7 +115,7 @@ export async function migrateSystemPrompt(sqlite3, db) {
 // fresh-DB seed (below) and migrateToolsTable (existing-DB upsert), so the two
 // never drift. Must contain NO single quotes — it is inlined into a
 // single-quoted SQL string in the seed (SQLite escapes quotes with '', not \').
-const FETCH_URL_TOOL_SCHEMA = '{"type":"function","function":{"name":"fetch_url","description":"Fetch a web URL and return a text preview of the page (first max_chars characters, default 8000). The ENTIRE page is also stored in the document corpus; when truncated is true the result includes doc_id and a full_doc_hint explaining how to read the rest WITHOUT re-fetching: run SELECT SUBSTR(content, <offset>, <len>) FROM documents WHERE id = <doc_id>; (offset is 1-based) or use the search_documents tool with your search terms. Prefer pulling from the stored document over re-calling fetch_url.","parameters":{"type":"object","properties":{"url":{"type":"string","description":"The absolute HTTP/HTTPS URL to fetch"},"max_chars":{"type":"integer","description":"Optional. Maximum characters of the preview to return. Default 8000, max 100000. The full page is stored regardless; raise this only if you want a bigger initial preview."}},"required":["url"]}}}';
+const FETCH_URL_TOOL_SCHEMA = '{"type":"function","function":{"name":"fetch_url","description":"Fetch a web URL and return a text preview of the page (the first 8000 characters). The ENTIRE page is also stored in the document corpus; when truncated is true the result includes doc_id and a full_doc_hint explaining how to read the rest WITHOUT re-fetching: run SELECT SUBSTR(content, <offset>, <len>) FROM documents WHERE id = <doc_id>; (offset is 1-based) or use the search_documents tool with your search terms. Prefer pulling from the stored document over re-calling fetch_url.","parameters":{"type":"object","properties":{"url":{"type":"string","description":"The absolute HTTP/HTTPS URL to fetch"}},"required":["url"]}}}';
 
 export const SCHEMA_SQL = `
 -- Enable foreign keys
@@ -839,13 +839,9 @@ BEGIN
                     json_extract(tc.value, '$.function.arguments.query'),
                     json_extract(json_extract(tc.value, '$.function.arguments'), '$.query')))
             WHEN 'fetch_url' THEN
-                fetch_url(
-                    COALESCE(
-                        json_extract(tc.value, '$.function.arguments.url'),
-                        json_extract(json_extract(tc.value, '$.function.arguments'), '$.url')),
-                    COALESCE(
-                        json_extract(tc.value, '$.function.arguments.max_chars'),
-                        json_extract(json_extract(tc.value, '$.function.arguments'), '$.max_chars')))
+                fetch_url(COALESCE(
+                    json_extract(tc.value, '$.function.arguments.url'),
+                    json_extract(json_extract(tc.value, '$.function.arguments'), '$.url')))
             WHEN 'materialize' THEN
                 materialize(
                     COALESCE(
@@ -1702,8 +1698,8 @@ export async function migrateToolsTable(sqlite3, db) {
     console.warn(`[schema] Malformed tools row '${name}' — deleting so boot re-seeds it (T16 repair)`);
     await execParams(sqlite3, db, `DELETE FROM tools WHERE name = ?`, [name]);
   }
-  // T35c: the fetch_url tool gained a max_chars param + a full-document pointer
-  // (preview + pull-the-rest-from-the-corpus). Existing brains keep the old
+  // T35c: the fetch_url tool now returns a fixed preview + a full-document
+  // pointer (pull-the-rest-from-the-corpus). Existing brains keep the old
   // description because the seed is INSERT OR IGNORE — refresh it here so the
   // agent in a returning visitor's brain learns the new pattern.
   await execParams(sqlite3, db,
