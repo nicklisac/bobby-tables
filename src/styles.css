@@ -1780,39 +1780,70 @@ a.search-result-title:hover { text-decoration: underline; text-underline-offset:
 
 /* ── T29: fetch_url preview polish ───────────────────────────── */
 
-.fetch-url-preview {
-  border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  padding: 0.5rem 0.6rem;
+/* T35c: fetch_url result — pre-compacted (collapsed to a one-line summary by
+   default), expandable to the page text. Same <details> pattern as the
+   tool-call chip, so a big fetch doesn't dominate the chat. */
+.fetch-url-result {
   background: var(--bg-surface);
-}
-.fetch-url-title {
+  border: 1px solid var(--border-default);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  padding: 0.35rem 0.6rem;
   font-family: var(--font-sans);
   font-size: 0.78rem;
-  color: var(--text-primary);
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.2rem;
+  margin-top: 0.35rem;
 }
-.fetch-url-title a {
+.fetch-url-result summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  list-style: none;
+  color: var(--text-primary);
+  user-select: none;
+}
+.fetch-url-result summary::-webkit-details-marker { display: none; }
+.fetch-url-chevron {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  flex-shrink: 0;
+}
+.fetch-url-result[open] .fetch-url-chevron { transform: rotate(90deg); }
+.fetch-url-icon { display: inline-flex; color: var(--accent); flex-shrink: 0; }
+.fetch-url-result summary a {
   color: var(--accent);
   text-decoration: none;
   font-family: var(--font-mono);
   font-size: 0.7rem;
   word-break: break-all;
 }
-.fetch-url-title a:hover { text-decoration: underline; }
+.fetch-url-result summary a:hover { text-decoration: underline; }
+.fetch-url-meta {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+}
 .fetch-url-body {
   margin-top: 0.4rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border-subtle);
   font-family: var(--font-sans);
   font-size: 0.74rem;
   line-height: 1.55;
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 160px;
+  max-height: 320px;
   overflow-y: auto;
+}
+.fetch-url-more {
+  margin-top: 0.35rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 /* ── T29: tool text / json dump (previously unstyled) ────────── */

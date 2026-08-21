@@ -371,9 +371,23 @@ function renderToolContent(content, toolCallId = null, querySql = '') {
     return html;
   }
 
-  // 3. Fetch URL preview: { url, status, title, content }
+  // 3. Fetch URL preview: { url, status, title, content, truncated, total_chars,
+  //    doc_id, full_doc_hint }. T35c: pre-compacted — collapsed to a one-line
+  //    summary by default, expandable to the page text (same <details> pattern
+  //    as the tool-call chip), so a big fetch doesn't dominate the chat.
   if (parsed && parsed.url && (parsed.content !== undefined || parsed.title !== undefined)) {
-    let html = `
+    const status = parsed.status != null ? `· ${escapeHtml(String(parsed.status))}` : '';
+    const charCount = parsed.total_chars != null ? `· ${Number(parsed.total_chars).toLocaleString()} chars` : '';
+    const docBadge = (parsed.truncated && parsed.doc_id != null) ? `· full doc #${escapeHtml(String(parsed.doc_id))}` : '';
+    const summaryMeta = [status, charCount, docBadge].filter(Boolean).join(' ');
+    let body = '';
+    if (parsed.content) {
+      body = `<div class="fetch-url-body">${escapeHtml(parsed.content)}</div>`;
+      if (parsed.truncated && parsed.doc_id != null) {
+        body += `<div class="fetch-url-more">… showing first ${Number(parsed.max_chars || 0).toLocaleString()} of ${Number(parsed.total_chars).toLocaleString()} chars — the full page is stored as document #${escapeHtml(String(parsed.doc_id))}.</div>`;
+      }
+    }
+    return `
       <div class="draggable-chat-asset" draggable="true" data-asset-type="fetch_url" data-tool-call-id="${escapeHtml(toolCallId || '')}" data-title="Page: ${escapeHtml(parsed.title || parsed.url)}">
         <div class="chat-asset-actions">
           <div class="drag-pin-badge" title="Drag to Dashboard to materialize & pin">
@@ -383,14 +397,18 @@ function renderToolContent(content, toolCallId = null, querySql = '') {
             <span class="btn-bracket">]</span>
           </div>
         </div>
-        <div class="fetch-url-preview">`;
-    html += `<div class="fetch-url-title"><strong>${escapeHtml(parsed.title || 'Fetched Page')}</strong> &middot; <a href="${escapeHtml(parsed.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(parsed.url)} ${ICONS.externalLink({ size: 11 })}</a></div>`;
-    if (parsed.content) {
-      const preview = parsed.content.length > 600 ? parsed.content.slice(0, 600) + '…' : parsed.content;
-      html += `<div class="fetch-url-body">${escapeHtml(preview)}</div>`;
-    }
-    html += '</div></div>';
-    return html;
+        <details class="fetch-url-result">
+          <summary>
+            <span class="fetch-url-chevron">▸</span>
+            <span class="fetch-url-icon">${ICONS.link({ size: 12 })}</span>
+            <strong>${escapeHtml(parsed.title || 'Fetched Page')}</strong>
+            <a href="${escapeHtml(parsed.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(parsed.url)} ${ICONS.externalLink({ size: 11 })}</a>
+            ${summaryMeta ? `<span class="fetch-url-meta">${summaryMeta}</span>` : ''}
+          </summary>
+          ${body}
+        </details>
+      </div>
+    `;
   }
 
   // 4. Materialize result: { materialized: true, table, columns, row_count, source }

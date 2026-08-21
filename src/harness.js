@@ -25,6 +25,14 @@ import { materializeToolResult } from './materialize.js';
 import { upsertDocument, searchDocuments } from './documents.js';
 import { loadSearchConfig } from './search-store.js';
 
+// T35c: fetch_url truncation bounds. The tool RESULT (what enters the LLM
+// context) is capped at MAX_FETCH_DISPLAY by default; the AI may raise it up
+// to MAX_FETCH_INGEST by passing max_chars. The CORPUS ingest always keeps up
+// to MAX_FETCH_INGEST so search_documents can find the whole page, not just
+// the returned slice.
+const MAX_FETCH_DISPLAY = 8000;
+const MAX_FETCH_INGEST = 100_000;
+
 /**
  * Live Event Stream for real-time UI streaming (tokens, tool execution, ReAct steps).
  */
@@ -1144,13 +1152,25 @@ export async function bootSqliteAgent(config = {}) {
   );
 
   // 8. Register async UDF: fetch_url (with SSRF protection)
+  // T35c: optional 2nd arg max_chars — peek-then-expand. The tool RESULT is a
+  // PREVIEW capped at max_chars (default 8000) to protect the context window;
+  // the FULL page is stored in the corpus (capped at MAX_FETCH_INGEST) and the
+  // result points the agent at it (doc_id + full_doc_hint) so it can pull the
+  // rest with plain SQL — no re-fetch. max_chars still lets the agent request
+  // a bigger initial preview (varargs: fetch_url(url) or fetch_url(url, n)).
   await sqlite3.create_function(
-    db, 'fetch_url', 1, SQLITE_UTF8, null,
+    db, 'fetch_url', -1, SQLITE_UTF8, null,
     async (context, args) => {
       const url = sqlite3.value_text(args[0]);
+      const maxCharsArg = args.length > 1 ? sqlite3.value_text(args[1]) : null;
+      let maxChars = MAX_FETCH_DISPLAY;
+      if (maxCharsArg != null && String(maxCharsArg).trim() !== '') {
+        const n = Math.floor(Number(maxCharsArg));
+        if (Number.isFinite(n) && n > 0) maxChars = Math.min(n, MAX_FETCH_INGEST);
+      }
       agentEventStream.emit('tool_call', {
         name: 'fetch_url',
-        arguments: { url },
+        arguments: { url, ...(maxChars !== MAX_FETCH_DISPLAY ? { max_chars: maxChars } : {}) },
       });
       try {
         if (!url) {
@@ -1252,25 +1272,64 @@ export async function bootSqliteAgent(config = {}) {
         //    actionable error instead.
         if (!fetched) throw new Error('Fetch blocked by CORS and no fetch proxy is available for this deployment (deploy api/fetch-proxy.js or set a proxy URL in localStorage["sql-agent-fetch-proxy"])');
 
-        const text = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8000);
-        const payload = { url, status: respStatus, title: html.match(/<title>(.*?)<\/title>/i)?.[1] || '(no title)', content: text, truncated: html.length > 8000 };
+        // T35c: strip to plain text ONCE (no slice here). The tool result
+        // returns a PREVIEW (capped at maxChars) to protect the context
+        // window; the FULL page is stored in the document corpus, and the
+        // result points the agent at it so it can pull any slice with plain
+        // SQL (no re-fetch) instead of re-downloading the page.
+        const fullText = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        const title = html.match(/<title>(.*?)<\/title>/i)?.[1] || '(no title)';
 
-        // T16: auto-ingest — the fetched page becomes a corpus document
-        // (upsert on URL: re-fetching refreshes it). Non-fatal by design.
+        // T16/T35c: auto-ingest the FULL page FIRST (upsert on URL: re-fetching
+        // refreshes it) so we can hand the agent the corpus doc id. The ingest
+        // keeps the whole page (capped at MAX_FETCH_INGEST) so FTS search covers
+        // it, not just the returned slice. Non-fatal by design.
+        let docId = null;
         try {
-          if (text) {
-            await upsertDocument(sqlite3, db, {
+          if (fullText) {
+            const ing = await upsertDocument(sqlite3, db, {
               source: 'web-fetch',
               sourceRef: url,
               // A whitespace-only <title> would fail upsertDocument's
               // non-empty check; fall back to the URL.
-              title: (payload.title && payload.title.trim()) || url,
-              content: text,
+              title: title.trim() || url,
+              content: fullText.slice(0, MAX_FETCH_INGEST),
             });
+            docId = ing && ing.id != null ? ing.id : null;
           }
         } catch (e) {
           console.warn('[fetch_url] T16 auto-ingest failed (non-fatal):', e.message);
         }
+
+        const preview = fullText.slice(0, maxChars);
+        const truncated = fullText.length > maxChars;
+
+        // T35c: if we returned only a slice, tell the agent where the full page
+        // lives and exactly how to pull the rest — plain SQL against the corpus
+        // (read-only, so it is allowed) or FTS search. No re-fetch needed.
+        let fullDocHint = null;
+        if (truncated && docId != null) {
+          fullDocHint =
+            `Preview: first ${maxChars.toLocaleString()} of ${fullText.length.toLocaleString()} characters. ` +
+            `The full page is stored as document #${docId}. To read the rest WITHOUT re-fetching, ` +
+            `run: SELECT SUBSTR(content, ${maxChars + 1}, 5000) FROM documents WHERE id = ${docId}; ` +
+            `(SUBSTR offset is 1-based; LENGTH(content) gives the total). Or search it: search_documents('your terms').`;
+        }
+
+        const payload = {
+          url,
+          status: respStatus,
+          title,
+          content: preview,
+          // Accurate flag: was the stripped text longer than what we returned?
+          // (The old code compared RAW html length to the slice cap, which
+          // mis-flagged markup-heavy pages and gave the AI no way to expand.)
+          truncated,
+          total_chars: fullText.length,
+          max_chars: maxChars,
+          ...(docId != null ? { doc_id: docId } : {}),
+          ...(fullDocHint ? { full_doc_hint: fullDocHint } : {}),
+        };
 
         agentEventStream.emit('tool_result', {
           tool: 'fetch_url',

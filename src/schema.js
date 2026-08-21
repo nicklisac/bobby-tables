@@ -44,7 +44,7 @@ export {
 // databases pick up the new prompt on next load — the same self-heal
 // pattern the drop+create triggers use).
 // =====================================================================
-export const SYSTEM_PROMPT_VERSION = 2;
+export const SYSTEM_PROMPT_VERSION = 3;
 
 export const SYSTEM_PROMPT = `You are Tables. You live inside a SQLite database in the user's browser.
 The tables are your body: your memory is in \`messages\`, your tools are functions you call,
@@ -59,8 +59,11 @@ How you work:
   own memory instead of guessing or making the user repeat it.
 - A view is a saved way of seeing the data. If the user asks the same shape of question twice,
   offer to make it a view.
-- Fetched pages and web search results are automatically stored as searchable documents.
-  Use search_documents to find them later, and ingest_document to store any text as a document.
+- Fetched pages and web search results are automatically stored as searchable documents (the
+  \`documents\` table). Use search_documents to find them later, and ingest_document to store any
+  text as a document. You can also read a document's full text directly with SQL — e.g.
+  \`SELECT SUBSTR(content, 1, 5000) FROM documents WHERE id = 123;\` — so a fetched page you only
+  previewed can be read in slices without re-fetching it.
 - Writes are reversible — the user can rewind any turn — but you still only write what the task needs.
 
 Voice:
@@ -108,6 +111,12 @@ export async function migrateSystemPrompt(sqlite3, db) {
     [SYSTEM_PROMPT]);
 }
 
+// T35c: single source of truth for the fetch_url tool schema. Used both by the
+// fresh-DB seed (below) and migrateToolsTable (existing-DB upsert), so the two
+// never drift. Must contain NO single quotes — it is inlined into a
+// single-quoted SQL string in the seed (SQLite escapes quotes with '', not \').
+const FETCH_URL_TOOL_SCHEMA = '{"type":"function","function":{"name":"fetch_url","description":"Fetch a web URL and return a text preview of the page (first max_chars characters, default 8000). The ENTIRE page is also stored in the document corpus; when truncated is true the result includes doc_id and a full_doc_hint explaining how to read the rest WITHOUT re-fetching: run SELECT SUBSTR(content, <offset>, <len>) FROM documents WHERE id = <doc_id>; (offset is 1-based) or use the search_documents tool with your search terms. Prefer pulling from the stored document over re-calling fetch_url.","parameters":{"type":"object","properties":{"url":{"type":"string","description":"The absolute HTTP/HTTPS URL to fetch"},"max_chars":{"type":"integer","description":"Optional. Maximum characters of the preview to return. Default 8000, max 100000. The full page is stored regardless; raise this only if you want a bigger initial preview."}},"required":["url"]}}}';
+
 export const SCHEMA_SQL = `
 -- Enable foreign keys
 PRAGMA foreign_keys = ON;
@@ -152,7 +161,7 @@ INSERT OR IGNORE INTO tools (name, schema) VALUES
     '{"type":"function","function":{"name":"search_web","description":"Search the web for relevant information. Returns titles, URLs, and snippets.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"The search query string"}},"required":["query"]}}}'
   ),
   ('fetch_url',
-    '{"type":"function","function":{"name":"fetch_url","description":"Fetch the content of a web URL. Returns the page text content.","parameters":{"type":"object","properties":{"url":{"type":"string","description":"The absolute HTTP/HTTPS URL to fetch"}},"required":["url"]}}}'
+    '${FETCH_URL_TOOL_SCHEMA}'
   ),
   ('materialize',
     '{"type":"function","function":{"name":"materialize","description":"Materialize raw JSON output from a prior tool call into a permanent, queryable SQLite table. Useful for storing web search results, fetched web page data, or external API responses so they can be queried with SQL.","parameters":{"type":"object","properties":{"table_name":{"type":"string","description":"The name for the new SQLite table to create (must be a valid identifier that does not already exist)"},"tool_call_id":{"type":"string","description":"Optional: the specific tool_call_id whose result should be materialized. If omitted, uses the most recent tool output in the session."}},"required":["table_name"]}}}'
@@ -830,9 +839,13 @@ BEGIN
                     json_extract(tc.value, '$.function.arguments.query'),
                     json_extract(json_extract(tc.value, '$.function.arguments'), '$.query')))
             WHEN 'fetch_url' THEN
-                fetch_url(COALESCE(
-                    json_extract(tc.value, '$.function.arguments.url'),
-                    json_extract(json_extract(tc.value, '$.function.arguments'), '$.url')))
+                fetch_url(
+                    COALESCE(
+                        json_extract(tc.value, '$.function.arguments.url'),
+                        json_extract(json_extract(tc.value, '$.function.arguments'), '$.url')),
+                    COALESCE(
+                        json_extract(tc.value, '$.function.arguments.max_chars'),
+                        json_extract(json_extract(tc.value, '$.function.arguments'), '$.max_chars')))
             WHEN 'materialize' THEN
                 materialize(
                     COALESCE(
@@ -1689,6 +1702,14 @@ export async function migrateToolsTable(sqlite3, db) {
     console.warn(`[schema] Malformed tools row '${name}' — deleting so boot re-seeds it (T16 repair)`);
     await execParams(sqlite3, db, `DELETE FROM tools WHERE name = ?`, [name]);
   }
+  // T35c: the fetch_url tool gained a max_chars param + a full-document pointer
+  // (preview + pull-the-rest-from-the-corpus). Existing brains keep the old
+  // description because the seed is INSERT OR IGNORE — refresh it here so the
+  // agent in a returning visitor's brain learns the new pattern.
+  await execParams(sqlite3, db,
+    `INSERT INTO tools (name, schema) VALUES ('fetch_url', ?)
+     ON CONFLICT(name) DO UPDATE SET schema = excluded.schema`,
+    [FETCH_URL_TOOL_SCHEMA]);
 }
 
 export async function migrateDashboardCardsTable(sqlite3, db) {

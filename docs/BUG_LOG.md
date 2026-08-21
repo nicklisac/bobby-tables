@@ -237,6 +237,16 @@ This document tracks known issues, edge cases, and improvements to be addressed 
 
 ---
 
+### BUG-024: fetch_url Hard-Truncates to 8000 Chars with No Escape Hatch; `truncated` Flag Mis-flagged; Corpus Stores Only the Slice
+- **Status**: **Resolved (T35c, 2026-08-21)** — implemented + full suite green (106 passed / 3 skipped). See `docs/WAYFINDER_MAP.md` ("Ticket 35c: fetch_url — Preview + Full-Document Pointer").
+- **Reported**: User feedback (2026-08-21) — "Why does our web fetch auto-truncate? That is dumb." + design proposal (always show a preview, but store the whole doc; when truncated, tell the agent where the full doc is and how to pull it, instead of dumping the whole page into context).
+- **Component**: `src/harness.js` (`fetch_url` UDF), `src/schema.js` (tool schema + trigger + system prompt), `src/chat-render.js` + `src/styles.css` (result rendering)
+- **Description**: `fetch_url` stripped the page and hard-sliced to 8000 chars with no parameter to control it (UDF arity 1). Three problems: (1) the `truncated` flag was `html.length > 8000` — computed from the RAW HTML length while the slice was applied to the stripped text, so markup-heavy pages were mis-flagged; (2) the agent had no way to read past 8000 — no re-fetch param, and the T16 auto-ingest stored only that same 8000-char slice, so `search_documents`/FTS could not find content beyond it; (3) the tool result always rendered expanded and dominated the chat.
+- **Root Cause**: The cap was a fixed context-window guard with no escape hatch, and the "stored" copy was the same truncated slice rather than the full page.
+- **Resolution (T35c)**: `fetch_url(url, max_chars?)` (varargs; default preview 8000, max 100000). The full page is ingested into the `documents` corpus FIRST (so the agent gets the corpus `doc_id`); the tool result returns a preview + accurate `truncated`/`total_chars` + a `full_doc_hint` telling the agent exactly how to pull the rest with plain SQL (`SELECT SUBSTR(content, <offset>, <len>) FROM documents WHERE id = <doc_id>;` — read-only, so allowed by the T21 boundary) or `search_documents`. The agent can now read the whole page in slices without re-fetching. The chat renders the result pre-compacted (collapsed `<details>`, expandable on click, matching the tool-call chip pattern). Tool schema + system prompt updated (SYSTEM_PROMPT_VERSION 3) and refreshed for existing brains via a `migrateToolsTable` upsert.
+
+---
+
 ### Numbering note (BUG-010 / 011 / 012)
 BUG-010, BUG-011, and BUG-012 are the **Ticket 26 debugging-session bugs** (per-boot `DROP`+`RENAME` session migration; double-boot VFS corruption; the no-op commit that writes zero pages to IDB). They are tracked in `docs/archive/RETROSPECTIVE_TICKET_26.md` and `docs/TRANSACTION_RULES.md` (§5, §6) and referenced by the `persistence` / `boot-idempotency` / `vfs-contract` specs. Their `BUG_LOG.md` entries were drafted during the `sql-refactor` re-scope but stashed (see retrospective §5) and not merged, so this log jumps from BUG-009 to BUG-013. New entries continue from BUG-013 to avoid colliding with the reserved numbers.
 
